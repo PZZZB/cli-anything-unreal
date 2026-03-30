@@ -19,8 +19,10 @@ Usage
 Script convention
 -----------------
 * The user script should assign a ``result`` variable (preferably a *dict*).
-* The runner automatically appends capture logic that serialises ``result``
-  to a temporary JSON file.
+* The runner wraps the user code in a try/except, serialises ``result`` via
+  ``unreal.log(json.dumps(result))``, and calls
+  ``PythonScriptLibrary.ExecutePythonCommandEx`` to capture the output
+  inline — **no temp files or polling required**.
 * If ``result`` is not defined the capture block records a generic "ok" status.
 * If ``result`` is not a *dict* it is wrapped as ``{"status": "ok", "value": …}``.
 """
@@ -28,24 +30,26 @@ Script convention
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
-# ── Wrapper template that surrounds the user script ─────────────────
-# The user code is inserted at the {user_code} placeholder, wrapped in
-# a top-level try/except so that **any** exception (including syntax-
-# level import errors) is captured and written to the JSON output file
-# instead of silently disappearing (which previously caused timeouts).
-_WRAPPER_TEMPLATE = r'''# ── CLI script wrapper (injected by script_runner) ──
-import json as _cli_json, traceback as _cli_tb
+# Sentinel used in the wrapper to distinguish "result was JSON-logged" from
+# other unreal.log() calls the user script may make.
+_RESULT_MARKER = "__cli_result__:"
 
-_cli_output_path = r"{output_path}"
+# ── Wrapper template ────────────────────────────────────────────────
+# The user code is inserted at {user_code}.  The wrapper:
+#   1. Runs user code inside try/except.
+#   2. Captures the ``result`` variable (or a default).
+#   3. Logs a single marked JSON line via ``unreal.log()``.
+# The marker prefix lets the CLI-side reliably pick the result out of
+# potentially many log lines the user script may emit.
+_WRAPPER_TEMPLATE = '''\
+import json as _cli_json, traceback as _cli_tb, unreal as _cli_unreal
+
 _cli_error = None
 try:
 {indented_user_code}
@@ -53,7 +57,6 @@ try:
 except Exception as _cli_exc:
     _cli_error = _cli_exc
 
-# ── Capture result ──
 _cli_result = {{}}
 if _cli_error is not None:
     _cli_result = {{
@@ -63,20 +66,29 @@ if _cli_error is not None:
     }}
 else:
     try:
-        _cli_result = result  # noqa: F821 — may be defined in user script
+        _cli_result = result  # noqa: F821
     except NameError:
         _cli_result = {{"status": "ok", "note": "Script executed (no result variable defined)"}}
     if not isinstance(_cli_result, dict):
         _cli_result = {{"status": "ok", "value": str(_cli_result)}}
 
-with open(_cli_output_path, "w", encoding="utf-8") as _cli_f:
-    _cli_json.dump(_cli_result, _cli_f, indent=2, default=str)
+_cli_unreal.log("{marker}" + _cli_json.dumps(_cli_result, default=str))
 '''
 
 _SAVE_BLOCK = """\
-    # ── Auto-save dirty packages (injected by --save) ──
+    # ── Auto-save dirty packages without interactive dialog ──
     import unreal as _cli_unreal
-    _cli_unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)"""
+    _cli_eal = _cli_unreal.EditorAssetLibrary
+    _cli_utils = _cli_unreal.EditorLoadingAndSavingUtils
+    _cli_saved = 0
+    for _cli_pkg in list(_cli_utils.get_dirty_content_packages()) + list(_cli_utils.get_dirty_map_packages()):
+        try:
+            _cli_path = _cli_pkg.get_path_name().split('.')[0]
+            if _cli_path.startswith('/Game/'):
+                _cli_eal.save_asset(_cli_path)
+                _cli_saved += 1
+        except Exception:
+            pass"""
 
 
 # ── Public API ──────────────────────────────────────────────────────
@@ -90,10 +102,6 @@ def run_python_script(
 ) -> dict:
     """Execute a Python script file in the editor with automatic result capture.
 
-    The runner reads *script_path*, appends output-capture logic, writes a
-    temporary wrapper script, executes it via ``api.exec_python_file``, and
-    polls for the resulting JSON file.
-
     Parameters
     ----------
     api:
@@ -101,24 +109,20 @@ def run_python_script(
     script_path:
         Path to the ``.py`` file to execute.
     project_dir:
-        If given, temp files are written to ``<project_dir>/Saved/Temp``.
-        Otherwise ``%TEMP%/cli-anything-unreal`` is used.
+        Unused — kept for backwards compatibility.
     timeout:
-        Maximum seconds to wait for the script's JSON output.
+        Maximum seconds to wait for the HTTP response.
     save:
         If *True* (default), automatically save all dirty packages after
-        the script finishes (calls
-        ``EditorLoadingAndSavingUtils.save_dirty_packages``).  Has no
-        effect when nothing is dirty.
+        the script finishes.
 
     Returns
     -------
     dict
-        Parsed JSON produced by the script, or an error dict on timeout.
+        Parsed JSON produced by the script, or an error dict on failure.
     """
     code = Path(script_path).read_text(encoding="utf-8")
-    return _execute(api, code, project_dir=project_dir, timeout=timeout,
-                    label="script", save=save)
+    return _execute(api, code, timeout=timeout, save=save)
 
 
 def run_python_code(
@@ -130,9 +134,6 @@ def run_python_code(
 ) -> dict:
     """Execute a Python code string in the editor with automatic result capture.
 
-    Convenience wrapper — writes *code* to a temporary ``.py`` file and
-    delegates to the same execution pipeline as :func:`run_python_script`.
-
     Parameters
     ----------
     api:
@@ -140,9 +141,9 @@ def run_python_code(
     code:
         Python source code to execute.
     project_dir:
-        If given, temp files are written to ``<project_dir>/Saved/Temp``.
+        Unused — kept for backwards compatibility.
     timeout:
-        Maximum seconds to wait for the script's JSON output.
+        Maximum seconds to wait for the HTTP response.
     save:
         If *True* (default), automatically save all dirty packages after
         the script finishes.
@@ -150,10 +151,9 @@ def run_python_code(
     Returns
     -------
     dict
-        Parsed JSON produced by the script, or an error dict on timeout.
+        Parsed JSON produced by the script, or an error dict on failure.
     """
-    return _execute(api, code, project_dir=project_dir, timeout=timeout,
-                    label="code", save=save)
+    return _execute(api, code, timeout=timeout, save=save)
 
 
 # ── Internal helpers ────────────────────────────────────────────────
@@ -162,67 +162,42 @@ def _execute(
     api: "UEEditorAPI",
     code: str,
     *,
-    project_dir: str | None,
     timeout: float,
-    label: str,
     save: bool = True,
 ) -> dict:
-    """Core execution logic shared by *run_python_script* and *run_python_code*."""
+    """Core execution logic shared by *run_python_script* and *run_python_code*.
 
-    # 1. Determine temp directory
-    if project_dir:
-        temp_dir = Path(project_dir) / "Saved" / "Temp"
-    else:
-        temp_dir = Path(tempfile.gettempdir()) / "cli-anything-unreal"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
-    # 2. Unique file names
-    ts = int(time.time() * 1000)
-    pid = os.getpid()
-    output_path = str(temp_dir / f"_run_{pid}_{ts}.json")
-    wrapper_path = str(temp_dir / f"_run_{pid}_{ts}.py")
-
-    # 3. Build wrapper script: user code inside try/except + capture tail
-    #    Indent every line of user code by 4 spaces so it sits inside the
-    #    try-block of _WRAPPER_TEMPLATE.
+    Wraps *code* in the standard try/except + result-capture template,
+    executes it via ``api.exec_python_ex()`` (which calls
+    ``PythonScriptLibrary.ExecutePythonCommandEx``), and extracts the
+    JSON result from the captured ``LogOutput``.
+    """
     indented = "\n".join(
         ("    " + line) if line.strip() else line
         for line in code.splitlines()
     )
     wrapper = _WRAPPER_TEMPLATE.format(
-        output_path=output_path.replace("\\", "\\\\"),
         indented_user_code=indented,
         save_block=_SAVE_BLOCK if save else "",
+        marker=_RESULT_MARKER,
     )
 
-    Path(wrapper_path).write_text(wrapper, encoding="utf-8")
+    resp = api.exec_python_ex(wrapper, timeout=int(timeout))
 
-    try:
-        # 4. Execute inside the editor
-        api_result = api.exec_python_file(wrapper_path)
+    if "error" in resp:
+        return {"error": resp["error"]}
 
-        # 5. Poll for JSON output
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if Path(output_path).exists():
-                try:
-                    data = json.loads(
-                        Path(output_path).read_text(encoding="utf-8")
-                    )
-                    return data
-                except json.JSONDecodeError:
-                    time.sleep(0.5)
-                    continue
-            time.sleep(0.5)
-
+    if not resp.get("ReturnValue", False):
         return {
-            "error": "Script execution timed out or produced no output",
-            "api_result": api_result,
+            "error": resp.get("CommandResult", "ExecutePythonCommandEx failed"),
         }
-    finally:
-        # 6. Cleanup
-        try:
-            Path(wrapper_path).unlink(missing_ok=True)
-            Path(output_path).unlink(missing_ok=True)
-        except Exception:
-            pass
+
+    for entry in reversed(resp.get("LogOutput", [])):
+        output = entry.get("Output", "")
+        if output.startswith(_RESULT_MARKER):
+            try:
+                return json.loads(output[len(_RESULT_MARKER):])
+            except json.JSONDecodeError as exc:
+                return {"error": f"Malformed JSON result: {exc}", "raw": output}
+
+    return {"status": "ok", "note": "Script produced no marked result"}

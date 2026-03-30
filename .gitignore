@@ -16,3 +16,7 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Ad-hoc probe/test scripts (not part of the package)
+/_*.py
+/_*.txt

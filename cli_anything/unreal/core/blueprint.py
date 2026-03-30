@@ -9,12 +9,6 @@ Uses two approaches:
 2. Python script execution — For complex queries via BlueprintEditorLibrary
 """
 
-import json
-import os
-import tempfile
-import time
-from pathlib import Path
-
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
@@ -96,11 +90,6 @@ else:
     except Exception:
         pass
     result["variables"] = variables
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("BP_INFO_DONE")
 '''
 
 _SCRIPT_ADD_FUNCTION = '''
@@ -129,11 +118,6 @@ else:
             result = {{"error": "add_function_graph returned None for: " + func_name}}
     except Exception as e:
         result = {{"error": "Failed to add function graph: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("BP_ADD_FUNC_DONE")
 '''
 
 _SCRIPT_REMOVE_FUNCTION = '''
@@ -153,7 +137,7 @@ else:
         if graph is None:
             result = {{"error": "Function graph not found: " + func_name}}
         else:
-            bel.remove_function_graph(bp, graph)
+            bel.remove_function_graph(bp, func_name)
             result = {{
                 "status": "ok",
                 "action": "remove_function",
@@ -162,11 +146,6 @@ else:
             }}
     except Exception as e:
         result = {{"error": "Failed to remove function graph: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("BP_REMOVE_FUNC_DONE")
 '''
 
 _SCRIPT_ADD_VARIABLE = '''
@@ -200,11 +179,6 @@ else:
                 result = {{"error": "add_member_variable returned False for: " + var_name}}
     except Exception as e:
         result = {{"error": "Failed to add variable: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("BP_ADD_VAR_DONE")
 '''
 
 _SCRIPT_REMOVE_UNUSED_VARS = '''
@@ -228,11 +202,6 @@ else:
         }}
     except Exception as e:
         result = {{"error": "Failed to remove unused variables: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("BP_REMOVE_UNUSED_DONE")
 '''
 
 _SCRIPT_COMPILE = '''
@@ -255,11 +224,6 @@ else:
         }}
     except Exception as e:
         result = {{"error": "Failed to compile blueprint: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("BP_COMPILE_DONE")
 '''
 
 _SCRIPT_RENAME_GRAPH = '''
@@ -290,11 +254,6 @@ else:
             }}
     except Exception as e:
         result = {{"error": "Failed to rename graph: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("BP_RENAME_GRAPH_DONE")
 '''
 
 
@@ -536,64 +495,21 @@ def _exec_blueprint_script(
 ) -> dict:
     """Execute a blueprint query Python script in the editor and read results.
 
-    Generates a temp .py file, executes it via the Remote Control API,
-    then reads the output JSON file.
+    Formats *script_template* with **kwargs, then executes via
+    ``script_runner.run_python_code`` (which uses
+    ``ExecutePythonCommandEx`` under the hood).
 
     Args:
         api: Connected UEEditorAPI instance.
         script_template: Python script template with {placeholders}.
-        project_dir: Project directory for temp files.
-        timeout: Max wait time for results.
+        project_dir: Unused — kept for backwards compatibility.
+        timeout: HTTP request timeout in seconds.
         **kwargs: Template variables.
 
     Returns:
         Parsed JSON result from the script.
     """
-    # Determine temp directory
-    if project_dir:
-        temp_dir = Path(project_dir) / "Saved" / "Temp"
-    else:
-        temp_dir = Path(tempfile.gettempdir()) / "cli-anything-unreal"
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    from cli_anything.unreal.core.script_runner import run_python_code
 
-    # Create output file path
-    ts = int(time.time() * 1000)
-    output_path = str(temp_dir / f"_bp_query_{os.getpid()}_{ts}.json")
-    kwargs["output_path"] = output_path.replace("\\", "\\\\")
-
-    # Format script
     script_content = script_template.format(**kwargs)
-
-    # Write script to temp file
-    script_path = str(temp_dir / f"_bp_query_{os.getpid()}_{ts}.py")
-    Path(script_path).write_text(script_content, encoding="utf-8")
-
-    try:
-        # Execute via Remote Control API
-        result = api.exec_python_file(script_path)
-
-        # Wait for output file
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if Path(output_path).exists():
-                try:
-                    data = json.loads(
-                        Path(output_path).read_text(encoding="utf-8")
-                    )
-                    return data
-                except json.JSONDecodeError:
-                    time.sleep(0.5)
-                    continue
-            time.sleep(0.5)
-
-        return {
-            "error": "Script execution timed out or produced no output",
-            "api_result": result,
-        }
-    finally:
-        # Cleanup temp files
-        try:
-            Path(script_path).unlink(missing_ok=True)
-            Path(output_path).unlink(missing_ok=True)
-        except Exception:
-            pass
+    return run_python_code(api, script_content, timeout=timeout)

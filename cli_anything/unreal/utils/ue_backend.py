@@ -394,11 +394,52 @@ def check_remote_control_config(project_dir: str) -> dict:
             "Python script execution will fail."
         )
 
+    port = _parse_rc_port(content)
+
     return {
         "configured": len(issues) == 0,
         "issues": issues,
         "file": str(config_file),
+        "port": port,
     }
+
+
+def _parse_rc_port(ini_content: str) -> int | None:
+    """Parse RemoteControlHttpServerPort from an INI file content string.
+
+    Returns:
+        Port number (int) if found, None otherwise.
+    """
+    for line in ini_content.splitlines():
+        line = line.strip()
+        if line.startswith("RemoteControlHttpServerPort="):
+            try:
+                return int(line.split("=", 1)[1].strip())
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def read_rc_port(project_dir: str) -> int | None:
+    """Read the Remote Control HTTP port from project config.
+
+    Looks for ``RemoteControlHttpServerPort`` in
+    ``Config/DefaultRemoteControl.ini``.
+
+    Args:
+        project_dir: Path to the UE project root.
+
+    Returns:
+        Port number (int) if configured, None to use the default.
+    """
+    config_file = Path(project_dir) / "Config" / "DefaultRemoteControl.ini"
+    if not config_file.exists():
+        return None
+    try:
+        content = config_file.read_text(encoding="utf-8-sig")
+    except Exception:
+        return None
+    return _parse_rc_port(content)
 
 
 # ── Build status checks ─────────────────────────────────────────────────
@@ -783,3 +824,78 @@ def find_running_editors() -> list[dict]:
         pass
 
     return editors
+
+
+def detect_ue_dialogs() -> list[dict]:
+    """Detect modal dialogs blocking a running Unreal Editor on Windows.
+
+    Uses the Windows API (EnumWindows) to find child windows of UE
+    that look like modal dialogs (e.g., "Overwrite", "Save Changes",
+    "Warning", "Fatal Error" popups).
+
+    Returns:
+        List of dicts: [{"title": str, "hwnd": int}, ...].
+        Empty list if no dialogs found or not on Windows.
+    """
+    if sys.platform != "win32":
+        return []
+
+    import ctypes
+    import ctypes.wintypes
+
+    user32 = ctypes.windll.user32
+
+    DIALOG_KEYWORDS = [
+        "overwrite", "override", "save changes", "save asset",
+        "warning", "error", "fatal", "assertion", "missing",
+        "confirmation", "delete", "replace",
+        # Recovery / autosave
+        "autosave", "recover", "auto-save", "unsaved",
+        "crash", "restore", "unexpected shutdown",
+    ]
+
+    results: list[dict] = []
+    seen_hwnds: set[int] = set()
+
+    def _get_title(hwnd):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return ""
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        return buf.value
+
+    ue_main_windows: list[int] = []
+
+    def _enum_main_windows(hwnd, _lparam):
+        title = _get_title(hwnd)
+        if "UnrealEditor" in title:
+            ue_main_windows.append(hwnd)
+        return True
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(
+        ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM
+    )
+    user32.EnumWindows(WNDENUMPROC(_enum_main_windows), 0)
+
+    def _enum_children(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        if hwnd in seen_hwnds:
+            return True
+        seen_hwnds.add(hwnd)
+        title = _get_title(hwnd)
+        if not title:
+            return True
+        title_lower = title.lower()
+        for kw in DIALOG_KEYWORDS:
+            if kw in title_lower:
+                results.append({"title": title, "hwnd": hwnd})
+                break
+        return True
+
+    for main_hwnd in ue_main_windows:
+        seen_hwnds.clear()
+        user32.EnumChildWindows(main_hwnd, WNDENUMPROC(_enum_children), 0)
+
+    return results

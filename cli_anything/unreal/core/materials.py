@@ -10,13 +10,11 @@ Uses two approaches:
 3. Python script execution — For complex queries not possible via REST
 """
 
-import json
-import os
-import tempfile
 import time
 from pathlib import Path
 from typing import Optional
 
+from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
@@ -38,66 +36,128 @@ else:
     }}
 
     if isinstance(mat, unreal.Material):
-        try:
-            result["blend_mode"] = str(mat.get_editor_property("blend_mode"))
-        except:
-            pass
-        try:
-            result["material_domain"] = str(mat.get_editor_property("material_domain"))
-        except:
-            pass
-        try:
-            result["two_sided"] = mat.get_editor_property("two_sided")
-        except:
-            pass
-        try:
-            result["shading_model"] = str(mat.get_editor_property("shading_model"))
-        except:
-            pass
+        for _prop in ["blend_mode", "material_domain", "two_sided", "shading_model"]:
+            try:
+                result[_prop] = str(mat.get_editor_property(_prop))
+            except:
+                pass
 
-        # Get material expressions (nodes) — use ObjectIterator (expressions property is protected in UE 5.7+)
+        mel = unreal.MaterialEditingLibrary
+
+        # ── Nodes (expressions) ── ObjectIterator because .expressions is protected in UE 5.7+
         try:
-            mat_path = mat.get_path_name()
             nodes = []
+            _expr_objs = []
             for expr in unreal.ObjectIterator(unreal.MaterialExpression):
                 if expr.get_outer() == mat:
-                    node = {{
-                        "type": expr.get_class().get_name(),
-                        "name": expr.get_name(),
-                    }}
+                    cls_name = expr.get_class().get_name()
+                    node = {{"type": cls_name, "name": expr.get_name()}}
                     try:
-                        node["desc"] = expr.get_editor_property("desc")
+                        _d = expr.get_editor_property("desc")
+                        if _d:
+                            node["desc"] = _d
                     except:
                         pass
+                    # Custom expression: include HLSL code snippet
+                    if cls_name == "MaterialExpressionCustom":
+                        try:
+                            _code = expr.get_editor_property("code")
+                            if _code:
+                                _lines = _code.strip().split("\\n")
+                                node["code_lines"] = len(_lines)
+                                node["code_preview"] = "\\n".join(_lines[:10])
+                                if len(_lines) > 10:
+                                    node["code_preview"] += "\\n// ... ({{}}) more lines".format(len(_lines) - 10)
+                        except:
+                            pass
+                        try:
+                            node["output_type"] = str(expr.get_editor_property("output_type"))
+                        except:
+                            pass
                     nodes.append(node)
+                    _expr_objs.append(expr)
             result["nodes"] = nodes
             result["node_count"] = len(nodes)
         except Exception as e:
             result["nodes"] = []
             result["node_count"] = 0
             result["nodes_error"] = str(e)
+            _expr_objs = []
 
-        # Get texture samples
+        # ── Node-to-node edges via get_inputs_for_material_expression ──
+        try:
+            _edges = []
+            for _eo in _expr_objs:
+                _inputs = mel.get_inputs_for_material_expression(mat, _eo)
+                for _ii, _ie in enumerate(_inputs):
+                    if _ie is not None:
+                        _edges.append({{
+                            "from_node": _ie.get_name(),
+                            "to_node": _eo.get_name(),
+                            "to_input_index": _ii,
+                        }})
+            result["edges"] = _edges
+        except Exception as e:
+            result["edges"] = []
+            result["edges_error"] = str(e)
+
+        # ── Material output connections ── which node feeds each output pin
+        try:
+            _prop_list = [
+                ("BaseColor", unreal.MaterialProperty.MP_BASE_COLOR),
+                ("Metallic", unreal.MaterialProperty.MP_METALLIC),
+                ("Specular", unreal.MaterialProperty.MP_SPECULAR),
+                ("Roughness", unreal.MaterialProperty.MP_ROUGHNESS),
+                ("Normal", unreal.MaterialProperty.MP_NORMAL),
+                ("EmissiveColor", unreal.MaterialProperty.MP_EMISSIVE_COLOR),
+                ("Opacity", unreal.MaterialProperty.MP_OPACITY),
+                ("OpacityMask", unreal.MaterialProperty.MP_OPACITY_MASK),
+                ("WorldPositionOffset", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET),
+                ("AmbientOcclusion", unreal.MaterialProperty.MP_AMBIENT_OCCLUSION),
+                ("SubsurfaceColor", unreal.MaterialProperty.MP_SUBSURFACE_COLOR),
+            ]
+            mat_outputs = {{}}
+            for _name, _mp in _prop_list:
+                try:
+                    _src = mel.get_material_property_input_node(mat, _mp)
+                    if _src is not None:
+                        _out = ""
+                        try:
+                            _out = mel.get_material_property_input_node_output_name(mat, _mp)
+                        except:
+                            pass
+                        mat_outputs[_name] = {{
+                            "node": _src.get_name(),
+                            "node_type": _src.get_class().get_name(),
+                            "output": _out,
+                        }}
+                except:
+                    pass
+            result["material_outputs"] = mat_outputs
+        except Exception as e:
+            result["material_outputs_error"] = str(e)
+
+        # ── Texture samples ──
         try:
             tex_samples = []
             for expr in unreal.ObjectIterator(unreal.MaterialExpression):
                 if expr.get_outer() == mat:
                     cls_name = expr.get_class().get_name()
-                if "TextureSample" in cls_name or "TextureObject" in cls_name:
-                    try:
-                        tex = expr.get_editor_property("texture")
-                        if tex:
-                            tex_info = {{"name": tex.get_name(), "path": tex.get_path_name(), "node_type": cls_name}}
-                            try:
-                                tex_info["size_x"] = tex.blueprint_get_size_x()
-                                tex_info["size_y"] = tex.blueprint_get_size_y()
-                            except:
-                                pass
-                            tex_samples.append(tex_info)
-                        else:
-                            tex_samples.append({{"name": None, "path": None, "node_type": cls_name}})
-                    except:
-                        pass
+                    if "TextureSample" in cls_name or "TextureObject" in cls_name:
+                        try:
+                            tex = expr.get_editor_property("texture")
+                            if tex:
+                                tex_info = {{"name": tex.get_name(), "path": tex.get_path_name(), "node_type": cls_name}}
+                                try:
+                                    tex_info["size_x"] = tex.blueprint_get_size_x()
+                                    tex_info["size_y"] = tex.blueprint_get_size_y()
+                                except:
+                                    pass
+                                tex_samples.append(tex_info)
+                            else:
+                                tex_samples.append({{"name": None, "path": None, "node_type": cls_name}})
+                        except:
+                            pass
             result["textures"] = tex_samples
             result["texture_sample_count"] = len(tex_samples)
         except Exception as e:
@@ -148,11 +208,6 @@ else:
         except:
             pass
         result["texture_parameters"] = textures
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("MATERIAL_DETAIL_DONE")
 '''
 
 
@@ -185,13 +240,9 @@ else:
                 }},
             }}
             mel.recompile_material(mat)
+            mat.modify()
     except Exception as e:
         result = {{"error": "create_material_expression failed: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("ADD_NODE_DONE")
 '''
 
 _SCRIPT_DELETE_NODE = '''
@@ -221,14 +272,10 @@ else:
         try:
             mel.delete_material_expression(mat, target)
             mel.recompile_material(mat)
+            mat.modify()
             result = {{"status": "ok", "action": "delete_node", "material": material_path, "deleted_node": node_name}}
         except Exception as e:
             result = {{"error": "delete_material_expression failed: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("DELETE_NODE_DONE")
 '''
 
 _SCRIPT_CONNECT = '''
@@ -289,6 +336,7 @@ else:
                     ok = mel.connect_material_property(from_expr, from_output, mat_prop)
                     if ok:
                         mel.recompile_material(mat)
+                        mat.modify()
                         result = {{"status": "ok", "action": "connect", "from": from_node_name, "to": "MaterialOutput." + to_input}}
                     else:
                         result = {{"error": "connect_material_property returned False"}}
@@ -296,16 +344,12 @@ else:
                 ok = mel.connect_material_expressions(from_expr, from_output, to_expr, to_input)
                 if ok:
                     mel.recompile_material(mat)
+                    mat.modify()
                     result = {{"status": "ok", "action": "connect", "from": from_node_name, "from_output": from_output, "to": to_node_name, "to_input": to_input}}
                 else:
                     result = {{"error": "connect_material_expressions returned False"}}
         except Exception as e:
             result = {{"error": "Connection failed: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("CONNECT_DONE")
 '''
 
 _SCRIPT_DISCONNECT = '''
@@ -351,6 +395,7 @@ else:
                 except:
                     pass
                 mel.recompile_material(mat)
+                mat.modify()
                 result = {{"status": "ok", "action": "disconnect", "from": from_node_name, "to": "MaterialOutput." + to_input}}
         else:
             # Find target node by name using unreal.find_object
@@ -361,14 +406,10 @@ else:
             else:
                 mel.disconnect_material_expression(mat, to_expr, to_input)
                 mel.recompile_material(mat)
+                mat.modify()
                 result = {{"status": "ok", "action": "disconnect", "from": from_node_name, "to": to_node_name, "to_input": to_input}}
     except Exception as e:
         result = {{"error": "Disconnect failed: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("DISCONNECT_DONE")
 '''
 
 _SCRIPT_SET_PARAM = '''
@@ -391,11 +432,13 @@ else:
         if param_type == "scalar":
             val = float(param_value_raw)
             mel.set_material_instance_scalar_parameter_value(mat, param_name, val)
+            mat.modify()
             result = {{"status": "ok", "action": "set_param", "material": material_path, "param": param_name, "type": "scalar", "value": val}}
         elif param_type == "vector":
             parts = json.loads(param_value_raw)
             color = unreal.LinearColor(r=float(parts.get("r", 0)), g=float(parts.get("g", 0)), b=float(parts.get("b", 0)), a=float(parts.get("a", 1)))
             mel.set_material_instance_vector_parameter_value(mat, param_name, color)
+            mat.modify()
             result = {{"status": "ok", "action": "set_param", "material": material_path, "param": param_name, "type": "vector", "value": parts}}
         elif param_type == "texture":
             tex = unreal.EditorAssetLibrary.load_asset(param_value_raw)
@@ -403,16 +446,12 @@ else:
                 result = {{"error": "Texture not found: " + param_value_raw}}
             else:
                 mel.set_material_instance_texture_parameter_value(mat, param_name, tex)
+                mat.modify()
                 result = {{"status": "ok", "action": "set_param", "material": material_path, "param": param_name, "type": "texture", "value": param_value_raw}}
         else:
             result = {{"error": "Unknown param_type: " + param_type + ". Use scalar, vector, or texture."}}
     except Exception as e:
         result = {{"error": "set_param failed: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("SET_PARAM_DONE")
 '''
 
 _SCRIPT_RECOMPILE = '''
@@ -427,14 +466,10 @@ else:
     mel = unreal.MaterialEditingLibrary
     try:
         mel.recompile_material(mat)
+        mat.modify()
         result = {{"status": "ok", "action": "recompile", "material": material_path}}
     except Exception as e:
         result = {{"error": "recompile_material failed: " + str(e)}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
-print("RECOMPILE_DONE")
 '''
 
 
@@ -566,6 +601,7 @@ def get_material_info(
         # Merge deep info into basic_info (script result has nodes, textures, etc.)
         for key in ("nodes", "node_count", "textures", "texture_sample_count",
                      "blend_mode", "material_domain", "shading_model", "two_sided",
+                     "material_outputs", "edges",
                      "scalar_parameters", "vector_parameters", "texture_parameters",
                      "parent"):
             if key in script_result:
@@ -613,33 +649,71 @@ def get_material_stats(
     }
 
 
+_PLUGIN_GET_ERRORS_SCRIPT = r'''import unreal
+
+mat = unreal.EditorAssetLibrary.load_asset("{material_path}")
+if mat is None:
+    result = {{"error": "Material not found: {material_path}"}}
+else:
+    bridge = unreal.CliAnythingBridgeLibrary
+    errors = list(bridge.get_material_compile_errors(mat))
+    result = {{
+        "errors": errors,
+        "warnings": [],
+        "material": "{material_path}",
+        "has_errors": len(errors) > 0,
+        "source": "plugin",
+    }}
+'''
+
+
 def get_material_errors(
     api: UEEditorAPI,
     material_path: str,
     project_dir: str | None = None,
 ) -> dict:
-    """Check material for compilation errors.
+    """Get current material compile errors via the CliAnythingBridge plugin.
+
+    Reads the error state from FMaterialResource::GetCompileErrors() without
+    triggering a recompile. Call ``recompile_material()`` first if you need
+    fresh errors after making changes.
+
+    Requires the bridge plugin to be compiled and loaded in the editor.
+    If the plugin is not deployed, it will be auto-deployed and an error
+    returned asking the caller to recompile and restart.
 
     Args:
         api: Connected UEEditorAPI instance.
-        material_path: Content path.
-        project_dir: Project directory.
+        material_path: Content path (e.g. /Game/MyMaterial).
+        project_dir: Project directory for auto-deploying the plugin.
 
     Returns:
-        {"errors": [...], "warnings": [...]}
+        {"errors": [...], "warnings": [...], "has_errors": bool, "source": "plugin"}
+        or {"error": "..."} if plugin not available.
     """
-    info = get_material_info(api, material_path, project_dir)
-    errors = []
-    warnings = []
+    if project_dir:
+        deploy_result = ensure_plugin_deployed(project_dir)
+        if not deploy_result["deployed"]:
+            return {"error": deploy_result.get("error", "Plugin deployment failed")}
 
-    if "error" in info:
-        errors.append(info["error"])
-    if "nodes_error" in info:
-        errors.append(f"Could not read material nodes: {info['nodes_error']}")
-    if "detail_error" in info or "detail_note" in info:
-        warnings.append(info.get("detail_error", info.get("detail_note", "")))
+    result = _exec_material_script(
+        api,
+        _PLUGIN_GET_ERRORS_SCRIPT,
+        timeout=15.0,
+        material_path=material_path,
+    )
 
-    return {"errors": errors, "warnings": warnings, "material": material_path}
+    if "error" in result and "CliAnythingBridgeLibrary" in result.get("error", ""):
+        plugin_dir = f"{project_dir}/Plugins/CliAnythingBridge" if project_dir else "<project>/Plugins/CliAnythingBridge"
+        return {
+            "error": (
+                "Bridge plugin not loaded. "
+                f"Plugin source has been deployed to {plugin_dir}. "
+                "Please recompile the project and start the editor to activate it."
+            )
+        }
+
+    return result
 
 
 def get_material_texture_list(
@@ -674,6 +748,84 @@ def get_material_texture_list(
         })
 
     return {"textures": all_textures, "material": material_path}
+
+
+def get_material_connections(
+    api: UEEditorAPI,
+    material_path: str,
+    project_dir: str | None = None,
+) -> dict:
+    """Get the full material node connection graph.
+
+    Builds a complete topology from node-to-node edges (via
+    ``get_inputs_for_material_expression``) and material output pin
+    connections. A node is "connected" if it's reachable (directly or
+    transitively) from any material output; otherwise it's "orphan".
+
+    Args:
+        api: Connected UEEditorAPI instance.
+        material_path: Content path (e.g., "/Game/M_Water").
+        project_dir: Project directory for temp files.
+
+    Returns:
+        {
+            "material": str,
+            "material_outputs": {"BaseColor": {"node": ..}, ..},
+            "edges": [{"from_node": str, "to_node": str, "to_input_index": int}, ..],
+            "nodes": [{"name": str, "type": str, ..}, ..],
+            "node_count": int,
+            "connected_nodes": [str, ..],
+            "orphan_nodes": [str, ..],
+        }
+    """
+    info = get_material_info(api, material_path, project_dir)
+    if "error" in info:
+        return info
+
+    mat_outputs = info.get("material_outputs", {})
+    nodes = info.get("nodes", [])
+    edges = info.get("edges", [])
+
+    # Build reverse adjacency: node → set of nodes that feed into it
+    # We need forward lookup: from a "sink" node, find all upstream nodes
+    upstream = {}  # node_name → set of upstream node_names
+    for e in edges:
+        upstream.setdefault(e["to_node"], set()).add(e["from_node"])
+
+    # Seed: nodes directly connected to material output pins
+    seeds = {v["node"] for v in mat_outputs.values() if isinstance(v, dict)}
+
+    # Also treat custom output nodes as seeds (SLW, Strata, etc.)
+    for n in nodes:
+        t = n.get("type", "")
+        if "Output" in t and t != "MaterialExpressionCustomOutput":
+            seeds.add(n["name"])
+
+    # BFS backwards through edges to find all transitively connected nodes
+    connected = set()
+    queue = list(seeds)
+    while queue:
+        name = queue.pop()
+        if name in connected:
+            continue
+        connected.add(name)
+        for src in upstream.get(name, []):
+            if src not in connected:
+                queue.append(src)
+
+    all_names = {n["name"] for n in nodes}
+    orphan_names = sorted(all_names - connected)
+
+    return {
+        "material": material_path,
+        "material_outputs": mat_outputs,
+        "edges": edges,
+        "nodes": nodes,
+        "node_count": len(nodes),
+        "connected_nodes": sorted(connected),
+        "orphan_nodes": orphan_names,
+        "orphan_count": len(orphan_names),
+    }
 
 
 def analyze_material(
@@ -753,6 +905,30 @@ def analyze_material(
             "Translucent material with many texture samples may cause overdraw issues"
         )
 
+    # Check material output connections (agent's most requested analysis)
+    mat_outputs = info.get("material_outputs", {})
+    if mat_outputs:
+        connected_names = {v["node"] for v in mat_outputs.values() if isinstance(v, dict)}
+        all_names = {n["name"] for n in info.get("nodes", [])}
+        orphan_names = all_names - connected_names
+        if orphan_names and len(orphan_names) > node_count * 0.5 and node_count > 5:
+            warnings.append(
+                f"{len(orphan_names)}/{node_count} nodes not directly connected to "
+                f"any material output (may be intermediate or unused)"
+            )
+    elif "material_outputs_error" not in info and node_count > 0:
+        warnings.append(
+            "No material output connections detected — material may produce no visible output"
+        )
+
+    # Check for duplicate Custom nodes (common when rebuilding materials)
+    custom_nodes = [n for n in info.get("nodes", []) if n.get("type") == "MaterialExpressionCustom"]
+    if len(custom_nodes) > 5:
+        warnings.append(
+            f"High number of Custom HLSL nodes ({len(custom_nodes)}) — "
+            "review for duplicates from prior edits"
+        )
+
     stats = {
         "texture_sample_count": tex_count,
         "node_count": node_count,
@@ -760,6 +936,8 @@ def analyze_material(
         "blend_mode": str(blend_mode),
         "shading_model": info.get("shading_model", info.get("ShadingModel", "")),
         "material_domain": info.get("material_domain", info.get("MaterialDomain", "")),
+        "connected_outputs": list(mat_outputs.keys()) if mat_outputs else [],
+        "custom_node_count": len(custom_nodes),
     }
 
     return {
@@ -1230,64 +1408,21 @@ def _exec_material_script(
 ) -> dict:
     """Execute a material query Python script in the editor and read results.
 
-    Generates a temp .py file, executes it via the Remote Control API,
-    then reads the output JSON file.
+    Formats *script_template* with **kwargs, then executes via
+    ``script_runner.run_python_code`` (which uses
+    ``ExecutePythonCommandEx`` under the hood).
 
     Args:
         api: Connected UEEditorAPI instance.
         script_template: Python script template with {placeholders}.
-        project_dir: Project directory for temp files.
-        timeout: Max wait time for results.
+        project_dir: Unused — kept for backwards compatibility.
+        timeout: HTTP request timeout in seconds.
         **kwargs: Template variables.
 
     Returns:
         Parsed JSON result from the script.
     """
-    # Determine temp directory
-    if project_dir:
-        temp_dir = Path(project_dir) / "Saved" / "Temp"
-    else:
-        temp_dir = Path(tempfile.gettempdir()) / "cli-anything-unreal"
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    from cli_anything.unreal.core.script_runner import run_python_code
 
-    # Create output file path
-    ts = int(time.time() * 1000)
-    output_path = str(temp_dir / f"_mat_query_{os.getpid()}_{ts}.json")
-    kwargs["output_path"] = output_path.replace("\\", "\\\\")
-
-    # Format script
     script_content = script_template.format(**kwargs)
-
-    # Write script to temp file
-    script_path = str(temp_dir / f"_mat_query_{os.getpid()}_{ts}.py")
-    Path(script_path).write_text(script_content, encoding="utf-8")
-
-    try:
-        # Execute via Remote Control API
-        result = api.exec_python_file(script_path)
-
-        # Wait for output file
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if Path(output_path).exists():
-                try:
-                    data = json.loads(
-                        Path(output_path).read_text(encoding="utf-8")
-                    )
-                    return data
-                except json.JSONDecodeError:
-                    time.sleep(0.5)
-                    continue
-            time.sleep(0.5)
-
-        return {
-            "error": "Script execution timed out or produced no output",
-            "api_result": result,
-        }
-    finally:
-        # Cleanup temp files
-        try:
-            Path(script_path).unlink(missing_ok=True)
-            Path(output_path).unlink(missing_ok=True)
-        except Exception:
-            pass
+    return run_python_code(api, script_content, timeout=timeout)

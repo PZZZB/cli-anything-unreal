@@ -16,6 +16,8 @@ Supports multi-instance scenarios via configurable port.
 
 import json
 import os
+import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional
@@ -128,7 +130,8 @@ class UEEditorAPI:
 
     def call_function(self, object_path: str, function_name: str,
                       params: dict | None = None,
-                      generate_transaction: bool = False) -> dict:
+                      generate_transaction: bool = False,
+                      timeout: int | None = None) -> dict:
         """Call a function on a UObject.
 
         Args:
@@ -136,6 +139,7 @@ class UEEditorAPI:
             function_name: Function name to call.
             params: Function parameters dict.
             generate_transaction: Whether to generate an undo transaction.
+            timeout: HTTP request timeout override (uses ``self.timeout`` if *None*).
 
         Returns:
             API response with ReturnValue.
@@ -146,7 +150,10 @@ class UEEditorAPI:
             "parameters": params or {},
             "generateTransaction": generate_transaction,
         }
-        return self._put("/remote/object/call", data)
+        kwargs = {}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return self._put("/remote/object/call", data, **kwargs)
 
     def get_property(self, object_path: str, property_name: str) -> dict:
         """Get a property value on a UObject.
@@ -292,6 +299,41 @@ class UEEditorAPI:
         path = script_path.replace("\\", "/")
         return self.exec_console(f'py "{path}"')
 
+    def exec_python_ex(self, code: str, *, timeout: int | None = None) -> dict:
+        """Execute Python code via ``PythonScriptLibrary.ExecutePythonCommandEx``.
+
+        Unlike :meth:`exec_python`, this captures ``unreal.log()`` output
+        and returns it inline — no temp files or polling required.
+
+        Multi-line *code* is automatically wrapped in ``exec(...)`` so that
+        it can be passed as a single statement.
+
+        Args:
+            code: Python source code (may be multi-line).
+            timeout: HTTP request timeout (defaults to ``self.timeout``).
+
+        Returns:
+            dict with keys:
+            - ``ReturnValue`` (bool): whether execution succeeded.
+            - ``CommandResult`` (str): string result (usually ``"None"``).
+            - ``LogOutput`` (list[dict]): captured log entries, each with
+              ``Type`` (``"Info"`` / ``"Warning"`` / ``"Error"``) and
+              ``Output`` (str).
+        """
+        if "\n" in code.strip():
+            command = f"exec({json.dumps(code)})"
+        else:
+            command = code
+        return self.call_function(
+            "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
+            "ExecutePythonCommandEx",
+            {
+                "PythonCommand": command,
+                "ExecutionMode": "ExecuteStatement",
+            },
+            timeout=timeout,
+        )
+
     # ── CVars ───────────────────────────────────────────────────────────
 
     def get_cvar(self, name: str) -> str:
@@ -332,75 +374,157 @@ class UEEditorAPI:
         The viewport only renders when the editor window is visible/focused.
         This is required before taking screenshots.
 
-        Uses multiple Windows API tricks to bypass SetForegroundWindow
-        restrictions (Windows blocks this unless the calling process owns
-        the foreground lock):
-        1. AttachThreadInput — attach to foreground thread to inherit permission
-        2. BringWindowToTop + ShowWindow(SW_RESTORE)
-        3. SetForegroundWindow
-        4. Simulated Alt keypress — tricks Windows into thinking it's user input
+        Uses Windows API via ctypes (no subprocess) to find the UE editor
+        main window by process PID and bring it to front.
 
         Returns:
             True if successful, False otherwise.
         """
-        import subprocess
         import sys
         if sys.platform != "win32":
             return False
 
         try:
-            ps_script = '''
-$p = Get-Process UnrealEditor -EA SilentlyContinue | Select-Object -First 1
-if (-not $p) { Write-Host "NOT_FOUND"; exit }
+            import ctypes
+            from ctypes import wintypes
 
-$hwnd = $p.MainWindowHandle
-if ($hwnd -eq [IntPtr]::Zero) { Write-Host "NO_WINDOW"; exit }
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
 
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class WinFocus {
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
-    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
-    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
-}
-"@
+            # Prefer the process that listens on this API port.
+            # This avoids focusing the wrong editor when multiple UE instances run.
+            listening_pid = self._get_pid_listening_on_port(self.port)
 
-# Get foreground thread to attach to it
-$fgWnd = [WinFocus]::GetForegroundWindow()
-$fgPid = 0
-$fgThread = [WinFocus]::GetWindowThreadProcessId($fgWnd, [ref]$fgPid)
-$myThread = [WinFocus]::GetCurrentThreadId()
+            # Find UE editor PID via CreateToolhelp32Snapshot
+            TH32CS_SNAPPROCESS = 0x00000002
 
-# Attach to foreground thread (inherit foreground permission)
-[WinFocus]::AttachThreadInput($myThread, $fgThread, $true) | Out-Null
+            class PROCESSENTRY32(ctypes.Structure):
+                _fields_ = [
+                    ('dwSize', wintypes.DWORD),
+                    ('cntUsage', wintypes.DWORD),
+                    ('th32ProcessID', wintypes.DWORD),
+                    ('th32DefaultHeapID', ctypes.POINTER(ctypes.c_ulong)),
+                    ('th32ModuleID', wintypes.DWORD),
+                    ('cntThreads', wintypes.DWORD),
+                    ('th32ParentProcessID', wintypes.DWORD),
+                    ('pcPriClassBase', ctypes.c_long),
+                    ('dwFlags', wintypes.DWORD),
+                    ('szExeFile', ctypes.c_char * 260),
+                ]
 
-# Simulate Alt key press/release (tricks Windows foreground lock)
-[WinFocus]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)      # Alt down
-[WinFocus]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)      # Alt up
+            snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            entry = PROCESSENTRY32()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
 
-# Now activate the window
-[WinFocus]::ShowWindow($hwnd, 9)            # SW_RESTORE
-[WinFocus]::BringWindowToTop($hwnd)
-$ok = [WinFocus]::SetForegroundWindow($hwnd)
+            ue_pids = []
+            if kernel32.Process32First(snapshot, ctypes.byref(entry)):
+                while True:
+                    name = entry.szExeFile.decode('utf-8', errors='ignore')
+                    if 'UnrealEditor' in name:
+                        ue_pids.append(entry.th32ProcessID)
+                    if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
+                        break
+            kernel32.CloseHandle(snapshot)
 
-# Detach
-[WinFocus]::AttachThreadInput($myThread, $fgThread, $false) | Out-Null
+            if not ue_pids:
+                return False
 
-if ($ok) { Write-Host "OK" } else { Write-Host "FAILED" }
-'''
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True, text=True, timeout=10,
-            )
-            return "OK" in result.stdout
+            # Put the RemoteControl-bound PID first if it is an UnrealEditor process.
+            ordered_pids = []
+            if listening_pid and listening_pid in ue_pids:
+                ordered_pids.append(listening_pid)
+            ordered_pids.extend(pid for pid in ue_pids if pid not in ordered_pids)
+
+            # Enumerate windows to find UE editor main window
+            found_hwnd = None
+            WNDENUMPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+            @WNDENUMPROC
+            def _enum_cb(hwnd, _lparam):
+                nonlocal found_hwnd
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value in ordered_pids:
+                    buf = ctypes.create_unicode_buffer(512)
+                    length = user32.GetWindowTextW(hwnd, buf, 512)
+                    # Prefer visible top-level windows with title.
+                    if length > 0 and buf.value:
+                        style = user32.GetWindowLongW(hwnd, -16)
+                        WS_VISIBLE = 0x10000000
+                        if style & WS_VISIBLE:
+                            found_hwnd = hwnd
+                            return False
+                return True
+
+            user32.EnumWindows(_enum_cb, 0)
+
+            if not found_hwnd:
+                return False
+
+            # Bring to front
+            user32.ShowWindow(found_hwnd, 9)   # SW_RESTORE
+            user32.BringWindowToTop(found_hwnd)
+            ok = user32.SetForegroundWindow(found_hwnd)
+            if ok:
+                return True
+
+            # Fallback for foreground lock restrictions.
+            fg_hwnd = user32.GetForegroundWindow()
+            current_tid = kernel32.GetCurrentThreadId()
+            target_tid = user32.GetWindowThreadProcessId(found_hwnd, None)
+            fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+
+            attached = []
+            try:
+                if fg_tid and fg_tid != current_tid:
+                    if user32.AttachThreadInput(fg_tid, current_tid, True):
+                        attached.append((fg_tid, current_tid))
+                if target_tid and target_tid != current_tid:
+                    if user32.AttachThreadInput(target_tid, current_tid, True):
+                        attached.append((target_tid, current_tid))
+
+                user32.BringWindowToTop(found_hwnd)
+                ok = user32.SetForegroundWindow(found_hwnd)
+                user32.SetActiveWindow(found_hwnd)
+            finally:
+                for src_tid, dst_tid in attached:
+                    user32.AttachThreadInput(src_tid, dst_tid, False)
+
+            return bool(ok)
         except Exception:
             return False
+
+    @staticmethod
+    def _get_pid_listening_on_port(port: int) -> int | None:
+        """Return the process PID that is LISTENING on a TCP port (Windows)."""
+        try:
+            proc = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except Exception:
+            return None
+
+        if proc.returncode != 0:
+            return None
+
+        # Example line:
+        # TCP    0.0.0.0:30010   0.0.0.0:0   LISTENING   12345
+        line_re = re.compile(r"^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$")
+        for line in proc.stdout.splitlines():
+            match = line_re.match(line)
+            if not match:
+                continue
+            found_port = int(match.group(1))
+            if found_port != int(port):
+                continue
+            return int(match.group(2))
+
+        return None
 
     # ── Screenshot ──────────────────────────────────────────────────────
 
@@ -485,6 +609,45 @@ if ($ok) { Write-Host "OK" } else { Write-Host "FAILED" }
                 "bIncludeFolder": include_folder,
             },
         )
+
+    def collect_garbage(self) -> dict:
+        """Force a full garbage collection cycle in the editor."""
+        return self.call_function(
+            "/Script/Engine.Default__KismetSystemLibrary",
+            "CollectGarbage",
+            {},
+        )
+
+    def does_asset_exist(self, asset_path: str) -> bool:
+        """Check if an asset exists at the given content path."""
+        result = self.call_function(
+            "/Script/EditorScriptingUtilities.Default__EditorAssetLibrary",
+            "DoesAssetExist",
+            {"AssetPath": asset_path},
+        )
+        return bool(result.get("ReturnValue", False))
+
+    def delete_asset(self, asset_path: str) -> bool:
+        """Delete an asset via EditorAssetLibrary.DeleteAsset.
+
+        Returns True if the asset was deleted, False otherwise (e.g.
+        asset not found, or deletion was rejected internally).
+        """
+        result = self.call_function(
+            "/Script/EditorScriptingUtilities.Default__EditorAssetLibrary",
+            "DeleteAsset",
+            {"AssetPath": asset_path},
+        )
+        return bool(result.get("ReturnValue", False))
+
+    def find_asset_referencers(self, asset_path: str) -> list[str]:
+        """Return list of assets that reference the given asset."""
+        result = self.call_function(
+            "/Script/EditorScriptingUtilities.Default__EditorAssetLibrary",
+            "FindPackageReferencersForAsset",
+            {"AssetPath": asset_path, "bLoadAssetsToConfirm": False},
+        )
+        return result.get("ReturnValue", [])
 
     # ── Presets ──────────────────────────────────────────────────────────
 

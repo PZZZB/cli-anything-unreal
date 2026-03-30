@@ -55,6 +55,41 @@ CLI commands return JSON with an `error` field when something goes wrong. Common
 - **Material `expressions` is protected** → Do not access `Material.expressions` directly. Use `material info` to read, CLI edit commands to modify.
 - **Screenshot fails** → editor window must be visible (the CLI auto-brings it to foreground).
 - **HLSL dump empty** → shader may need recompilation first; run `material recompile`.
+- **Asset overwrite dialog blocks script** → see "Avoiding Asset Overwrite Dialogs" below.
+
+## Avoiding Asset Overwrite Dialogs
+
+`create_asset` / `duplicate_asset` will pop a modal "Overwrite Existing Object" dialog if the target path already has an asset loaded in memory, blocking CLI execution indefinitely.
+
+**Root cause**: `EAL.delete_asset()` removes the on-disk package but the UObject stays in memory until the next GC. `create_asset` sees the in-memory object and asks to overwrite.
+
+**Fix**: check `delete_asset` return value, then call `collect_garbage()` before creating.
+
+### Safe asset replacement pattern (in Python scripts)
+
+```python
+import unreal
+EAL = unreal.EditorAssetLibrary
+
+target = "/Game/MyAsset"
+can_create = True
+if EAL.does_asset_exist(target):
+    if EAL.delete_asset(target):           # Returns True if fully deleted
+        unreal.SystemLibrary.collect_garbage()  # Flush the old UObject from memory
+    else:
+        can_create = False                 # Delete failed — do NOT create (would trigger dialog)
+
+if can_create:
+    ATH = unreal.AssetToolsHelpers.get_asset_tools()
+    new_asset = ATH.create_asset(...)
+```
+
+Key points:
+- `delete_asset(path)` and `delete_loaded_asset(obj)` are both force-deletes — no dialog, even with referencers
+- **Always check `delete_asset` return value** — if it returns `False`, do not call `create_asset` (would trigger overwrite dialog)
+- **`collect_garbage()` after successful delete is mandatory** — without it the old UObject lingers and `create_asset`/`duplicate_asset` triggers an overwrite dialog
+- **Never call `duplicate_asset` when the destination already exists** — always delete + GC first
+- Use `--no-save` on `editor run-script` if you handle saves explicitly, to avoid the auto-save path
 
 ## Command Overview
 
@@ -63,7 +98,7 @@ The CLI is organized into command groups. For the full command reference with al
 | Group | What it does | Requires Editor? |
 |-------|-------------|:-:|
 | `editor` | Launch, close, status, exec Python, run scripts, console vars | Mixed |
-| `project` | Project info, content listing, config read/write | No |
+| `project` | Project info, content listing, config, asset ops (delete/duplicate/rename/refs) | Mixed |
 | `build` | Compile C++, cook content, package, check build status | No |
 | `scene` | List actors, find by name, get/set properties, transforms, components | Yes |
 | `material` | List, inspect, edit nodes, connect, set params, recompile, HLSL dump | Yes |
@@ -90,8 +125,13 @@ cli-anything-unreal --json editor status
 
 ### Material Editing
 ```bash
-# 1. Inspect current state
+# 1. Inspect current state (includes connection graph + Custom HLSL code)
 cli-anything-unreal --json material info /Game/M_Water
+# Returns: nodes[] with code_preview for Custom nodes,
+#          material_outputs{} showing which node feeds each output pin
+
+# 1b. Connection graph only (lightweight)
+cli-anything-unreal --json material connections /Game/M_Water
 
 # 2. Add nodes
 cli-anything-unreal --json material add-node /Game/M_Water --type MaterialExpressionPanner

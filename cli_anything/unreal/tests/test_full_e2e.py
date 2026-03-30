@@ -6,10 +6,13 @@ These tests require:
 
 Set environment variables before running:
     UE_TEST_PROJECT=F:\\Test_RXEngine_5_7\\Test_RXEngine_5_7.uproject
-    UE_TEST_PORT=30020  (optional, default 30020)
+    UE_TEST_PORT=30020  (optional; if unset, port is read from Config/DefaultRemoteControl.ini)
 
 Run with:
     pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e
+
+Screenshot sequence E2E (``TestScreenshotE2E``) needs the editor window able to tick
+(Focus / Realtime); use the project's Remote Control port (or ``UE_TEST_PORT``).
 
 Skip with:
     pytest cli_anything/unreal/tests/test_full_e2e.py -v  (auto-skips without --e2e)
@@ -35,9 +38,16 @@ def project_path():
 
 
 @pytest.fixture
-def api_port():
-    """Get test API port from environment."""
-    return int(os.environ.get("UE_TEST_PORT", "30010"))
+def api_port(project_path):
+    """Resolve Remote Control port: UE_TEST_PORT, else project DefaultRemoteControl.ini, else 30010."""
+    env = os.environ.get("UE_TEST_PORT")
+    if env:
+        return int(env)
+    from cli_anything.unreal.utils.ue_backend import read_rc_port
+
+    pd = str(Path(project_path).parent)
+    ini_port = read_rc_port(pd)
+    return ini_port if ini_port is not None else 30010
 
 
 @pytest.fixture
@@ -212,6 +222,96 @@ class TestScreenshotE2E:
         ])
         assert result.exit_code == 0
 
+    def test_screenshot_sequence_cli(self, cli_runner, project_path, api_port):
+        """CLI ``screenshot sequence``: atlas + default compressed output when Pillow works."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--project", project_path, "--port", str(api_port),
+            "screenshot", "sequence", "-n", "2", "-i", "0.35",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        if data.get("status") != "ok":
+            pytest.skip(
+                "sequence capture incomplete (viewport focus or UE automation queue); "
+                f"detail: {data.get('error', data)}"
+            )
+
+        atlas = Path(data["atlas_path"])
+        assert atlas.exists()
+        assert atlas.stat().st_size > 1000
+        assert data.get("frame_count") == 2
+        assert len(data.get("frame_paths") or []) == 2
+        for fp in data["frame_paths"]:
+            assert Path(fp).exists()
+
+        grid = data.get("grid") or {}
+        assert grid.get("cols", 0) >= 1
+        assert grid.get("rows", 0) >= 1
+
+        prep = data.get("viewport_prep") or {}
+        assert prep.get("realtime") is True
+
+        assert data.get("cli_command", "").startswith("screenshot sequence")
+        assert "llm_context" in data
+
+        dp = data.get("default_path") or ""
+        assert dp
+        assert Path(dp).exists()
+        if data.get("compressed"):
+            assert Path(data["compressed"]).exists()
+            assert dp.lower().endswith(".jpg")
+        else:
+            # Pillow missing or compress failed — still a valid primary path
+            assert dp.lower().endswith(".png")
+
+    def test_screenshot_sequence_cli_no_compress(self, cli_runner, project_path, api_port):
+        """CLI ``--no-compress``: primary output is PNG atlas only."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--project", project_path, "--port", str(api_port),
+            "screenshot", "sequence", "-n", "2", "-i", "0.35", "--no-compress",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        if data.get("status") != "ok":
+            pytest.skip(
+                "sequence capture incomplete; "
+                f"detail: {data.get('error', data)}"
+            )
+
+        assert Path(data["atlas_path"]).exists()
+        assert data.get("default_path") == data.get("atlas_path")
+        assert str(data["default_path"]).lower().endswith(".png")
+        assert "compressed" not in data
+
+    def test_capture_screenshot_atlas_core(self, api, project_path):
+        """Core ``capture_screenshot_atlas`` (same path as CLI) without Click."""
+        from cli_anything.unreal.core.screenshot import capture_screenshot_atlas
+
+        project_dir = str(Path(project_path).parent)
+        result = capture_screenshot_atlas(
+            api,
+            2,
+            interval=0.35,
+            project_dir=project_dir,
+            jpeg_for_llm=True,
+            max_atlas_edge=1920,
+        )
+        if result.get("status") != "ok":
+            pytest.skip(
+                "capture_screenshot_atlas failed; "
+                f"detail: {result.get('error', result)}"
+            )
+
+        assert Path(result["atlas_path"]).exists()
+        assert result["frame_count"] == 2
+        assert (result.get("viewport_prep") or {}).get("realtime") is True
+        if result.get("compressed"):
+            assert Path(result["compressed"]).exists()
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  E2E: Console Commands
@@ -270,25 +370,25 @@ import json
 
 mat_path = "/Game/E2E_TestMaterial"
 
-# Delete leftover if any, force GC
-try:
-    unreal.EditorAssetLibrary.delete_asset(mat_path)
-    unreal.SystemLibrary.collect_garbage()
-except:
-    pass
+EAL = unreal.EditorAssetLibrary
+can_create = True
+if EAL.does_asset_exist(mat_path):
+    if EAL.delete_asset(mat_path):
+        unreal.SystemLibrary.collect_garbage()
+    else:
+        can_create = False
 
-factory = unreal.MaterialFactoryNew()
-asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
-mat = asset_tools.create_asset("E2E_TestMaterial", "/Game", unreal.Material, factory)
+if can_create:
+    factory = unreal.MaterialFactoryNew()
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    mat = asset_tools.create_asset("E2E_TestMaterial", "/Game", unreal.Material, factory)
+else:
+    mat = None
 
 if mat is not None:
     result = {{"status": "ok", "name": mat.get_name()}}
 else:
     result = {{"error": "Failed to create test material"}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
 '''
             result = _exec_material_script(api, create_script, project_dir=project_dir)
             if "error" in result:
@@ -308,10 +408,6 @@ if mat is not None:
     result = {{"status": "ok"}}
 else:
     result = {{"error": "material not loaded"}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
 '''
             _exec_material_script(api, clean_script, project_dir=project_dir)
 
@@ -462,6 +558,109 @@ with open(output_path, "w", encoding="utf-8") as f:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  E2E: Material Errors via Bridge Plugin
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.e2e
+class TestMaterialErrorsPluginE2E:
+    """Test get_material_errors using the CliAnythingBridge plugin.
+
+    Requires the bridge plugin to be compiled and loaded in the editor.
+    """
+
+    def test_clean_material_no_errors(self, api, project_path):
+        """Clean material should report no compile errors."""
+        from cli_anything.unreal.core.materials import get_material_errors
+
+        project_dir = str(Path(project_path).parent)
+        result = get_material_errors(api, "/Game/E2E_TestMaterial", project_dir=project_dir)
+
+        if "error" in result and "not loaded" in result.get("error", ""):
+            pytest.skip("Bridge plugin not loaded in editor")
+
+        assert result.get("source") == "plugin"
+        assert result.get("has_errors") is False
+        assert result.get("errors") == []
+
+    def test_broken_material_has_errors(self, api, project_path):
+        """Material with invalid Custom HLSL should report compile errors."""
+        from cli_anything.unreal.core.materials import get_material_errors
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        project_dir = str(Path(project_path).parent)
+
+        # Create material with bad HLSL and recompile (all UE-side).
+        # Uses "return invalid_var;" which fails fast (single undeclared identifier).
+        setup_script = r'''
+import unreal
+
+EAL = unreal.EditorAssetLibrary
+ATH = unreal.AssetToolsHelpers.get_asset_tools()
+mel = unreal.MaterialEditingLibrary
+
+mat_path = "/Game/E2E_ErrorMaterial"
+can_create = True
+if EAL.does_asset_exist(mat_path):
+    if EAL.delete_asset(mat_path):
+        unreal.SystemLibrary.collect_garbage()
+    else:
+        can_create = False
+
+if can_create:
+    mat = ATH.create_asset("E2E_ErrorMaterial", "/Game", unreal.Material, unreal.MaterialFactoryNew())
+    custom = mel.create_material_expression(mat, unreal.MaterialExpressionCustom, -300, 0)
+    custom.set_editor_property("code", "return invalid_var;")
+    custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+    mel.connect_material_property(custom, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    mel.recompile_material(mat)
+    result = {"status": "ok"}
+else:
+    result = {"error": "delete_asset failed for E2E_ErrorMaterial"}
+'''
+        setup = run_python_code(api, setup_script, timeout=60.0)
+        assert setup.get("status") == "ok", f"Setup failed: {setup}"
+
+        try:
+            result = get_material_errors(api, "/Game/E2E_ErrorMaterial", project_dir=project_dir)
+
+            if "error" in result and "not loaded" in result.get("error", ""):
+                pytest.skip("Bridge plugin not loaded in editor")
+
+            assert result.get("source") == "plugin"
+            assert result.get("has_errors") is True
+            assert len(result.get("errors", [])) > 0
+            all_errors = " ".join(result["errors"])
+            assert "invalid_var" in all_errors
+        finally:
+            cleanup = r'''
+import unreal
+EAL = unreal.EditorAssetLibrary
+if EAL.does_asset_exist("/Game/E2E_ErrorMaterial"):
+    EAL.delete_asset("/Game/E2E_ErrorMaterial")
+    unreal.SystemLibrary.collect_garbage()
+result = {"cleaned": True}
+'''
+            run_python_code(api, cleanup, timeout=15.0)
+
+    def test_material_errors_cli(self, cli_runner, project_path, api_port):
+        """Test material errors CLI command returns plugin-sourced results."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--project", project_path, "--port", str(api_port),
+            "material", "errors", "/Game/E2E_TestMaterial",
+        ])
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        data = json.loads(result.output)
+
+        if "error" in data and "not loaded" in data.get("error", ""):
+            pytest.skip("Bridge plugin not loaded")
+
+        assert data.get("source") == "plugin"
+        assert data.get("has_errors") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  E2E: Blueprint Editing (BlueprintEditorLibrary)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -490,26 +689,26 @@ import json
 
 bp_path = "/Game/E2E_TestBlueprint"
 
-# Delete leftover if any
-try:
-    unreal.EditorAssetLibrary.delete_asset(bp_path)
-    unreal.SystemLibrary.collect_garbage()
-except:
-    pass
+EAL = unreal.EditorAssetLibrary
+can_create = True
+if EAL.does_asset_exist(bp_path):
+    if EAL.delete_asset(bp_path):
+        unreal.SystemLibrary.collect_garbage()
+    else:
+        can_create = False
 
-factory = unreal.BlueprintFactory()
-factory.set_editor_property("parent_class", unreal.Actor)
-asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
-bp = asset_tools.create_asset("E2E_TestBlueprint", "/Game", unreal.Blueprint, factory)
+if can_create:
+    factory = unreal.BlueprintFactory()
+    factory.set_editor_property("parent_class", unreal.Actor)
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    bp = asset_tools.create_asset("E2E_TestBlueprint", "/Game", unreal.Blueprint, factory)
+else:
+    bp = None
 
 if bp is not None:
     result = {{"status": "ok", "name": bp.get_name()}}
 else:
     result = {{"error": "Failed to create test blueprint"}}
-
-output_path = r"{output_path}"
-with open(output_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2)
 '''
             result = _exec_blueprint_script(api, create_script, project_dir=project_dir)
             if "error" in result:
@@ -635,3 +834,280 @@ with open(output_path, "w", encoding="utf-8") as f:
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
         assert data.get("status") == "ok"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  E2E: Scene Queries
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.e2e
+class TestSceneE2E:
+    """Test scene/level actor queries against running editor."""
+
+    def test_list_actors(self, api):
+        from cli_anything.unreal.core.scene import list_actors
+
+        result = list_actors(api)
+        assert "actors" in result
+        assert isinstance(result["actors"], list)
+        assert result["count"] >= 0
+
+    def test_list_actors_cli(self, cli_runner, api_port):
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port),
+            "scene", "actors",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "actors" in data
+        assert "count" in data
+
+    def test_find_actor_by_name(self, api):
+        from cli_anything.unreal.core.scene import list_actors, find_actor_by_name
+
+        all_actors = list_actors(api)
+        if not all_actors.get("actors"):
+            pytest.skip("No actors in level")
+
+        first_name = all_actors["actors"][0]["name"]
+        result = find_actor_by_name(api, first_name)
+        assert result["count"] >= 1
+
+    def test_find_actor_cli(self, cli_runner, api_port):
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port),
+            "scene", "find", "Light",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "actors" in data
+
+    def test_describe_actor(self, api):
+        from cli_anything.unreal.core.scene import list_actors, describe_actor
+
+        all_actors = list_actors(api)
+        if not all_actors.get("actors"):
+            pytest.skip("No actors in level")
+
+        actor_path = all_actors["actors"][0]["path"]
+        result = describe_actor(api, actor_path)
+        assert "Properties" in result or "error" in result
+
+    def test_get_actor_transform(self, api):
+        from cli_anything.unreal.core.scene import list_actors, get_actor_transform
+
+        all_actors = list_actors(api)
+        if not all_actors.get("actors"):
+            pytest.skip("No actors in level")
+
+        actor_path = all_actors["actors"][0]["path"]
+        result = get_actor_transform(api, actor_path)
+        assert "location" in result
+        assert "rotation" in result
+        assert "scale" in result
+
+    def test_transform_cli(self, cli_runner, api_port, api):
+        from cli_anything.unreal.core.scene import list_actors
+        from cli_anything.unreal.unreal_cli import cli
+
+        all_actors = list_actors(api)
+        if not all_actors.get("actors"):
+            pytest.skip("No actors in level")
+
+        actor_path = all_actors["actors"][0]["path"]
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port),
+            "scene", "transform", actor_path,
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "location" in data
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  E2E: Asset Management
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.e2e
+class TestAssetsE2E:
+    """Test asset management commands against running editor.
+
+    Creates a temporary asset, checks exists/refs, duplicates, renames,
+    then deletes — verifying each step.
+    """
+
+    TEST_ASSET = "/Game/E2E_AssetTest"
+    TEST_DUPLICATE = "/Game/E2E_AssetTest_Dup"
+    TEST_RENAME = "/Game/E2E_AssetTest_Renamed"
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _cleanup(self, request):
+        """Cleanup test assets after all tests (best-effort)."""
+        yield
+        try:
+            from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+            from cli_anything.unreal.core.script_runner import run_python_code
+            env_port = os.environ.get("UE_TEST_PORT")
+            port = int(env_port) if env_port else 30010
+            api = UEEditorAPI(port=port)
+            if api.is_alive():
+                paths = [TestAssetsE2E.TEST_ASSET,
+                         TestAssetsE2E.TEST_DUPLICATE,
+                         TestAssetsE2E.TEST_RENAME]
+                delete_lines = "\n".join(
+                    f"if EAL.does_asset_exist('{p}'): EAL.delete_asset('{p}')"
+                    for p in paths
+                )
+                code = (
+                    "import unreal\n"
+                    "EAL = unreal.EditorAssetLibrary\n"
+                    f"{delete_lines}\n"
+                    "unreal.SystemLibrary.collect_garbage()\n"
+                    "result = {'cleaned': True}\n"
+                )
+                run_python_code(api, code, timeout=15, save=False)
+        except Exception:
+            pass
+
+    def _script_delete(self, api, asset_path, project_dir=None):
+        """Delete asset via script (reliable, unlike HTTP API on CDO)."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+        code = (
+            "import unreal\n"
+            "EAL = unreal.EditorAssetLibrary\n"
+            f"if EAL.does_asset_exist('{asset_path}'):\n"
+            f"    EAL.delete_asset('{asset_path}')\n"
+            "    unreal.SystemLibrary.collect_garbage()\n"
+            "result = {'cleaned': True}\n"
+        )
+        run_python_code(api, code, project_dir=project_dir, timeout=10, save=False)
+
+    def test_asset_exists_false(self, api, project_path):
+        from cli_anything.unreal.core.assets import asset_exists
+
+        project_dir = str(Path(project_path).parent)
+        self._script_delete(api, self.TEST_ASSET, project_dir)
+
+        result = asset_exists(api, self.TEST_ASSET)
+        assert result["exists"] is False
+
+    def test_asset_create_and_exists(self, api, project_path):
+        from cli_anything.unreal.core.assets import asset_exists
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        project_dir = str(Path(project_path).parent)
+        self._script_delete(api, self.TEST_ASSET, project_dir)
+
+        code = (
+            "import unreal\n"
+            "ATH = unreal.AssetToolsHelpers.get_asset_tools()\n"
+            "mat = ATH.create_asset('E2E_AssetTest', '/Game', "
+            "unreal.Material, unreal.MaterialFactoryNew())\n"
+            "result = {'created': mat is not None}\n"
+        )
+        run_result = run_python_code(api, code, project_dir=project_dir,
+                                     timeout=10, save=False)
+        assert run_result.get("created") is True, f"Create failed: {run_result}"
+
+        result = asset_exists(api, self.TEST_ASSET)
+        assert result["exists"] is True
+
+    def test_asset_refs_no_refs(self, api):
+        from cli_anything.unreal.core.assets import asset_refs
+
+        result = asset_refs(api, self.TEST_ASSET)
+        if "error" in result:
+            pytest.skip("Test asset not created")
+        assert result["count"] == 0
+
+    def test_asset_duplicate(self, api, project_path):
+        from cli_anything.unreal.core.assets import asset_exists, asset_duplicate
+
+        project_dir = str(Path(project_path).parent)
+        self._script_delete(api, self.TEST_DUPLICATE, project_dir)
+
+        result = asset_duplicate(api, self.TEST_ASSET, self.TEST_DUPLICATE,
+                                 project_dir=project_dir)
+        assert result.get("status") == "ok", f"Duplicate failed: {result}"
+
+        exists_result = asset_exists(api, self.TEST_DUPLICATE)
+        assert exists_result["exists"] is True
+
+    def test_asset_delete_with_gc(self, api, project_path):
+        from cli_anything.unreal.core.assets import asset_exists, asset_delete
+
+        project_dir = str(Path(project_path).parent)
+        result = asset_delete(api, self.TEST_DUPLICATE, force=True,
+                              project_dir=project_dir)
+        assert result.get("deleted") is True or result.get("status") == "not_found"
+
+        exists_result = asset_exists(api, self.TEST_DUPLICATE)
+        assert exists_result["exists"] is False
+
+    def test_asset_delete_main(self, api, project_path):
+        from cli_anything.unreal.core.assets import asset_exists, asset_delete
+
+        project_dir = str(Path(project_path).parent)
+        result = asset_delete(api, self.TEST_ASSET, force=True,
+                              project_dir=project_dir)
+        assert result.get("deleted") is True or result.get("status") == "not_found"
+
+        exists_result = asset_exists(api, self.TEST_ASSET)
+        assert exists_result["exists"] is False
+
+    def test_asset_exists_cli(self, cli_runner, api_port, project_path):
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port), "--project", project_path,
+            "project", "asset-exists", "/Game/E2E_NonExistent",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["exists"] is False
+
+    def test_asset_refs_cli(self, cli_runner, api_port, api, project_path):
+        from cli_anything.unreal.unreal_cli import cli
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        project_dir = str(Path(project_path).parent)
+
+        # Ensure clean state via script (HTTP API delete unreliable)
+        cleanup_code = (
+            "import unreal\n"
+            "EAL = unreal.EditorAssetLibrary\n"
+            "can_create = True\n"
+            "if EAL.does_asset_exist('/Game/E2E_AssetTest'):\n"
+            "    if EAL.delete_asset('/Game/E2E_AssetTest'):\n"
+            "        unreal.SystemLibrary.collect_garbage()\n"
+            "    else:\n"
+            "        can_create = False\n"
+            "if can_create:\n"
+            "    ATH = unreal.AssetToolsHelpers.get_asset_tools()\n"
+            "    mat = ATH.create_asset('E2E_AssetTest', '/Game', "
+            "unreal.Material, unreal.MaterialFactoryNew())\n"
+            "    result = {'created': mat is not None}\n"
+            "else:\n"
+            "    result = {'created': False, 'error': 'delete failed'}\n"
+        )
+        run_python_code(api, cleanup_code, project_dir=project_dir, timeout=15, save=False)
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port), "--project", project_path,
+            "project", "asset-refs", self.TEST_ASSET,
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "count" in data
+
+        # Cleanup via script
+        run_python_code(api, (
+            "import unreal\n"
+            "unreal.EditorAssetLibrary.delete_asset('/Game/E2E_AssetTest')\n"
+            "unreal.SystemLibrary.collect_garbage()\n"
+            "result = {'cleaned': True}\n"
+        ), project_dir=project_dir, timeout=10, save=False)

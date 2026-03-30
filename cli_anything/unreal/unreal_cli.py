@@ -34,7 +34,7 @@ from cli_anything.unreal.utils.repl_skin import ReplSkin
 
 _json_output: bool = False
 _session: Session = Session()
-_skin = ReplSkin("unreal", version="0.1.0")
+_skin = ReplSkin("unreal", version="0.1.1")
 _in_repl: bool = False
 
 
@@ -336,6 +336,108 @@ def project_generate():
     output(result)
 
 
+@project_group.command("asset-exists")
+@click.argument("asset_path")
+@handle_error
+def project_asset_exists(asset_path):
+    """Check if an asset exists at the given content path.
+
+    Example: project asset-exists /Game/Materials/M_Water
+    """
+    from cli_anything.unreal.core.assets import asset_exists
+
+    asset_path = _fix_ue_path(asset_path)
+    api = _require_editor()
+    result = asset_exists(api, asset_path, project_dir=_session.project_dir)
+    output(result)
+
+
+@project_group.command("asset-delete")
+@click.argument("asset_path")
+@click.option("--force", is_flag=True, default=False,
+              help="Delete even if other assets reference it (they will have broken references).")
+@handle_error
+def project_asset_delete(asset_path, force):
+    """Safely delete an asset with reference detection.
+
+    Without --force: if other assets reference it, returns the list of
+    referencers instead of deleting (avoids triggering modal dialogs).
+
+    With --force: deletes regardless of references.
+
+    Example: project asset-delete /Game/Materials/M_Old --force
+    """
+    from cli_anything.unreal.core.assets import asset_delete
+
+    asset_path = _fix_ue_path(asset_path)
+    api = _require_editor()
+    result = asset_delete(api, asset_path, force=force, project_dir=_session.project_dir)
+    output(result)
+
+
+@project_group.command("asset-refs")
+@click.argument("asset_path")
+@handle_error
+def project_asset_refs(asset_path):
+    """List all assets that reference the given asset.
+
+    Useful before deleting — shows what would break.
+
+    Example: project asset-refs /Game/Materials/M_Water
+    """
+    from cli_anything.unreal.core.assets import asset_refs
+
+    asset_path = _fix_ue_path(asset_path)
+    api = _require_editor()
+    result = asset_refs(api, asset_path, project_dir=_session.project_dir)
+    output(result)
+
+
+@project_group.command("asset-duplicate")
+@click.argument("source_path")
+@click.argument("dest_path")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite destination if it already exists.")
+@handle_error
+def project_asset_duplicate(source_path, dest_path, force):
+    """Duplicate an asset to a new path.
+
+    With --force: if destination exists, deletes it first then duplicates.
+    Without --force: fails if destination already exists.
+
+    Example: project asset-duplicate /Game/M_Water /Game/M_Water_v2
+    """
+    from cli_anything.unreal.core.assets import asset_duplicate
+
+    source_path = _fix_ue_path(source_path)
+    dest_path = _fix_ue_path(dest_path)
+    api = _require_editor()
+    result = asset_duplicate(api, source_path, dest_path, force=force,
+                             project_dir=_session.project_dir)
+    output(result)
+
+
+@project_group.command("asset-rename")
+@click.argument("source_path")
+@click.argument("dest_path")
+@handle_error
+def project_asset_rename(source_path, dest_path):
+    """Rename/move an asset to a new path.
+
+    Fails if destination already exists.
+
+    Example: project asset-rename /Game/M_Old /Game/M_New
+    """
+    from cli_anything.unreal.core.assets import asset_rename
+
+    source_path = _fix_ue_path(source_path)
+    dest_path = _fix_ue_path(dest_path)
+    api = _require_editor()
+    result = asset_rename(api, source_path, dest_path,
+                          project_dir=_session.project_dir)
+    output(result)
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  BUILD commands
 # ══════════════════════════════════════════════════════════════════════
@@ -593,6 +695,60 @@ def material_textures(material_path):
     material_path = _fix_ue_path(material_path)
     api = _require_editor()
     result = get_material_texture_list(api, material_path, _session.project_dir)
+    output(result)
+
+
+@material_group.command("connections")
+@click.argument("material_path")
+@handle_error
+def material_connections(material_path):
+    """Show material node connection graph.
+
+    Lists which node feeds each material output pin (BaseColor, Normal,
+    WorldPositionOffset, etc.) and identifies orphan nodes not connected
+    to any output.  Custom nodes include HLSL code previews.
+
+    Example: material connections /Game/M_Water
+    """
+    from cli_anything.unreal.core.materials import get_material_connections
+
+    material_path = _fix_ue_path(material_path)
+    api = _require_editor()
+    result = get_material_connections(api, material_path, _session.project_dir)
+
+    if not _json_output and "error" not in result:
+        _skin.section(f"Connections: {material_path}")
+
+        mat_outputs = result.get("material_outputs", {})
+        if mat_outputs:
+            _skin.info("Material Output Pins:")
+            for pin, src in mat_outputs.items():
+                if isinstance(src, dict):
+                    _skin.status(f"  {pin}", f"{src['node']} ({src['node_type']})")
+        else:
+            _skin.warning("No material output connections found")
+
+        orphans = result.get("orphan_nodes", [])
+        if orphans:
+            _skin.warning(f"{len(orphans)} orphan node(s) (not connected to output):")
+            for name in orphans[:10]:
+                _skin.hint(f"  {name}")
+            if len(orphans) > 10:
+                _skin.hint(f"  ... and {len(orphans) - 10} more")
+
+        # Show Custom nodes with code
+        nodes = result.get("nodes", [])
+        customs = [n for n in nodes if n.get("type") == "MaterialExpressionCustom"]
+        if customs:
+            _skin.info(f"\nCustom HLSL Nodes ({len(customs)}):")
+            for c in customs:
+                preview = c.get("code_preview", "(no code)")
+                lines = c.get("code_lines", "?")
+                _skin.status(f"  {c['name']}", f"{lines} lines")
+                if preview:
+                    for line in preview.split("\n")[:3]:
+                        click.echo(f"    {line}")
+
     output(result)
 
 
@@ -998,13 +1154,79 @@ def screenshot_take(filename, no_clean, no_compress):
         project_dir=_session.project_dir,
     )
 
-    # Default: return compressed path as the main output
-    if not no_compress and "compressed" in result:
-        result["default_path"] = result["compressed"]
-    elif "path" in result:
-        result["default_path"] = result["path"]
+    # Default: same path agents read — JPG from compress_for_agent when not --no-compress
+    if result.get("status") == "ok" or result.get("path_raw"):
+        if no_compress:
+            result["default_path"] = result.get("path_raw") or result.get("read_this")
+        else:
+            result["default_path"] = result.get("read_this") or result.get("path_raw")
 
     output(result)
+
+
+def _exec_screenshot_sequence(frames, interval, no_compress):
+    """Implementation for ``screenshot sequence``."""
+    from cli_anything.unreal.core.screenshot import capture_screenshot_atlas
+
+    api = _require_editor()
+    result = capture_screenshot_atlas(
+        api,
+        frames,
+        interval=interval,
+        cols=None,
+        filename_prefix="motion_seq",
+        output_atlas=None,
+        project_dir=_session.project_dir,
+        disable_noisy=True,
+        res_x=1920,
+        res_y=1080,
+        delay=1.0,
+        wait_timeout=15.0,
+        padding=6,
+        label_frames=True,
+        jpeg_for_llm=not no_compress,
+        max_atlas_edge=1920,
+        jpeg_quality=85,
+    )
+    if result.get("status") == "ok":
+        if no_compress:
+            result["default_path"] = result.get("atlas_path") or result.get("read_this")
+        else:
+            result["default_path"] = result.get("read_this") or result.get("atlas_path")
+    output(result)
+
+
+@screenshot_group.command(
+    "sequence",
+    help=(
+        "Viewport frames over time merged into one atlas; "
+        "default primary output is compressed JPG like screenshot take."
+    ),
+)
+@click.option(
+    "-n",
+    "--frames",
+    type=int,
+    default=6,
+    show_default=True,
+    help="How many timed viewport captures to merge into one sheet",
+)
+@click.option(
+    "-i",
+    "--interval",
+    type=float,
+    default=0.5,
+    show_default=True,
+    help="Seconds to wait after each capture (scene time advances)",
+)
+@click.option(
+    "--no-compress",
+    is_flag=True,
+    help="Return raw PNG atlas only (same as screenshot take --no-compress)",
+)
+@handle_error
+def screenshot_sequence(frames, interval, no_compress):
+    _exec_screenshot_sequence(frames, interval, no_compress)
 
 
 @screenshot_group.command("compare")
@@ -1094,12 +1316,47 @@ def editor_status(port):
         if not _json_output:
             _skin.success(f"Editor is online (port {check_port})")
     else:
+        # API not responding — check if UE process is still alive
+        # (may be blocked by a modal dialog)
+        import sys as _sys
         result = {
             "status": "offline",
             "port": check_port,
         }
-        if not _json_output:
-            _skin.error(f"Editor not reachable on port {check_port}")
+        if _sys.platform == "win32":
+            try:
+                from cli_anything.unreal.utils.ue_backend import (
+                    find_running_editors, detect_ue_dialogs,
+                )
+                running = find_running_editors()
+                if running:
+                    result["status"] = "offline_api_blocked"
+                    result["running_editors"] = [
+                        {"pid": e["pid"], "project": e.get("project")} for e in running
+                    ]
+                    dialogs = detect_ue_dialogs()
+                    if dialogs:
+                        result["dialogs"] = [
+                            {"title": d["title"]} for d in dialogs
+                        ]
+                    if not _json_output:
+                        _skin.warning(
+                            f"Editor process running but API not responding on port {check_port}"
+                        )
+                        if dialogs:
+                            _skin.warning("Modal dialog(s) detected:")
+                            for d in dialogs:
+                                _skin.warning(f'  "{d["title"]}"')
+                        _skin.hint("Editor may be blocked by a dialog. Check the editor window.")
+                else:
+                    if not _json_output:
+                        _skin.error(f"Editor not reachable on port {check_port}")
+            except Exception:
+                if not _json_output:
+                    _skin.error(f"Editor not reachable on port {check_port}")
+        else:
+            if not _json_output:
+                _skin.error(f"Editor not reachable on port {check_port}")
 
     output(result)
 
@@ -1217,11 +1474,25 @@ def editor_launch(map_path, wait, timeout):
     import time
 
     from cli_anything.unreal.utils.ue_backend import (
-        preflight_check, find_editor_exe,
+        preflight_check, find_editor_exe, read_rc_port,
     )
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     _require_project()
+
+    # ── Determine poll port ─────────────────────────────────────────
+    # If user explicitly passed --port, respect it.
+    # Otherwise, read from project config (DefaultRemoteControl.ini).
+    ctx = click.get_current_context()
+    port_explicit = (
+        ctx.parent
+        and ctx.parent.get_parameter_source("port") == click.core.ParameterSource.COMMANDLINE
+    )
+    if port_explicit:
+        poll_port = _session.port
+    else:
+        rc_port = read_rc_port(_session.project_dir)
+        poll_port = rc_port if rc_port is not None else _session.port
 
     # ── Preflight check (always runs) ─────────────────────────────────
     if not _json_output:
@@ -1282,22 +1553,52 @@ def editor_launch(map_path, wait, timeout):
                 _skin.hint("Use: cli-anything-unreal editor close")
             return
 
+    # 1b. Warn about any other UE instances (different projects)
+    if running:
+        other_projects = [
+            p for p in running
+            if p.get("project", "") and Path(p["project"]).resolve().as_posix().lower() != Path(project_path_norm).as_posix().lower()
+        ]
+        if other_projects:
+            if _json_output:
+                output({
+                    "status": "warning",
+                    "warning": "other_editors_running",
+                    "running_editors": other_projects,
+                    "message": (
+                        f"{len(other_projects)} other UE editor(s) running. "
+                        "Port conflicts may occur if they use the same Remote Control port."
+                    ),
+                })
+            else:
+                _skin.warning(f"{len(other_projects)} other UE editor(s) running:")
+                for ep in other_projects:
+                    _skin.warning(f"  PID {ep['pid']}: {ep.get('project', 'unknown')}")
+                _skin.hint("Port conflicts may occur. Continue at your own risk.")
+
     # 2. Check by API port — detect any UE instance on the target port
-    api_check = UEEditorAPI(port=_session.port)
+    api_check = UEEditorAPI(port=poll_port)
     if api_check.is_alive():
         output({
             "status": "already_running",
-            "port": _session.port,
+            "port": poll_port,
             "message": (
-                f"An editor is already responding on port {_session.port}. "
+                f"An editor is already responding on port {poll_port}. "
                 "Use 'editor close' to shut it down, or use a different --port."
             ),
         })
         if not _json_output:
-            _skin.error(f"Port {_session.port} is already in use by an editor")
+            _skin.error(f"Port {poll_port} is already in use by an editor")
             _skin.hint("Use: cli-anything-unreal editor close")
-            _skin.hint(f"Or launch on another port: editor launch --port {_session.port + 10}")
+            _skin.hint(f"Or launch on another port: editor launch --port {poll_port + 10}")
         return
+
+    # ── Auto-deploy bridge plugin before launch ────────────────────
+    from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+    deploy = ensure_plugin_deployed(_session.project_dir)
+    if deploy["deployed"] and deploy["action"] != "already_up_to_date":
+        if not _json_output:
+            _skin.info(f"Bridge plugin {deploy['action']} → {deploy['plugin_dir']}")
 
     # ── Build command ───────────────────────────────────────────────
     cmd = [editor_exe, _session.project_path]
@@ -1365,9 +1666,9 @@ def editor_launch(map_path, wait, timeout):
     # ── Wait for API ────────────────────────────────────────────────
     if wait:
         if not _json_output:
-            _skin.info(f"Waiting for Remote Control API on port {_session.port} (timeout {timeout}s)...")
+            _skin.info(f"Waiting for Remote Control API on port {poll_port} (timeout {timeout}s)...")
 
-        api = UEEditorAPI(port=_session.port)
+        api = UEEditorAPI(port=poll_port)
         start_time = time.time()
         deadline = start_time + timeout
         poll_interval = 5.0
@@ -1402,7 +1703,7 @@ def editor_launch(map_path, wait, timeout):
 
             if api.is_alive():
                 result["status"] = "online"
-                result["port"] = _session.port
+                result["port"] = poll_port
                 elapsed = int(time.time() - start_time)
                 result["startup_time_seconds"] = elapsed
                 if not _json_output:
@@ -1412,7 +1713,7 @@ def editor_launch(map_path, wait, timeout):
             # Check log for fatal errors even while process is running
             # (catches modal dialog popups that keep the process alive)
             elapsed = time.time() - start_time
-            if elapsed > 30:  # Give editor 30s before checking logs
+            if elapsed > 30:  # Give editor 30s before checking
                 log_error = _check_log_errors()
                 if log_error:
                     result["status"] = "error_dialog"
@@ -1427,6 +1728,30 @@ def editor_launch(map_path, wait, timeout):
                         _skin.hint("Close the dialog in the editor, then fix the issue.")
                     break
 
+                # Check for modal dialogs via Windows API (Windows only)
+                if sys.platform == "win32":
+                    try:
+                        from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs
+                        dialogs = detect_ue_dialogs()
+                        if dialogs:
+                            result["status"] = "blocked_by_dialog"
+                            result["dialogs"] = [
+                                {"title": d["title"], "hwnd": d["hwnd"]} for d in dialogs
+                            ]
+                            result["error"] = (
+                                "Editor is blocked by modal dialog(s). "
+                                "Close them and retry. "
+                                + ", ".join(f'"{d["title"]}"' for d in dialogs)
+                            )
+                            if not _json_output:
+                                _skin.error("Editor blocked by modal dialog:")
+                                for d in dialogs:
+                                    _skin.error(f'  "{d["title"]}"')
+                                _skin.hint("Close the dialog(s) in the editor window.")
+                            break
+                    except Exception:
+                        pass
+
             remaining = int(deadline - time.time())
             if not _json_output and int(time.time()) % 15 == 0:
                 _skin.hint(f"  Still waiting... ({remaining}s remaining)")
@@ -1434,7 +1759,7 @@ def editor_launch(map_path, wait, timeout):
         else:
             result["status"] = "timeout"
             result["error"] = (
-                f"Editor API did not respond within {timeout}s on port {_session.port}. "
+                f"Editor API did not respond within {timeout}s on port {poll_port}. "
                 "Editor may still be loading, or may be stuck on a dialog/popup. "
                 "Check the editor window manually."
             )
@@ -1467,7 +1792,18 @@ def editor_close():
         return
 
     if not _json_output:
-        _skin.info(f"Sending quit to editor on port {_session.port}...")
+        _skin.info(f"Sending save + quit to editor on port {_session.port}...")
+
+    # Save all dirty packages before quitting (prevents recovery dialog on next launch)
+    try:
+        api.call_function(
+            "/Script/EditorScriptingUtilities.Default__EditorLoadingAndSavingUtils",
+            "SaveDirtyPackages",
+            {"bPromptUserToSave": False, "bSaveMapPackages": True, "bSaveContentPackages": True},
+        )
+        time.sleep(1)
+    except Exception:
+        pass
 
     # Send quit command
     api.exec_console("quit")
@@ -1769,6 +2105,11 @@ def _print_repl_help():
         "project config get <name>": "Read a config file",
         "project config set <name> <sec> <k> <v>": "Set a config value",
         "project content": "List content assets",
+        "project asset-exists": "Check if asset exists",
+        "project asset-delete": "Delete asset (with ref check)",
+        "project asset-refs": "List asset referencers",
+        "project asset-duplicate": "Duplicate asset (--force to overwrite)",
+        "project asset-rename": "Rename/move asset",
         "project generate": "Generate VS project files",
         "": "",
         "build compile": "Compile C++ code",
@@ -1784,13 +2125,15 @@ def _print_repl_help():
         "scene material <path>": "Get actor's material ★",
         "scene transform <path>": "Get actor transform",
         "material list": "List all materials",
-        "material info <path>": "Material details",
+        "material info <path>": "Material details + connections ★",
+        "material connections <path>": "Connection graph + orphans",
         "material stats <path>": "Compilation statistics",
         "material errors <path>": "Check for errors",
         "material textures <path>": "List referenced textures",
         "material analyze <path>": "Auto-analyze issues ★",
         "  ": "",
         "screenshot take": "Capture viewport",
+        "screenshot sequence": "Time-ordered frame atlas",
         "screenshot compare <a> <b>": "Compare screenshots",
         "screenshot cvar-test": "CVar A/B screenshot",
         "screenshot compress <path>": "Compress for Agent",

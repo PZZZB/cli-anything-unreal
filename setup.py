@@ -22,7 +22,7 @@ long_description = README.read_text(encoding="utf-8") if README.exists() else ""
 
 setup(
     name="cli-anything-unreal",
-    version="0.1.0",
+    version="0.1.1",
     description="CLI harness for Unreal Engine - control UE editor via CLI for AI Agent workflows",
     long_description=long_description,
     long_description_content_type="text/markdown",
