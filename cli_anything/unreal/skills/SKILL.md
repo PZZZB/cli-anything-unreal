@@ -28,7 +28,7 @@ You are an AI Agent with access to `cli-anything-unreal`, a CLI tool that contro
 
 2. **Always pass `--json`** so you get structured output you can parse and act on programmatically. Without it, you get human-readable text that's harder to reason about.
 
-3. **Specify `--project` on the first command** (or set the env var). The CLI has no way to auto-discover which .uproject you mean.
+3. **Specify `--project` on the first command** (or set the env var). The CLI has no way to auto-discover which .uproject you mean. Once provided, subsequent commands in the same shell session inherit it — you don't need to repeat `--project` every time.
 
 4. **Prefer CLI commands over writing Python scripts.** Most operations (material editing, blueprint editing, scene queries) already have dedicated commands — they're faster and less error-prone than scripts. Check `<group> --help` first. Only write scripts via `editor run-script` for operations not covered by existing commands.
 
@@ -48,16 +48,18 @@ When the user asks you to do something in Unreal, follow this sequence:
 
 CLI commands return JSON with an `error` field when something goes wrong. Common patterns:
 
-- **Connection refused** → editor not running. Use `editor launch` first.
-- **Timeout** → editor is busy (compiling shaders, loading a level). Wait 10-15 seconds and retry.
-- **Asset not found** → path is wrong. Use `material list`, `blueprint list`, or `project content` to find the correct path.
-- **"modules built with different engine version"** → Run `editor preflight` → `build compile` → `editor launch`.
-- **Material `expressions` is protected** → Do not access `Material.expressions` directly. Use `material info` to read, CLI edit commands to modify.
-- **Screenshot fails** → editor window must be visible (the CLI auto-brings it to foreground).
-- **HLSL dump empty** → shader may need recompilation first; run `material recompile`.
+- **Connection refused** → editor not running. Run `editor launch` to start it, then `editor status` to confirm it's reachable.
+- **Timeout** → editor is busy (compiling shaders, loading a level). Run `editor status` to check; if reachable, wait 10-15 seconds and retry the original command.
+- **Asset not found** → path is wrong. Run `material list`, `blueprint list`, or `project content` to discover the correct path, then retry.
+- **"modules built with different engine version"** → Run `editor preflight` to diagnose → `build compile` to rebuild → `editor launch` to start fresh.
+- **Material `expressions` is protected** → Do not access `Material.expressions` directly. Use `material info` to read, CLI edit commands (`add-node`, `connect`, `delete-node`) to modify.
+- **Screenshot fails** → editor window must be visible. Retry — the CLI auto-brings it to foreground on the attempt.
+- **HLSL dump empty** → shader may need recompilation first. Run `material recompile`, then retry `material hlsl`.
 - **Asset overwrite dialog blocks script** → see "Avoiding Asset Overwrite Dialogs" below.
 
 ## Avoiding Asset Overwrite Dialogs
+
+> **CLI commands handle this automatically.** `project asset-delete` and `project asset-duplicate --force` already include reference checking and GC. This section only matters when writing Python scripts via `editor run-script`.
 
 `create_asset` / `duplicate_asset` will pop a modal "Overwrite Existing Object" dialog if the target path already has an asset loaded in memory, blocking CLI execution indefinitely.
 
@@ -178,6 +180,71 @@ Script return conventions:
 
 Dirty packages are auto-saved after script execution. Use `--no-save` for read-only scripts.
 
+### Blueprint Editing
+```bash
+# 1. Find the blueprint
+cli-anything-unreal --json blueprint list --path /Game/Blueprints/
+
+# 2. Inspect current state (graphs, nodes, variables)
+cli-anything-unreal --json blueprint info /Game/BP_Enemy
+
+# 3. Add a variable
+cli-anything-unreal --json blueprint add-variable /Game/BP_Enemy \
+    --name Health --type Float
+
+# 4. Add a function
+cli-anything-unreal --json blueprint add-function /Game/BP_Enemy \
+    --name TakeDamage
+
+# 5. Clean up unused variables
+cli-anything-unreal --json blueprint remove-unused-variables /Game/BP_Enemy
+
+# 6. Compile and verify
+cli-anything-unreal --json blueprint compile /Game/BP_Enemy
+```
+
+### Scene Manipulation
+```bash
+# 1. Find actors by name
+cli-anything-unreal --json scene find "DirectionalLight"
+
+# 2. Inspect all properties and functions on an actor
+cli-anything-unreal --json scene describe <actor_path>
+
+# 3. Read a property
+cli-anything-unreal --json scene property <actor_path> Intensity
+
+# 4. Modify a property
+cli-anything-unreal --json scene property <actor_path> Intensity --set 5.0
+
+# 5. Check transform (location, rotation, scale)
+cli-anything-unreal --json scene transform <actor_path>
+
+# 6. List components
+cli-anything-unreal --json scene components <actor_path>
+
+# 7. Find which material an actor uses
+cli-anything-unreal --json scene material <actor_path>
+```
+
+Use `scene actors` to list everything in the current level when you don't know the actor name.
+
+### Build & Package
+```bash
+# 1. Compile C++ (editor does NOT need to be running)
+cli-anything-unreal --json --project F:\RXGame\RXGame.uproject build compile
+
+# 2. Cook content for target platform
+cli-anything-unreal --json --project F:\RXGame\RXGame.uproject build cook --platform Win64
+
+# 3. Full package (compile + cook + stage)
+cli-anything-unreal --json --project F:\RXGame\RXGame.uproject build package \
+    --platform Win64 --config Shipping
+
+# 4. Check build status (binary info, last build logs)
+cli-anything-unreal --json --project F:\RXGame\RXGame.uproject build status
+```
+
 ### Actor → Material → Shader Investigation
 ```bash
 cli-anything-unreal --json scene find "PostProcessVolume"
@@ -196,10 +263,15 @@ cli-anything-unreal --json screenshot cvar-test \
 
 ## Multi-Instance
 
-Multiple editors can run simultaneously. Use `--port` to target a specific instance. Use `editor list` to discover all running instances.
+Multiple editors can run simultaneously — useful when working on different maps or comparing changes across project copies. Each instance listens on a different port. Use `editor list` to discover all running instances, then `--port` to target one.
 
 ```bash
+# Discover all running editors (port, project, pid)
 cli-anything-unreal --json editor list
+
+# Target a specific instance by port
 cli-anything-unreal --json --port 30010 editor status
 cli-anything-unreal --json --port 30011 material list
 ```
+
+Without `--port`, commands target the default port (30010). If `editor list` returns multiple instances, always confirm which port you need before running commands.

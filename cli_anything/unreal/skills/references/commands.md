@@ -182,7 +182,7 @@ All screenshot commands require the editor to be running.
 | Command | Description |
 |---------|-------------|
 | `screenshot take [--filename NAME]` | Capture viewport screenshot |
-| `screenshot sequence [-n N] [-i SEC] [--no-compress]` | Time-ordered atlas; default primary output is compressed JPG like `screenshot take` (PNG sheet still under Saved/…/motion_seq_motion_sheet.png) |
+| `screenshot sequence [-n N] [-i SEC] [--no-compress]` | Capture N screenshots at interval SEC, output as compressed JPG atlas (raw PNG sheet saved under Saved/) |
 | `screenshot compare FILE_A FILE_B` | Compare two screenshots |
 | `screenshot compress FILE [--max-size N]` | Compress for Agent vision analysis |
 | `screenshot cvar-test --cvar NAME --values V1,V2 [--labels L1,L2]` | A/B comparison with different CVar values |
