@@ -16,7 +16,7 @@ from pathlib import Path
 from setuptools import setup, find_namespace_packages
 
 ROOT = Path(__file__).parent
-README = ROOT / "cli_anything/unreal/README.md"
+README = ROOT / "README.md"
 
 long_description = README.read_text(encoding="utf-8") if README.exists() else ""
 
