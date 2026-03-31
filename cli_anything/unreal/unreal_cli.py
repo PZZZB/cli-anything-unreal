@@ -226,25 +226,11 @@ def install_skills():
     """Install AI agent skills for Cursor and Claude Code."""
     import os
     import shutil
-    try:
-        from importlib.resources import files
-        try:
-            skill_content = files("cli_anything.unreal.skills").joinpath("SKILL.md").read_text(encoding="utf-8")
-        except Exception:
-            # Fallback for older python or missing package data
-            skill_path = Path(__file__).parent / "skills" / "SKILL.md"
-            if skill_path.exists():
-                skill_content = skill_path.read_text(encoding="utf-8")
-            else:
-                _skin.error("Could not find SKILL.md in the package.")
-                return
-    except ImportError:
-        skill_path = Path(__file__).parent / "skills" / "SKILL.md"
-        if skill_path.exists():
-            skill_content = skill_path.read_text(encoding="utf-8")
-        else:
-            _skin.error("Could not find SKILL.md in the package.")
-            return
+
+    source_dir = Path(__file__).parent / "skills"
+    if not source_dir.exists() or not source_dir.is_dir():
+        _skin.error("Could not find skills directory in the package.")
+        return
 
     # Install to current directory and global cursor
     targets = [
@@ -256,12 +242,12 @@ def install_skills():
     installed = 0
     for target_dir in targets:
         try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            dest_file = target_dir / "SKILL.md"
-            dest_file.write_text(skill_content, encoding="utf-8")
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            shutil.copytree(source_dir, target_dir)
             installed += 1
             if not _json_output:
-                _skin.success(f"Installed skill to: {dest_file}")
+                _skin.success(f"Installed skill to: {target_dir}")
         except Exception as e:
             if not _json_output:
                 _skin.warning(f"Failed to install skill to {target_dir}: {e}")
