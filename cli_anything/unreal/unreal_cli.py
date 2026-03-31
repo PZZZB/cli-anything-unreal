@@ -236,7 +236,10 @@ def install_skills():
     targets = [
         Path.cwd() / ".cursor" / "skills" / "cli-anything-unreal",
         Path.cwd() / ".claude" / "skills" / "cli-anything-unreal",
+        Path.cwd() / ".codebuddy" / "agents" / "cli-anything-unreal",
+        Path.cwd() / ".gemini" / "skills" / "cli-anything-unreal",
         Path.home() / ".cursor" / "skills" / "cli-anything-unreal",
+        Path.home() / ".codebuddy" / "agents" / "cli-anything-unreal",
     ]
 
     installed = 0
