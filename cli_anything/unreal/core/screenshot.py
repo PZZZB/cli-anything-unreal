@@ -151,91 +151,46 @@ def _capture_viewport_png_raw(
     res_y: int,
     delay: float,
 ) -> dict:
-    """Run TakeHighResScreenshot and wait for PNG on disk. No CVar scrub, no JPEG."""
+    """Capture the active Unreal Editor Viewport using the CliAnythingBridge C++ plugin."""
     foreground_ok = api.bring_to_foreground()
     refresh_result = _refresh_editor_viewports(api)
+    
+    # Wait for the viewports to refresh / rendering delay
+    time.sleep(delay)
 
-    api_result = api.take_screenshot(
-        filename=filename,
-        res_x=res_x,
-        res_y=res_y,
-        delay=delay,
-    )
-    if "error" in api_result:
-        return api_result
+    save_dir = Path(project_dir) / "Saved" / "Screenshots" / "WindowsEditor" if project_dir else Path.cwd()
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"{filename}.png"
+    
+    filepath_safe = str(save_path).replace("\\", "/")
+    py_code = f"""import unreal
+try:
+    success = unreal.CliAnythingBridgeLibrary.take_viewport_screenshot_sync("{filepath_safe}")
+    unreal.log("SCREENSHOT_RESULT:" + str(success))
+except Exception as e:
+    unreal.log_error("SCREENSHOT_ERROR:" + str(e))
+"""
 
-    time.sleep(delay + 0.3)
-    screenshot_path = _find_screenshot(
-        filename,
-        project_dir,
-        max(2.0, wait_timeout / 2.0),
-    )
-
-    if screenshot_path and Path(screenshot_path).exists():
-        size = Path(screenshot_path).stat().st_size
+    py_res = api.exec_python_ex(py_code)
+    
+    if save_path.exists():
+        size = save_path.stat().st_size
         return {
             "status": "ok",
-            "path_raw": screenshot_path,
+            "path_raw": str(save_path),
             "size_raw": size,
-            "capture_mode": "foreground_then_refresh",
+            "capture_mode": "cpp_plugin_sync",
             "foreground_ok": foreground_ok,
             "refresh": refresh_result,
-        }
-
-    screenshot_path = None
-    attempts = 2
-
-    for attempt_idx in range(attempts):
-        foreground_ok = api.bring_to_foreground() or foreground_ok
-        if attempt_idx == 0:
-            _refresh_editor_viewports(api)
-        time.sleep(0.5)
-
-        api_result = api.take_screenshot(
-            filename=filename,
-            res_x=res_x,
-            res_y=res_y,
-            delay=delay + (0.3 * attempt_idx),
-        )
-
-        if "error" in api_result:
-            return api_result
-
-        time.sleep(delay + 0.5 + (0.3 * attempt_idx))
-
-        screenshot_path = _find_screenshot(
-            filename,
-            project_dir,
-            max(2.0, wait_timeout / attempts),
-        )
-        if screenshot_path and Path(screenshot_path).exists():
-            break
-
-    if screenshot_path and Path(screenshot_path).exists():
-        size = Path(screenshot_path).stat().st_size
-        return {
-            "status": "ok",
-            "path_raw": screenshot_path,
-            "size_raw": size,
-            "capture_mode": "focus_fallback",
-            "foreground_ok": foreground_ok,
-            "refresh": refresh_result,
+            "api_result": py_res,
         }
 
     return {
-        "status": "requested",
-        "message": "Screenshot requested but file not found yet. "
-        "It may appear shortly in Saved/Screenshots/WindowsEditor/",
+        "status": "error",
+        "message": "C++ plugin failed to capture the editor viewport.",
         "foreground_ok": foreground_ok,
-        "attempts": attempts,
-        "hint": (
-            "The editor window may not have had focus. "
-            "Screenshots require the viewport to be rendering (window visible and focused)."
-            if not foreground_ok
-            else None
-        ),
         "refresh": refresh_result,
-        "api_result": api_result,
+        "api_result": py_res,
     }
 
 
