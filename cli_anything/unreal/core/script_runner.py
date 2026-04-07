@@ -192,12 +192,33 @@ def _execute(
             "error": resp.get("CommandResult", "ExecutePythonCommandEx failed"),
         }
 
+    ue_errors = []
+    ue_warnings = []
+    for entry in resp.get("LogOutput", []):
+        log_type = entry.get("Type", "")
+        log_out = entry.get("Output", "")
+        if log_type == "Error":
+            ue_errors.append(log_out)
+        elif log_type == "Warning":
+            ue_warnings.append(log_out)
+
     for entry in reversed(resp.get("LogOutput", [])):
         output = entry.get("Output", "")
         if output.startswith(_RESULT_MARKER):
             try:
-                return json.loads(output[len(_RESULT_MARKER):])
+                res = json.loads(output[len(_RESULT_MARKER):])
+                if isinstance(res, dict):
+                    if ue_errors:
+                        res["ue_errors"] = ue_errors
+                    if ue_warnings:
+                        res["ue_warnings"] = ue_warnings
+                return res
             except json.JSONDecodeError as exc:
                 return {"error": f"Malformed JSON result: {exc}", "raw": output}
 
-    return {"status": "ok", "note": "Script produced no marked result"}
+    res = {"status": "ok", "note": "Script produced no marked result"}
+    if ue_errors:
+        res["ue_errors"] = ue_errors
+    if ue_warnings:
+        res["ue_warnings"] = ue_warnings
+    return res
