@@ -17,4 +17,12 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static TArray<FString> GetMaterialCompileErrors(UMaterialInterface* Material);
+
+	/**
+	 * Gets the absolute screen coordinates (X, Y, Width, Height) of the active level viewport.
+	 * If no viewport is active or found, returns all zeros.
+	 * Allows Python scripts to crop a full-screen screenshot to just the viewport.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FIntVector4 GetActiveViewportScreenBounds();
 };

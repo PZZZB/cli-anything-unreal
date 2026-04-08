@@ -1,21 +1,21 @@
 """core/screenshot.py — Screenshot capture and comparison.
 
-Provides viewport screenshot, high-res capture, CVar A/B testing,
-and image compression for AI Agent vision analysis.
-Requires a running UE editor with Remote Control API.
-
-Screenshot method:
-  Uses AutomationBlueprintFunctionLibrary.TakeHighResScreenshot via
-  /Script/FunctionalTesting module. Screenshots saved to:
+Requires a running UE editor with Remote Control API. Capture uses **one**
+implementation: on **Windows**, the CLI process grabs the main Unreal Editor
+window with GDI (``PrintWindow`` + ``GetDIBits``) and writes PNG via Pillow —
+no C++ plugin. Output path:
   {ProjectDir}/Saved/Screenshots/WindowsEditor/{filename}.png
+
+Also provides CVar A/B testing, atlas layout, Pillow compare/compress — these
+are orchestration around the same capture primitive.
 """
 
 import math
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Optional
-
 
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
@@ -151,46 +151,83 @@ def _capture_viewport_png_raw(
     res_y: int,
     delay: float,
 ) -> dict:
-    """Capture the active Unreal Editor Viewport using the CliAnythingBridge C++ plugin."""
-    foreground_ok = api.bring_to_foreground()
-    refresh_result = _refresh_editor_viewports(api)
-    
-    # Wait for the viewports to refresh / rendering delay
-    time.sleep(delay)
+    """Capture the main editor window to PNG from the CLI host (Windows GDI + Pillow).
 
-    save_dir = Path(project_dir) / "Saved" / "Screenshots" / "WindowsEditor" if project_dir else Path.cwd()
-    save_dir.mkdir(parents=True, exist_ok=True)
-    save_path = save_dir / f"{filename}.png"
-    
-    filepath_safe = str(save_path).replace("\\", "/")
-    py_code = f"""import unreal
-try:
-    success = unreal.CliAnythingBridgeLibrary.take_viewport_screenshot_sync("{filepath_safe}")
-    unreal.log("SCREENSHOT_RESULT:" + str(success))
-except Exception as e:
-    unreal.log_error("SCREENSHOT_ERROR:" + str(e))
-"""
-
-    py_res = api.exec_python_ex(py_code)
-    
-    if save_path.exists():
-        size = save_path.stat().st_size
+    ``res_x`` / ``res_y`` are reserved for API compatibility; capture uses the
+    current editor window size.
+    """
+    if sys.platform != "win32":
         return {
-            "status": "ok",
-            "path_raw": str(save_path),
-            "size_raw": size,
-            "capture_mode": "cpp_plugin_sync",
-            "foreground_ok": foreground_ok,
-            "refresh": refresh_result,
-            "api_result": py_res,
+            "status": "error",
+            "message": "Editor window capture is only implemented on Windows (CLI host).",
+            "foreground_ok": False,
+            "refresh": {},
         }
 
+    foreground_ok = api.bring_to_foreground()
+    refresh_result = _refresh_editor_viewports(api)
+
+    time.sleep(delay)
+
+    save_dir = (
+        Path(project_dir) / "Saved" / "Screenshots" / "WindowsEditor"
+        if project_dir
+        else Path.cwd()
+    )
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"{filename}.png"
+
+    hwnd = api.find_editor_window_hwnd()
+    if not hwnd:
+        return {
+            "status": "error",
+            "message": "Could not find Unreal Editor window handle (is the editor running?).",
+            "foreground_ok": foreground_ok,
+            "refresh": refresh_result,
+        }
+
+    # 1) Get viewport bounds via CliAnythingBridge so we can crop the full window.
+    #    (If plugin is missing or returns 0, we'll keep the full window).
+    bounds_script = (
+        "import unreal\n"
+        "try:\n"
+        "    bounds = unreal.CliAnythingBridgeLibrary.get_active_viewport_screen_bounds()\n"
+        "    unreal.log(f'VIEWPORT_BOUNDS:{bounds.x},{bounds.y},{bounds.z},{bounds.w}')\n"
+        "except Exception:\n"
+        "    pass"
+    )
+    bounds_res = api.exec_python_ex(bounds_script)
+    viewport_rect = None
+    for line in bounds_res.get("output", []):
+        if line.startswith("VIEWPORT_BOUNDS:"):
+            parts = line.split(":", 1)[1].split(",")
+            try:
+                x, y, w, h = map(int, parts)
+                if w > 0 and h > 0:
+                    viewport_rect = (x, y, x + w, y + h)
+            except ValueError:
+                pass
+
+    from cli_anything.unreal.core.win32_editor_capture import capture_hwnd_to_png
+
+    if not capture_hwnd_to_png(hwnd, save_path, crop_rect=viewport_rect):
+        return {
+            "status": "error",
+            "message": (
+                "GDI capture failed (install Pillow if missing: pip install Pillow)."
+            ),
+            "foreground_ok": foreground_ok,
+            "refresh": refresh_result,
+        }
+
+    size = save_path.stat().st_size
     return {
-        "status": "error",
-        "message": "C++ plugin failed to capture the editor viewport.",
+        "status": "ok",
+        "path_raw": str(save_path),
+        "size_raw": size,
+        "capture_mode": "win32_gdi_cli",
         "foreground_ok": foreground_ok,
         "refresh": refresh_result,
-        "api_result": py_res,
     }
 
 
@@ -204,16 +241,16 @@ def take_screenshot(
     res_y: int = 1080,
     delay: float = _DEFAULT_RENDER_DELAY,
 ) -> dict:
-    """Take a screenshot of the editor viewport.
+    """Capture the main Unreal Editor window to PNG (then optional JPEG for agents).
 
     Args:
         api: Connected UEEditorAPI instance.
         filename: Output filename (without extension).
         disable_noisy: If True, temporarily disable noisy effects.
         project_dir: Project directory (for finding saved screenshots).
-        wait_timeout: Max seconds to wait for file to appear on disk.
-        res_x: Screenshot width.
-        res_y: Screenshot height.
+        wait_timeout: Unused (capture is synchronous); kept for API compatibility.
+        res_x: Unused; capture uses the live editor window size.
+        res_y: Unused; capture uses the live editor window size.
         delay: Seconds for viewport to render before capture.
 
     Returns:
@@ -253,151 +290,6 @@ def take_screenshot(
         if disable_noisy and saved_cvars:
             _noisy_scrub_end(api, saved_cvars)
 
-
-
-def compare_screenshots(
-    api: UEEditorAPI,
-    image_a: str,
-    image_b: str,
-    tolerance: str = "Low",
-) -> dict:
-    """Compare two screenshots for differences.
-
-    Uses pixel-level comparison via Pillow if available,
-    otherwise reports basic file size comparison.
-
-    Args:
-        api: UEEditorAPI (unused currently, kept for API compat).
-        image_a: Path to first image.
-        image_b: Path to second image.
-        tolerance: Comparison tolerance (Zero, Low, Medium, High).
-
-    Returns:
-        {"similar": bool, "difference": float, ...}
-    """
-    try:
-        from PIL import Image, ImageChops
-        import math
-
-        img_a = Image.open(image_a).convert("RGB")
-        img_b = Image.open(image_b).convert("RGB")
-
-        # Resize if different dimensions
-        if img_a.size != img_b.size:
-            img_b = img_b.resize(img_a.size, Image.LANCZOS)
-
-        diff = ImageChops.difference(img_a, img_b)
-        pixels = list(diff.getdata())
-        total_diff = sum(sum(p) for p in pixels)
-        max_diff = len(pixels) * 255 * 3
-        difference_pct = (total_diff / max_diff) * 100 if max_diff > 0 else 0
-
-        thresholds = {"Zero": 0, "Low": 1.0, "Medium": 5.0, "High": 15.0}
-        threshold = thresholds.get(tolerance, 1.0)
-
-        return {
-            "similar": difference_pct <= threshold,
-            "difference_percent": round(difference_pct, 4),
-            "tolerance": tolerance,
-            "threshold_percent": threshold,
-            "image_a": image_a,
-            "image_b": image_b,
-        }
-    except ImportError:
-        # Fallback: compare file sizes
-        size_a = Path(image_a).stat().st_size
-        size_b = Path(image_b).stat().st_size
-        size_diff = abs(size_a - size_b) / max(size_a, size_b) * 100
-
-        return {
-            "similar": size_diff < 5,
-            "size_difference_percent": round(size_diff, 2),
-            "note": "Pillow not installed; comparison is file-size only",
-            "image_a": image_a,
-            "image_b": image_b,
-        }
-
-
-def screenshot_with_cvar(
-    api: UEEditorAPI,
-    cvar_name: str,
-    values: list[str],
-    labels: list[str] | None = None,
-    filename_prefix: str = "cvar_test",
-    settle_time: float = 1.0,
-    project_dir: str | None = None,
-) -> dict:
-    """Take screenshots with different CVar values for A/B comparison.
-
-    Args:
-        api: Connected UEEditorAPI instance.
-        cvar_name: CVar name to toggle.
-        values: List of values to test.
-        labels: Optional labels for each value.
-        filename_prefix: Filename prefix for screenshots.
-        settle_time: Seconds to wait after CVar change before screenshot.
-        project_dir: Project directory.
-
-    Returns:
-        {"screenshots": [{"label": str, "path": str, "cvar_value": str}, ...]}
-    """
-    if labels is None:
-        labels = [f"value_{v}" for v in values]
-
-    if len(labels) != len(values):
-        return {"error": "labels and values must have the same length"}
-
-    # Save original CVar value
-    original_value = api.get_cvar(cvar_name)
-
-    screenshots = []
-    try:
-        for i, (value, label) in enumerate(zip(values, labels)):
-            # Set CVar
-            api.set_cvar(cvar_name, value)
-
-            # Wait for rendering to settle
-            time.sleep(settle_time)
-
-            # Take screenshot with extra delay for rendering
-            fname = f"{filename_prefix}_{label}"
-            result = take_screenshot(
-                api,
-                filename=fname,
-                disable_noisy=True,
-                project_dir=project_dir,
-                delay=settle_time + 0.5,
-            )
-
-            screenshots.append({
-                "label": label,
-                "cvar_value": value,
-                **result,
-            })
-
-    finally:
-        # Restore original CVar
-        if original_value:
-            api.set_cvar(cvar_name, str(original_value))
-
-    # Compare consecutive screenshots
-    comparisons = []
-    for i in range(len(screenshots) - 1):
-        a = screenshots[i].get("path", "")
-        b = screenshots[i + 1].get("path", "")
-        if a and b and Path(a).exists() and Path(b).exists():
-            comp = compare_screenshots(api, a, b)
-            comparisons.append({
-                "a": screenshots[i]["label"],
-                "b": screenshots[i + 1]["label"],
-                **comp,
-            })
-
-    return {
-        "cvar": cvar_name,
-        "screenshots": screenshots,
-        "comparisons": comparisons,
-    }
 
 
 def combine_images_to_atlas(
@@ -515,17 +407,17 @@ def capture_screenshot_atlas(
     output_atlas: str | None = None,
     project_dir: str | None = None,
     disable_noisy: bool = True,
-    res_x: int = 1920,
-    res_y: int = 1080,
-    delay: float = _DEFAULT_RENDER_DELAY,
-    wait_timeout: float = 15.0,
-    padding: int = 6,
-    label_frames: bool = True,
-    jpeg_for_llm: bool = True,
-    max_atlas_edge: int = 4096,
-    jpeg_quality: int = 85,
-) -> dict:
-    """Capture several viewport frames spaced in time, then merge into one PNG atlas.
+        res_x: int = 1920,
+        res_y: int = 1080,
+        delay: float = _DEFAULT_RENDER_DELAY,
+        wait_timeout: float = 15.0,
+        padding: int = 6,
+        label_frames: bool = True,
+        jpeg_for_llm: bool = True,
+        max_atlas_edge: int = 4096,
+        jpeg_quality: int = 85,
+    ) -> dict:
+    """Capture several editor-window frames spaced in time, then merge into one PNG atlas.
 
     Args:
         api: Connected editor API.
@@ -536,9 +428,9 @@ def capture_screenshot_atlas(
         output_atlas: Output .png path; default under project's Screenshots/WindowsEditor.
         project_dir: UE project directory (for finding/writing screenshots).
         disable_noisy: If True, scrub bloom/TAA/etc. once for the whole capture run.
-        res_x, res_y: Capture resolution.
-        delay: UE high-res shot delay.
-        wait_timeout: Per-frame file wait.
+        res_x, res_y: Unused (compatibility); native capture uses editor window size.
+        delay: Seconds to wait for rendering before each capture.
+        wait_timeout: Unused (synchronous capture); kept for API compatibility.
         padding, label_frames: Passed to ``combine_images_to_atlas``.
         jpeg_for_llm: Also write a downscaled JPEG next to the atlas.
         max_atlas_edge: Max dimension for JPEG downsampling.
@@ -576,7 +468,7 @@ def capture_screenshot_atlas(
         prep_refresh = _refresh_editor_viewports(api)
 
         for i in range(frame_count):
-            # Second+ TakeHighResScreenshot can race the previous automation task; settle + focus helps.
+            # Second+ frame: refocus and settle so the desktop compositor and viewport catch up.
             if i > 0:
                 try:
                     api.bring_to_foreground()
@@ -664,7 +556,7 @@ def capture_screenshot_atlas(
         "arranged left-to-right then top-to-bottom (see i/N labels). "
         "Compare neighboring cells to infer motion, waves, particles, or other temporal effects."
     )
-    out["cli_command"] = "screenshot sequence [-n FRAMES] [-i INTERVAL]"
+    out["cli_command"] = "screenshot dynamic [-n FRAMES] [-i INTERVAL]"
 
     return out
 
@@ -714,59 +606,3 @@ def compress_for_agent(
 
     except Exception:
         return None
-
-
-def _find_screenshot(
-    filename: str,
-    project_dir: str | None,
-    timeout: float = 15.0,
-) -> str | None:
-    """Find a screenshot file in the Saved/Screenshots directory.
-
-    TakeHighResScreenshot saves to:
-    {ProjectDir}/Saved/Screenshots/WindowsEditor/{filename}.png
-
-    Args:
-        filename: Expected filename stem.
-        project_dir: Project directory.
-        timeout: Max seconds to wait.
-
-    Returns:
-        Full path to screenshot, or None.
-    """
-    if not project_dir:
-        return None
-
-    # Primary location for editor screenshots
-    search_dirs = [
-        Path(project_dir) / "Saved" / "Screenshots" / "WindowsEditor",
-        Path(project_dir) / "Saved" / "Screenshots",
-        Path(project_dir) / "Saved",
-    ]
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        candidates: list[Path] = []
-        for search_dir in search_dirs:
-            if search_dir.is_dir():
-                for f in search_dir.iterdir():
-                    if (f.stem == filename or f.stem.startswith(filename)) and f.suffix.lower() in (
-                        ".png",
-                        ".jpg",
-                        ".bmp",
-                    ):
-                        candidates.append(f)
-        if candidates:
-            exact = [p for p in candidates if p.stem == filename]
-            pool = exact if exact else candidates
-            best = max(
-                pool,
-                key=lambda p: (
-                    p.suffix.lower() == ".png",
-                    p.stat().st_mtime,
-                ),
-            )
-            return str(best)
-        time.sleep(0.3)
-
-    return None

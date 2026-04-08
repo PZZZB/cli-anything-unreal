@@ -11,8 +11,9 @@ Set environment variables before running:
 Run with:
     pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e
 
-Screenshot sequence E2E (``TestScreenshotE2E``) needs the editor window able to tick
-(Focus / Realtime); use the project's Remote Control port (or ``UE_TEST_PORT``).
+Screenshot E2E covers **user-facing CLIs** (``screenshot static`` / ``screenshot dynamic``)
+plus optional paths (Python API, ``--no-compress``) to guard different entry points.
+Needs editor focus/realtime and the project's Remote Control port (or ``UE_TEST_PORT``).
 
 Skip with:
     pytest cli_anything/unreal/tests/test_full_e2e.py -v  (auto-skips without --e2e)
@@ -199,9 +200,15 @@ class TestMaterialsE2E:
 
 @pytest.mark.e2e
 class TestScreenshotE2E:
-    """Test screenshot functionality against running editor."""
+    """Screenshot E2E.
+
+    **User-facing CLIs** (what you document for end users): ``screenshot static`` (static),
+    ``screenshot dynamic`` (dynamic). Additional tests below cover the same behavior
+    through Python APIs or CLI flags so regressions do not slip in via one entry only.
+    """
 
     def test_take_screenshot(self, api, project_path):
+        """Python API: ``take_screenshot`` (same pipeline as ``screenshot static``)."""
         from cli_anything.unreal.core.screenshot import take_screenshot
 
         project_dir = str(Path(project_path).parent)
@@ -210,33 +217,39 @@ class TestScreenshotE2E:
             disable_noisy=True,
             project_dir=project_dir,
         )
-        # Should not error
         assert "error" not in result or result.get("status") == "ok"
 
-    def test_screenshot_cli(self, cli_runner, project_path, api_port):
+    def test_screenshot_static_cli(self, cli_runner, project_path, api_port):
+        """CLI: ``screenshot static`` — static capture for users/agents."""
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
             "--json", "--project", project_path, "--port", str(api_port),
-            "screenshot", "take", "--filename", "e2e_cli_test",
+            "screenshot", "static", "--filename", "e2e_cli_test",
         ])
-        assert result.exit_code == 0
 
-    def test_screenshot_sequence_cli(self, cli_runner, project_path, api_port):
-        """CLI ``screenshot sequence``: atlas + default compressed output when Pillow works."""
-        from cli_anything.unreal.unreal_cli import cli
-
-        result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
-            "screenshot", "sequence", "-n", "2", "-i", "0.35",
-        ])
-        assert result.exit_code == 0
         data = json.loads(result.output)
         if data.get("status") != "ok":
-            pytest.skip(
+            pytest.fail(f"screenshot static failed; detail: {data.get('error', data)}")
+
+        assert result.exit_code == 0
+
+    def test_screenshot_dynamic_cli(self, cli_runner, project_path, api_port):
+        """CLI: ``screenshot dynamic`` — dynamic atlas (default JPEG for LLM when Pillow works)."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--project", project_path, "--port", str(api_port),
+            "screenshot", "dynamic", "-n", "2", "-i", "0.35",
+        ])
+        data = json.loads(result.output)
+        if data.get("status") != "ok":
+            pytest.fail(
                 "sequence capture incomplete (viewport focus or UE automation queue); "
                 f"detail: {data.get('error', data)}"
             )
+
+        assert result.exit_code == 0
 
         atlas = Path(data["atlas_path"])
         assert atlas.exists()
@@ -253,7 +266,7 @@ class TestScreenshotE2E:
         prep = data.get("viewport_prep") or {}
         assert prep.get("realtime") is True
 
-        assert data.get("cli_command", "").startswith("screenshot sequence")
+        assert data.get("cli_command", "").startswith("screenshot dynamic")
         assert "llm_context" in data
 
         dp = data.get("default_path") or ""
@@ -263,24 +276,24 @@ class TestScreenshotE2E:
             assert Path(data["compressed"]).exists()
             assert dp.lower().endswith(".jpg")
         else:
-            # Pillow missing or compress failed — still a valid primary path
             assert dp.lower().endswith(".png")
 
-    def test_screenshot_sequence_cli_no_compress(self, cli_runner, project_path, api_port):
-        """CLI ``--no-compress``: primary output is PNG atlas only."""
+    def test_screenshot_dynamic_cli_no_compress(self, cli_runner, project_path, api_port):
+        """CLI: ``screenshot dynamic --no-compress`` — PNG atlas only."""
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
             "--json", "--project", project_path, "--port", str(api_port),
-            "screenshot", "sequence", "-n", "2", "-i", "0.35", "--no-compress",
+            "screenshot", "dynamic", "-n", "2", "-i", "0.35", "--no-compress",
         ])
-        assert result.exit_code == 0
         data = json.loads(result.output)
         if data.get("status") != "ok":
-            pytest.skip(
+            pytest.fail(
                 "sequence capture incomplete; "
                 f"detail: {data.get('error', data)}"
             )
+
+        assert result.exit_code == 0
 
         assert Path(data["atlas_path"]).exists()
         assert data.get("default_path") == data.get("atlas_path")
@@ -288,7 +301,7 @@ class TestScreenshotE2E:
         assert "compressed" not in data
 
     def test_capture_screenshot_atlas_core(self, api, project_path):
-        """Core ``capture_screenshot_atlas`` (same path as CLI) without Click."""
+        """Python API: ``capture_screenshot_atlas`` (same core as ``screenshot dynamic``)."""
         from cli_anything.unreal.core.screenshot import capture_screenshot_atlas
 
         project_dir = str(Path(project_path).parent)
@@ -301,7 +314,7 @@ class TestScreenshotE2E:
             max_atlas_edge=1920,
         )
         if result.get("status") != "ok":
-            pytest.skip(
+            pytest.fail(
                 "capture_screenshot_atlas failed; "
                 f"detail: {result.get('error', result)}"
             )

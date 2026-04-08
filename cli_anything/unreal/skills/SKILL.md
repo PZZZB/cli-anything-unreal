@@ -42,7 +42,7 @@ When the user asks you to do something in Unreal, follow this sequence:
 2. **Do you know the asset path?** If not, discover it with `material list`, `blueprint list`, `scene actors`, or `project content`.
 3. **Does a CLI command exist for this?** Check the command reference in `references/commands.md`. Use CLI commands first.
 4. **No CLI command covers it?** Write a Python script and run it with `editor run-script`.
-5. **Need visual verification?** Use `screenshot take` and review the image.
+5. **Need visual verification?** Use `screenshot static` and review the image.
 
 ## Handling Errors
 
@@ -57,9 +57,26 @@ CLI commands return JSON with an `error` field when something goes wrong. Common
 - **HLSL dump empty** → shader may need recompilation first. Run `material recompile`, then retry `material hlsl`.
 - **Asset overwrite dialog blocks script** → see "Avoiding Asset Overwrite Dialogs" below.
 
+## No Modal Dialogs in CLI Environment
+
+> **Any modal dialog blocks CLI execution indefinitely.** This is not limited to asset overwrite dialogs — it applies to *all* UI-blocking operations in the UE editor.
+
+When running via `editor run-script` or any CLI command, there is no user to click "OK" or "Cancel". A modal dialog means the script hangs forever until the CLI timeout kills it.
+
+**Common triggers beyond asset overwrite:**
+
+| API / Operation | Why it blocks | Prevention |
+|----------------|---------------|------------|
+| `new_level(path)` | If a UObject for that path is still in memory, UE pops a "Level already exists" dialog | `delete_asset(path)` + `collect_garbage()` first |
+| `save_asset()` with dirty referencers | "Save referenced assets?" dialog | Use `--no-save` and handle saves explicitly |
+| `import_asset()` with naming conflict | "Asset name conflict" dialog | Delete existing + GC first |
+| Any `unreal.EditorDialog` call | Explicit dialog — always blocks in CLI | Never use `EditorDialog` in scripts |
+
+**Rule of thumb:** if a UE Python API can show a dialog, assume it *will* in some edge case. Always pre-validate (check existence, clean up stale UObjects) before calling creation/import/save APIs.
+
 ## Avoiding Asset Overwrite Dialogs
 
-> **CLI commands handle this automatically.** `project asset-delete` and `project asset-duplicate --force` already include reference checking and GC. This section only matters when writing Python scripts via `editor run-script`.
+> This is the most common instance of the "No Modal Dialogs" rule above. CLI commands handle it automatically — this section only matters when writing Python scripts via `editor run-script`.
 
 `create_asset` / `duplicate_asset` will pop a modal "Overwrite Existing Object" dialog if the target path already has an asset loaded in memory, blocking CLI execution indefinitely.
 
@@ -105,7 +122,7 @@ The CLI is organized into command groups. For the full command reference with al
 | `scene` | List actors, find by name, get/set properties, transforms, components | Yes |
 | `material` | List, inspect, edit nodes, connect, set params, recompile, HLSL dump | Yes |
 | `blueprint` | List, inspect, add/remove functions & variables, compile | Yes |
-| `screenshot` | Take screenshots, compare, compress, CVar A/B test | Yes |
+| `screenshot` | Take static screenshots or dynamic sequences | Yes |
 | `session` | Undo, redo, history | Yes |
 
 ## Key Workflows
@@ -150,7 +167,7 @@ cli-anything-unreal --json material recompile /Game/M_Water
 cli-anything-unreal --json material errors /Game/M_Water
 
 # 5. Visual check
-cli-anything-unreal --json screenshot take --filename material_check
+cli-anything-unreal --json screenshot static --filename material_check
 ```
 
 **Connect to material output:** Use `--to __material_output__` with `--to-input` being the property name: `BaseColor`, `Metallic`, `Roughness`, `Normal`, `Emissive`, `Opacity`, `WorldPositionOffset`, etc.
@@ -158,6 +175,29 @@ cli-anything-unreal --json screenshot take --filename material_check
 ### Python Scripting (for operations not covered by CLI commands)
 
 Use `editor run-script` for complex operations. Set a `result` dict variable to return structured data.
+
+#### run-script is synchronous — no tick callbacks
+
+`editor run-script` is a **synchronous blocking call**: the CLI waits for the Python main thread to finish, then returns the result and disconnects. This has critical implications:
+
+1. **Never use tick-based async callbacks.** `register_slate_post_tick_callback`, `register_slate_pre_tick_callback`, timers, or any delegate that fires on a future frame — by the time they trigger, the CLI connection is already gone and the return value is lost.
+
+   ```python
+   # WRONG — callback never fires during script execution
+   def on_tick(delta_time):
+       unreal.log("This never runs via run-script")
+   unreal.register_slate_post_tick_callback(on_tick)
+   ```
+
+2. **Multi-frame operations must be split into separate scripts.** Call `editor run-script` once per frame-bound step, orchestrated from the outside (your shell script, CI pipeline, or agent loop). The `screenshot cvar-test` command already uses this pattern internally.
+
+   ```bash
+   # Correct: two independent scripts, externally sequenced
+   cli-anything-unreal --json editor run-script step1_setup.py
+   cli-anything-unreal --json editor run-script step2_finalize.py
+   ```
+
+3. **All work must complete in the main thread before the script returns.** If you need to wait for a frame render, take the screenshot from the *next* `editor run-script` call — not from a tick callback within the current one.
 
 ```bash
 # Write the script using the Write tool (not cat/heredoc — this is Windows)
@@ -253,12 +293,15 @@ cli-anything-unreal --json material info /Game/SomeMaterial
 cli-anything-unreal --json material hlsl /Game/SomeMaterial
 ```
 
-### CVar A/B Comparison
+### Visual Verification (Screenshots)
 ```bash
-cli-anything-unreal --json screenshot cvar-test \
-    --cvar "r.Shadow.Virtual.Enable" \
-    --values "0,1" \
-    --labels "NoVSM,WithVSM"
+# 1. Take a single static screenshot of the current editor viewport
+cli-anything-unreal --json screenshot static \
+    --filename "my_screenshot"
+
+# 2. Take a sequence of screenshots (e.g. to capture motion/FX)
+cli-anything-unreal --json screenshot dynamic \
+    --frames 3 --interval 0.5
 ```
 
 ## Multi-Instance

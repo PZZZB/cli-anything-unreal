@@ -95,7 +95,7 @@ cli-anything-unreal editor status
 # Material analysis workflow
 cli-anything-unreal --json material list
 cli-anything-unreal --json material analyze /Game/MyMaterial
-cli-anything-unreal --json screenshot take --filename material_check
+cli-anything-unreal --json screenshot static --filename material_check
 
 # Interactive mode
 cli-anything-unreal repl

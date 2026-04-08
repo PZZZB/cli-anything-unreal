@@ -175,17 +175,14 @@ All blueprint commands require the editor to be running.
 | `blueprint rename-graph PATH --old OLD --new NEW` | Rename a graph |
 | `blueprint compile PATH` | Compile blueprint |
 
-## screenshot — Screenshot & Comparison
+## screenshot — Screenshot
 
 All screenshot commands require the editor to be running.
 
 | Command | Description |
 |---------|-------------|
-| `screenshot take [--filename NAME]` | Capture viewport screenshot |
-| `screenshot sequence [-n N] [-i SEC] [--no-compress]` | Capture N screenshots at interval SEC, output as compressed JPG atlas (raw PNG sheet saved under Saved/) |
-| `screenshot compare FILE_A FILE_B` | Compare two screenshots |
-| `screenshot compress FILE [--max-size N]` | Compress for Agent vision analysis |
-| `screenshot cvar-test --cvar NAME --values V1,V2 [--labels L1,L2]` | A/B comparison with different CVar values |
+| `screenshot static [--filename NAME]` | Capture main editor window (Windows GDI from CLI + Pillow) |
+| `screenshot dynamic [-n N] [-i SEC] [--no-compress]` | Capture N screenshots at interval SEC, output as compressed JPG atlas (raw PNG sheet saved under Saved/) |
 
 ## session — Undo/Redo
 

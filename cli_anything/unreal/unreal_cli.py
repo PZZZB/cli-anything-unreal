@@ -1176,13 +1176,13 @@ def screenshot_group():
     pass
 
 
-@screenshot_group.command("take")
+@screenshot_group.command("static")
 @click.option("--filename", default="screenshot", help="Output filename (no extension)")
-@click.option("--no-clean", is_flag=True, help="Don't disable noisy effects")
+@click.option("--no-clean", is_flag=True, help="Don't disable noisy effects (leave TAA/Bloom on)")
 @click.option("--no-compress", is_flag=True, help="Return raw PNG instead of compressed JPG")
 @handle_error
-def screenshot_take(filename, no_clean, no_compress):
-    """Take a viewport screenshot. Returns compressed JPG by default."""
+def screenshot_static(filename, no_clean, no_compress):
+    """Take a single static screenshot. Returns compressed JPG by default."""
     from cli_anything.unreal.core.screenshot import take_screenshot
 
     api = _require_editor()
@@ -1202,8 +1202,8 @@ def screenshot_take(filename, no_clean, no_compress):
     output(result)
 
 
-def _exec_screenshot_sequence(frames, interval, no_compress):
-    """Implementation for ``screenshot sequence``."""
+def _exec_screenshot_dynamic(frames, interval, no_compress):
+    """Implementation for ``screenshot dynamic``."""
     from cli_anything.unreal.core.screenshot import capture_screenshot_atlas
 
     api = _require_editor()
@@ -1235,10 +1235,10 @@ def _exec_screenshot_sequence(frames, interval, no_compress):
 
 
 @screenshot_group.command(
-    "sequence",
+    "dynamic",
     help=(
         "Viewport frames over time merged into one atlas; "
-        "default primary output is compressed JPG like screenshot take."
+        "default primary output is compressed JPG like static screenshot."
     ),
 )
 @click.option(
@@ -1260,67 +1260,11 @@ def _exec_screenshot_sequence(frames, interval, no_compress):
 @click.option(
     "--no-compress",
     is_flag=True,
-    help="Return raw PNG atlas only (same as screenshot take --no-compress)",
+    help="Return raw PNG atlas only (same as static screenshot --no-compress)",
 )
 @handle_error
-def screenshot_sequence(frames, interval, no_compress):
-    _exec_screenshot_sequence(frames, interval, no_compress)
-
-
-@screenshot_group.command("compare")
-@click.argument("image_a", type=click.Path(exists=True))
-@click.argument("image_b", type=click.Path(exists=True))
-@click.option("--tolerance", default="Low",
-              type=click.Choice(["Zero", "Low", "Medium", "High"]))
-@handle_error
-def screenshot_compare(image_a, image_b, tolerance):
-    """Compare two screenshots for differences."""
-    from cli_anything.unreal.core.screenshot import compare_screenshots
-
-    api = _require_editor()
-    result = compare_screenshots(api, image_a, image_b, tolerance)
-    output(result)
-
-
-@screenshot_group.command("cvar-test")
-@click.option("--cvar", required=True, help="CVar name to toggle")
-@click.option("--values", required=True, help="Comma-separated values to test")
-@click.option("--labels", default=None, help="Comma-separated labels")
-@click.option("--prefix", default="cvar_test", help="Filename prefix")
-@click.option("--settle", default=1.0, help="Seconds to wait after CVar change")
-@handle_error
-def screenshot_cvar_test(cvar, values, labels, prefix, settle):
-    """Take screenshots with different CVar values for A/B comparison."""
-    from cli_anything.unreal.core.screenshot import screenshot_with_cvar
-
-    api = _require_editor()
-    values_list = [v.strip() for v in values.split(",")]
-    labels_list = [l.strip() for l in labels.split(",")] if labels else None
-
-    result = screenshot_with_cvar(
-        api, cvar, values_list, labels_list,
-        filename_prefix=prefix,
-        settle_time=settle,
-        project_dir=_session.project_dir,
-    )
-    output(result)
-
-
-@screenshot_group.command("compress")
-@click.argument("image_path", type=click.Path(exists=True))
-@click.option("--max-edge", default=1920, help="Max dimension")
-@click.option("--quality", default=85, help="JPEG quality (1-100)")
-@click.option("--output", "out_path", type=click.Path(), help="Output path")
-@handle_error
-def screenshot_compress(image_path, max_edge, quality, out_path):
-    """Compress a screenshot for Agent vision analysis."""
-    from cli_anything.unreal.core.screenshot import compress_for_agent
-
-    result_path = compress_for_agent(image_path, max_edge, quality, out_path)
-    if result_path:
-        output({"path": result_path, "size": Path(result_path).stat().st_size})
-    else:
-        output({"error": "Compression failed (is Pillow installed?)"})
+def screenshot_dynamic(frames, interval, no_compress):
+    _exec_screenshot_dynamic(frames, interval, no_compress)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1683,6 +1627,7 @@ def editor_launch(map_path, wait, timeout):
             # Check for common fatal patterns that produce modal dialogs
             fatal_patterns = [
                 "modules are missing or built with a different engine version",
+                "Still incompatible or missing module:",
                 "Engine modules cannot be compiled at runtime",
                 "Missing or incompatible modules",
                 "Plugin .* failed to load",
@@ -2170,11 +2115,8 @@ def _print_repl_help():
         "material textures <path>": "List referenced textures",
         "material analyze <path>": "Auto-analyze issues ★",
         "  ": "",
-        "screenshot take": "Capture viewport",
-        "screenshot sequence": "Time-ordered frame atlas",
-        "screenshot compare <a> <b>": "Compare screenshots",
-        "screenshot cvar-test": "CVar A/B screenshot",
-        "screenshot compress <path>": "Compress for Agent",
+        "screenshot static": "Capture viewport (static)",
+        "screenshot dynamic": "Time-ordered frame atlas (dynamic)",
         "   ": "",
         "editor status": "Check editor connection",
         "editor list": "Discover running editors",

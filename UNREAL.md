@@ -243,7 +243,7 @@ via the HTTP API + Python script injection.
 | Add BP function | `blueprint add-function <path> MyNewFunction` |
 | Add BP variable | `blueprint add-variable <path> Health float` |
 | Compile blueprint | `blueprint compile <path>` |
-| Take screenshot | `screenshot take --filename test_shot` |
+| Take screenshot | `screenshot static --filename test_shot` |
 | Compare screenshots | `screenshot compare imageA.png imageB.png` |
 | Undo/redo | `session undo` / `session redo` |
 

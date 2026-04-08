@@ -1,8 +1,10 @@
 """plugin_bridge.py — Auto-deploy and detect the CliAnythingBridge UE plugin.
 
-The bridge plugin exposes internal C++ APIs (e.g. FMaterialResource::GetCompileErrors)
-that are not available through Python. Plugin source ships with the CLI package and is
-automatically copied to the project's Plugins/ directory when needed.
+The bridge exposes C++ APIs that Unreal Python/Blueprint cannot call directly
+(e.g. ``FMaterialResource::GetCompileErrors()``). Screenshots are handled in
+Python on the CLI host (Windows GDI), not in this plugin. Plugin source ships
+with the CLI package and is copied to the project's ``Plugins/`` directory
+when needed.
 """
 
 from __future__ import annotations

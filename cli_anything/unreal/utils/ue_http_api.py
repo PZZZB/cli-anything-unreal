@@ -368,6 +368,98 @@ class UEEditorAPI:
 
     # ── Editor Window ───────────────────────────────────────────────────
 
+    def find_editor_window_hwnd(self) -> int | None:
+        """Resolve the main Unreal Editor top-level window handle (Windows only).
+
+        Uses the Remote Control listener PID when possible so multiple ``UnrealEditor``
+        instances do not pick the wrong HWND.
+
+        Returns:
+            Native ``HWND`` as ``int``, or ``None`` if not found / not Windows.
+        """
+        import sys
+
+        if sys.platform != "win32":
+            return None
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            listening_pid = self._get_pid_listening_on_port(self.port)
+
+            TH32CS_SNAPPROCESS = 0x00000002
+
+            class PROCESSENTRY32(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_char * 260),
+                ]
+
+            snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            entry = PROCESSENTRY32()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+
+            ue_pids: list[int] = []
+            if kernel32.Process32First(snapshot, ctypes.byref(entry)):
+                while True:
+                    name = entry.szExeFile.decode("utf-8", errors="ignore")
+                    if "UnrealEditor" in name:
+                        ue_pids.append(int(entry.th32ProcessID))
+                    if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
+                        break
+            kernel32.CloseHandle(snapshot)
+
+            if not ue_pids:
+                return None
+
+            ordered_pids: list[int] = []
+            if listening_pid and listening_pid in ue_pids:
+                ordered_pids.append(listening_pid)
+            ordered_pids.extend(pid for pid in ue_pids if pid not in ordered_pids)
+
+            found_hwnd = None
+            WNDENUMPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_bool, wintypes.HWND, wintypes.LPARAM
+            )
+
+            ordered_set = set(ordered_pids)
+
+            @WNDENUMPROC
+            def _enum_cb(hwnd, _lparam):
+                nonlocal found_hwnd
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value in ordered_set:
+                    buf = ctypes.create_unicode_buffer(512)
+                    length = user32.GetWindowTextW(hwnd, buf, 512)
+                    if length > 0 and buf.value:
+                        style = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
+                        WS_VISIBLE = 0x10000000
+                        if style & WS_VISIBLE:
+                            found_hwnd = hwnd
+                            return False
+                return True
+
+            user32.EnumWindows(_enum_cb, 0)
+
+            if not found_hwnd:
+                return None
+            return int(found_hwnd)
+        except Exception:
+            return None
+
     def bring_to_foreground(self) -> bool:
         """Bring the UE editor window to the foreground.
 
@@ -381,6 +473,7 @@ class UEEditorAPI:
             True if successful, False otherwise.
         """
         import sys
+
         if sys.platform != "win32":
             return False
 
@@ -391,88 +484,21 @@ class UEEditorAPI:
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
 
-            # Prefer the process that listens on this API port.
-            # This avoids focusing the wrong editor when multiple UE instances run.
-            listening_pid = self._get_pid_listening_on_port(self.port)
-
-            # Find UE editor PID via CreateToolhelp32Snapshot
-            TH32CS_SNAPPROCESS = 0x00000002
-
-            class PROCESSENTRY32(ctypes.Structure):
-                _fields_ = [
-                    ('dwSize', wintypes.DWORD),
-                    ('cntUsage', wintypes.DWORD),
-                    ('th32ProcessID', wintypes.DWORD),
-                    ('th32DefaultHeapID', ctypes.POINTER(ctypes.c_ulong)),
-                    ('th32ModuleID', wintypes.DWORD),
-                    ('cntThreads', wintypes.DWORD),
-                    ('th32ParentProcessID', wintypes.DWORD),
-                    ('pcPriClassBase', ctypes.c_long),
-                    ('dwFlags', wintypes.DWORD),
-                    ('szExeFile', ctypes.c_char * 260),
-                ]
-
-            snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-            entry = PROCESSENTRY32()
-            entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
-
-            ue_pids = []
-            if kernel32.Process32First(snapshot, ctypes.byref(entry)):
-                while True:
-                    name = entry.szExeFile.decode('utf-8', errors='ignore')
-                    if 'UnrealEditor' in name:
-                        ue_pids.append(entry.th32ProcessID)
-                    if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
-                        break
-            kernel32.CloseHandle(snapshot)
-
-            if not ue_pids:
-                return False
-
-            # Put the RemoteControl-bound PID first if it is an UnrealEditor process.
-            ordered_pids = []
-            if listening_pid and listening_pid in ue_pids:
-                ordered_pids.append(listening_pid)
-            ordered_pids.extend(pid for pid in ue_pids if pid not in ordered_pids)
-
-            # Enumerate windows to find UE editor main window
-            found_hwnd = None
-            WNDENUMPROC = ctypes.WINFUNCTYPE(
-                ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-
-            @WNDENUMPROC
-            def _enum_cb(hwnd, _lparam):
-                nonlocal found_hwnd
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value in ordered_pids:
-                    buf = ctypes.create_unicode_buffer(512)
-                    length = user32.GetWindowTextW(hwnd, buf, 512)
-                    # Prefer visible top-level windows with title.
-                    if length > 0 and buf.value:
-                        style = user32.GetWindowLongW(hwnd, -16)
-                        WS_VISIBLE = 0x10000000
-                        if style & WS_VISIBLE:
-                            found_hwnd = hwnd
-                            return False
-                return True
-
-            user32.EnumWindows(_enum_cb, 0)
-
+            found_hwnd = self.find_editor_window_hwnd()
             if not found_hwnd:
                 return False
 
-            # Bring to front
-            user32.ShowWindow(found_hwnd, 9)   # SW_RESTORE
-            user32.BringWindowToTop(found_hwnd)
-            ok = user32.SetForegroundWindow(found_hwnd)
+            hwnd = wintypes.HWND(found_hwnd)
+
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.BringWindowToTop(hwnd)
+            ok = user32.SetForegroundWindow(hwnd)
             if ok:
                 return True
 
-            # Fallback for foreground lock restrictions.
             fg_hwnd = user32.GetForegroundWindow()
             current_tid = kernel32.GetCurrentThreadId()
-            target_tid = user32.GetWindowThreadProcessId(found_hwnd, None)
+            target_tid = user32.GetWindowThreadProcessId(hwnd, None)
             fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
 
             attached = []
@@ -484,9 +510,9 @@ class UEEditorAPI:
                     if user32.AttachThreadInput(target_tid, current_tid, True):
                         attached.append((target_tid, current_tid))
 
-                user32.BringWindowToTop(found_hwnd)
-                ok = user32.SetForegroundWindow(found_hwnd)
-                user32.SetActiveWindow(found_hwnd)
+                user32.BringWindowToTop(hwnd)
+                ok = user32.SetForegroundWindow(hwnd)
+                user32.SetActiveWindow(hwnd)
             finally:
                 for src_tid, dst_tid in attached:
                     user32.AttachThreadInput(src_tid, dst_tid, False)
@@ -525,62 +551,6 @@ class UEEditorAPI:
             return int(match.group(2))
 
         return None
-
-    # ── Screenshot ──────────────────────────────────────────────────────
-
-    def take_screenshot(
-        self,
-        filename: str = "screenshot",
-        res_x: int = 1920,
-        res_y: int = 1080,
-        delay: float = 0.5,
-    ) -> dict:
-        """Take an editor viewport screenshot.
-
-        Uses AutomationBlueprintFunctionLibrary.TakeHighResScreenshot via
-        the FunctionalTesting module. The screenshot is saved to:
-        {ProjectDir}/Saved/Screenshots/WindowsEditor/{filename}.png
-
-        Args:
-            filename: Output filename (without extension).
-            res_x: Screenshot width.
-            res_y: Screenshot height.
-            delay: Seconds to wait for viewport to render before capture.
-
-        Returns:
-            API response dict with ReturnValue (automation task path).
-        """
-        return self.call_function(
-            "/Script/FunctionalTesting.Default__AutomationBlueprintFunctionLibrary",
-            "TakeHighResScreenshot",
-            {
-                "ResX": res_x,
-                "ResY": res_y,
-                "Filename": filename,
-                "bMaskEnabled": False,
-                "bCaptureHDR": False,
-                "ComparisonTolerance": "Low",
-                "ComparisonNotes": "",
-                "Delay": delay,
-                "bForceGameView": False,
-            },
-        )
-
-    def take_high_res_screenshot(
-        self,
-        filename: str = "highres",
-        resolution_multiplier: int = 2,
-    ) -> dict:
-        """Take a high-resolution screenshot.
-
-        Args:
-            filename: Output filename.
-            resolution_multiplier: Resolution multiplier (2 = 2x).
-
-        Returns:
-            API response dict.
-        """
-        return self.exec_console(f"HighResShot {resolution_multiplier}")
 
     # ── EditorAssetLibrary Wrappers ─────────────────────────────────────
 

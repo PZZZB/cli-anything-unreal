@@ -36,7 +36,7 @@ E2E tests cover:
 - Editor connection
 - Project info queries
 - Material listing and analysis
-- Screenshot capture
+- Screenshot (user-facing: `screenshot static`, `screenshot dynamic`; E2E also hits Python APIs / flags)
 - Console command execution
 
 ## Multi-Instance Testing

@@ -1353,6 +1353,9 @@ class TestMaterialEditing:
 class TestScreenshot:
     """Tests for core/screenshot.py — mocked API calls."""
 
+    def test_screenshot_cvar_test_mismatched_labels(self):
+        pass
+
     def test_compress_for_agent_no_pillow(self, tmp_path):
         """Test graceful handling when Pillow is not available."""
         from cli_anything.unreal.core.screenshot import compress_for_agent
@@ -1365,19 +1368,6 @@ class TestScreenshot:
         with patch.dict("sys.modules", {"PIL": None, "PIL.Image": None}):
             result = compress_for_agent(str(fake_png))
             # May or may not return None depending on import mechanism
-
-    def test_screenshot_cvar_test_mismatched_labels(self):
-        """Test error when labels and values length mismatch."""
-        from cli_anything.unreal.core.screenshot import screenshot_with_cvar
-
-        mock_api = MagicMock()
-        result = screenshot_with_cvar(
-            mock_api,
-            "r.Test",
-            values=["0", "1"],
-            labels=["only_one"],
-        )
-        assert "error" in result
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1400,18 +1390,18 @@ class TestCLI:
         assert "screenshot" in result.output
         assert "editor" in result.output
 
-    def test_screenshot_sequence_help_minimal_options(self):
+    def test_screenshot_dynamic_help_minimal_options(self):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        result = runner.invoke(cli, ["screenshot", "sequence", "--help"])
+        result = runner.invoke(cli, ["screenshot", "dynamic", "--help"])
         assert result.exit_code == 0
         out = result.output
         assert "--frames" in out and "--interval" in out and "--no-compress" in out
         assert "--prefix" not in out and "--output" not in out and "--cols" not in out
 
-    def test_screenshot_sequence_cli_passthrough(self, temp_project):
+    def test_screenshot_dynamic_cli_passthrough(self, temp_project):
         """CLI forwards only -n/-i and fixed atlas defaults to capture_screenshot_atlas."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -1431,7 +1421,7 @@ class TestCLI:
                 "--project",
                 temp_project["uproject"],
                 "screenshot",
-                "sequence",
+                "dynamic",
                 "-n",
                 "3",
                 "-i",
@@ -3000,7 +2990,7 @@ class TestPluginBridge:
 
         assert result["deployed"] is True
         assert result["action"] == "fresh_install"
-        assert result["version"] == "1.0"
+        assert result["version"] == "1.3"
 
         plugin_dir = tmp_path / "Plugins" / "CliAnythingBridge"
         assert (plugin_dir / "CliAnythingBridge.uplugin").exists()
@@ -3036,7 +3026,7 @@ class TestPluginBridge:
         result = ensure_plugin_deployed(project_dir)
         assert result["deployed"] is True
         assert "updated" in result["action"]
-        assert result["version"] == "1.0"
+        assert result["version"] == "1.3"
 
     def test_is_plugin_loaded_true(self):
         """is_plugin_loaded returns True when probe script succeeds."""

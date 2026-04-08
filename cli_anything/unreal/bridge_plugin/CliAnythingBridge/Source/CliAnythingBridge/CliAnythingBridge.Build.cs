@@ -17,6 +17,9 @@ public class CliAnythingBridge : ModuleRules
 		{
 			"RHI",
 			"RenderCore",
+			"Slate",
+			"SlateCore",
+			"UnrealEd",
 		});
 	}
 }
