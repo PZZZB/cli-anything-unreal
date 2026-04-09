@@ -282,9 +282,9 @@ Session state can be persisted to and restored from JSON files.
 Most UE operations are delegated to the engine itself — we are a **thin CLI
 wrapper**, not a reimplementation. The main gaps are:
 
-- **No offline .uasset parsing** — Material/Blueprint operations require a
+- **No offline .uasset parsing or writing** — Material/Blueprint operations require a
   running editor. This is by design; UE's binary asset format is proprietary
-  and version-dependent.
+  and version-dependent. **Never attempt to write or create .uasset files directly from text/code.** Always use `editor run-script` and UE Python API.
 - **Windows-only** — UAT/UBT and editor discovery are Windows-focused.
   Linux/Mac support would require path adjustments.
 - **Plugin dependency** — Remote Control plugin must be enabled; Python

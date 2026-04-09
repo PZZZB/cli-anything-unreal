@@ -1437,7 +1437,6 @@ class TestCLI:
         assert call_kw["filename_prefix"] == "motion_seq"
         assert call_kw["output_atlas"] is None
         assert call_kw["cols"] is None
-        assert call_kw["disable_noisy"] is True
         assert call_kw["label_frames"] is True
         assert call_kw["jpeg_for_llm"] is True
         assert call_kw["max_atlas_edge"] == 1920

@@ -111,36 +111,6 @@ def _refresh_editor_viewports(api: UEEditorAPI) -> dict:
     return steps
 
 
-_NOISY_SCREENSHOT_CVARS = {
-    "r.TemporalAA.Upsampling": "0",
-    "r.MotionBlurQuality": "0",
-    "r.DepthOfFieldQuality": "0",
-    "r.LensFlareQuality": "0",
-    "r.BloomQuality": "0",
-}
-
-
-def _noisy_scrub_begin(api: UEEditorAPI) -> dict[str, str]:
-    """Temporarily disable bloom/TAA/etc. for crisp captures. Returns values to restore."""
-    saved: dict[str, str] = {}
-    for cvar, value in _NOISY_SCREENSHOT_CVARS.items():
-        try:
-            old_val = api.get_cvar(cvar)
-            saved[cvar] = old_val
-            api.set_cvar(cvar, value)
-        except Exception:
-            pass
-    time.sleep(0.3)
-    return saved
-
-
-def _noisy_scrub_end(api: UEEditorAPI, saved_cvars: dict[str, str]) -> None:
-    for cvar, value in saved_cvars.items():
-        try:
-            api.set_cvar(cvar, str(value))
-        except Exception:
-            pass
-
 
 def _capture_viewport_png_raw(
     api: UEEditorAPI,
@@ -198,7 +168,8 @@ def _capture_viewport_png_raw(
     )
     bounds_res = api.exec_python_ex(bounds_script)
     viewport_rect = None
-    for line in bounds_res.get("output", []):
+    for log_item in bounds_res.get("LogOutput", []):
+        line = log_item.get("Output", "")
         if line.startswith("VIEWPORT_BOUNDS:"):
             parts = line.split(":", 1)[1].split(",")
             try:
@@ -234,7 +205,6 @@ def _capture_viewport_png_raw(
 def take_screenshot(
     api: UEEditorAPI,
     filename: str = "screenshot",
-    disable_noisy: bool = True,
     project_dir: str | None = None,
     wait_timeout: float = 15.0,
     res_x: int = 1920,
@@ -246,7 +216,6 @@ def take_screenshot(
     Args:
         api: Connected UEEditorAPI instance.
         filename: Output filename (without extension).
-        disable_noisy: If True, temporarily disable noisy effects.
         project_dir: Project directory (for finding saved screenshots).
         wait_timeout: Unused (capture is synchronous); kept for API compatibility.
         res_x: Unused; capture uses the live editor window size.
@@ -256,39 +225,31 @@ def take_screenshot(
     Returns:
         {"path": str, "size": int} or {"error": str}
     """
-    saved_cvars: dict[str, str] = {}
-    if disable_noisy:
-        saved_cvars = _noisy_scrub_begin(api)
-
-    try:
-        raw = _capture_viewport_png_raw(
-            api, filename, project_dir, wait_timeout, res_x, res_y, delay
-        )
-        if raw.get("status") == "ok":
-            screenshot_path = raw["path_raw"]
-            size = raw["size_raw"]
-            compressed = compress_for_agent(screenshot_path)
-            response = {
-                "status": "ok",
-                "read_this": compressed or screenshot_path,
-                "path_raw": screenshot_path,
-                "size_raw": size,
-                "capture_mode": raw["capture_mode"],
-                "refresh": raw["refresh"],
-            }
-            if compressed:
-                response["compressed"] = compressed
-                response["size_compressed"] = Path(compressed).stat().st_size
-            else:
-                response["compress_hint"] = (
-                    "Auto-compress unavailable (Pillow not installed). "
-                    "Returning raw PNG. Install with: pip install Pillow"
-                )
-            return response
-        return raw
-    finally:
-        if disable_noisy and saved_cvars:
-            _noisy_scrub_end(api, saved_cvars)
+    raw = _capture_viewport_png_raw(
+        api, filename, project_dir, wait_timeout, res_x, res_y, delay
+    )
+    if raw.get("status") == "ok":
+        screenshot_path = raw["path_raw"]
+        size = raw["size_raw"]
+        compressed = compress_for_agent(screenshot_path)
+        response = {
+            "status": "ok",
+            "read_this": compressed or screenshot_path,
+            "path_raw": screenshot_path,
+            "size_raw": size,
+            "capture_mode": raw["capture_mode"],
+            "refresh": raw["refresh"],
+        }
+        if compressed:
+            response["compressed"] = compressed
+            response["size_compressed"] = Path(compressed).stat().st_size
+        else:
+            response["compress_hint"] = (
+                "Auto-compress unavailable (Pillow not installed). "
+                "Returning raw PNG. Install with: pip install Pillow"
+            )
+        return response
+    return raw
 
 
 
@@ -406,7 +367,6 @@ def capture_screenshot_atlas(
     filename_prefix: str = "motion_seq",
     output_atlas: str | None = None,
     project_dir: str | None = None,
-    disable_noisy: bool = True,
         res_x: int = 1920,
         res_y: int = 1080,
         delay: float = _DEFAULT_RENDER_DELAY,
@@ -427,7 +387,6 @@ def capture_screenshot_atlas(
         filename_prefix: Stem for per-frame files ( …_000, …_001 ).
         output_atlas: Output .png path; default under project's Screenshots/WindowsEditor.
         project_dir: UE project directory (for finding/writing screenshots).
-        disable_noisy: If True, scrub bloom/TAA/etc. once for the whole capture run.
         res_x, res_y: Unused (compatibility); native capture uses editor window size.
         delay: Seconds to wait for rendering before each capture.
         wait_timeout: Unused (synchronous capture); kept for API compatibility.
@@ -454,10 +413,6 @@ def capture_screenshot_atlas(
         )
     else:
         atlas_path = str(Path.cwd() / f"{filename_prefix}_motion_sheet.png")
-
-    saved_cvars: dict[str, str] = {}
-    if disable_noisy:
-        saved_cvars = _noisy_scrub_begin(api)
 
     frame_results: list[dict] = []
     frame_paths: list[str] = []
@@ -501,9 +456,12 @@ def capture_screenshot_atlas(
                 _ensure_editor_viewport_realtime(api)
                 time.sleep(interval)
 
-    finally:
-        if disable_noisy and saved_cvars:
-            _noisy_scrub_end(api, saved_cvars)
+    except Exception as e:
+        return {
+            "error": f"Exception during sequence capture: {e}",
+            "partial_frames": frame_paths,
+            "frame_results": frame_results,
+        }
 
     if len(frame_paths) != frame_count:
         return {

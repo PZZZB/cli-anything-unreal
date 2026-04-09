@@ -1178,17 +1178,15 @@ def screenshot_group():
 
 @screenshot_group.command("static")
 @click.option("--filename", default="screenshot", help="Output filename (no extension)")
-@click.option("--no-clean", is_flag=True, help="Don't disable noisy effects (leave TAA/Bloom on)")
 @click.option("--no-compress", is_flag=True, help="Return raw PNG instead of compressed JPG")
 @handle_error
-def screenshot_static(filename, no_clean, no_compress):
+def screenshot_static(filename, no_compress):
     """Take a single static screenshot. Returns compressed JPG by default."""
     from cli_anything.unreal.core.screenshot import take_screenshot
 
     api = _require_editor()
     result = take_screenshot(
         api, filename,
-        disable_noisy=not no_clean,
         project_dir=_session.project_dir,
     )
 
@@ -1215,7 +1213,6 @@ def _exec_screenshot_dynamic(frames, interval, no_compress):
         filename_prefix="motion_seq",
         output_atlas=None,
         project_dir=_session.project_dir,
-        disable_noisy=True,
         res_x=1920,
         res_y=1080,
         delay=1.0,
@@ -1583,7 +1580,7 @@ def editor_launch(map_path, wait, timeout):
             _skin.info(f"Bridge plugin {deploy['action']} → {deploy['plugin_dir']}")
 
     # ── Build command ───────────────────────────────────────────────
-    cmd = [editor_exe, _session.project_path]
+    cmd = [editor_exe, _session.project_path, "-nosplash", "-unattended"]
     if map_path:
         cmd.append(map_path)
 

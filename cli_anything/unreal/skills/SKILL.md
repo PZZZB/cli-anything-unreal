@@ -34,6 +34,27 @@ You are an AI Agent with access to `cli-anything-unreal`, a CLI tool that contro
 
 5. **UE5 Python API restriction:** `Material.expressions` is protected in UE5.7+ — you cannot read or write it directly. Use `material info` to read nodes, and `material add-node` / `material connect` / `material delete-node` to edit them.
 
+6. **HARD CONSTRAINT for `.uasset` Creation:** When creating UE `.uasset` files, you MUST use `cli-anything-unreal editor run-script` combined with the UE Python API (e.g. `unreal.AssetToolsHelpers.get_asset_tools().create_asset()`). **NEVER** use generic Write tools to directly write text to a file and rename it to `.uasset`. `.uasset` is a proprietary binary format, and writing plain text to it will instantly corrupt the asset and break the engine.
+
+
+## Test Phase Requirements (Test Agent)
+
+If you are a Test agent verifying Unreal assets (e.g. after a Dev agent has created or modified them), you MUST explicitly verify that the asset is valid and can be successfully loaded by the engine API. Simply checking if the `.uasset` file exists on disk is **NOT** enough, as a corrupted file will exist but fail to load.
+
+**First step of ANY asset test:**
+Run `editor run-script` with a script that calls `unreal.EditorAssetLibrary.load_asset()`.
+Example:
+```python
+import unreal
+path = "/Game/MyNewAsset"
+asset = unreal.EditorAssetLibrary.load_asset(path)
+if not asset:
+    unreal.log_error(f"Asset at {path} exists on disk but FAILED to load in engine. It may be corrupted.")
+else:
+    unreal.log(f"Successfully loaded asset: {asset.get_name()}")
+```
+If `load_asset` returns `None`, the test MUST fail, and you must report the corruption back to the Dev agent.
+
 ## Decision Flow
 
 When the user asks you to do something in Unreal, follow this sequence:

@@ -214,7 +214,6 @@ class TestScreenshotE2E:
         project_dir = str(Path(project_path).parent)
         result = take_screenshot(
             api, "e2e_test_screenshot",
-            disable_noisy=True,
             project_dir=project_dir,
         )
         assert "error" not in result or result.get("status") == "ok"

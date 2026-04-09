@@ -69,7 +69,13 @@ FIntVector4 UCliAnythingBridgeLibrary::GetActiveViewportScreenBounds()
 		return Bounds;
 	}
 
-	FGeometry ViewportGeometry = ActiveViewport->GetCachedGeometry();
+	TSharedPtr<SViewport> ViewportWidget = ActiveViewport->GetViewportWidget().Pin();
+	if (!ViewportWidget.IsValid())
+	{
+		return Bounds;
+	}
+
+	FGeometry ViewportGeometry = ViewportWidget->GetCachedGeometry();
 	FVector2D AbsolutePosition = ViewportGeometry.GetAbsolutePositionAtCoordinates(FVector2D(0.0f, 0.0f));
 	FVector2D AbsoluteSize = ViewportGeometry.GetAbsoluteSize();
 

@@ -34,6 +34,15 @@ def capture_hwnd_to_png(hwnd: int, output_path: Path, crop_rect: tuple[int, int,
     except ImportError:
         return False
 
+    try:
+        # Ensure we read the true physical coordinates, bypassing Windows UI scaling
+        ctypes.windll.shcore.SetProcessDpiAwareness(2) # PROCESS_PER_MONITOR_DPI_AWARE
+    except AttributeError:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except AttributeError:
+            pass
+
     output_path = Path(output_path)
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
