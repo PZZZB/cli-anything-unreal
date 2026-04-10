@@ -598,13 +598,17 @@ def scene_find(name):
 
 @scene_group.command("describe")
 @click.argument("actor_path")
+@click.option("--property", "prop_name", default=None, help="Get full metadata for a specific property/function")
 @handle_error
-def scene_describe(actor_path):
-    """Describe an actor — list properties and functions."""
+def scene_describe(actor_path, prop_name):
+    """Describe an actor — list properties and functions.
+    
+    Use --property <Name> to get full metadata (tooltips, enums) for a specific item.
+    """
     from cli_anything.unreal.core.scene import describe_actor
 
     api = _require_editor()
-    result = describe_actor(api, actor_path)
+    result = describe_actor(api, actor_path, prop_name)
     output(result)
 
 

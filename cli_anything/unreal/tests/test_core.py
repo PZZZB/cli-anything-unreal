@@ -2364,11 +2364,9 @@ class TestScene:
         from cli_anything.unreal.core.scene import get_actor_transform
 
         api = self._mock_api()
-        api.get_property.side_effect = [
-            {"X": 100, "Y": 200, "Z": 0},
-            {"Pitch": 0, "Yaw": 45, "Roll": 0},
-            {"X": 1, "Y": 1, "Z": 1},
-        ]
+        api.exec_python_ex.return_value = {
+            "LogOutput": [{"Output": "TRANSFORM_DATA:100.0,200.0,0.0|0.0,45.0,0.0|1.0,1.0,1.0"}]
+        }
 
         result = get_actor_transform(api, "/Game/Map:Actor_0")
         assert result["actor"] == "/Game/Map:Actor_0"
@@ -2794,11 +2792,9 @@ class TestSceneCLI:
         runner = CliRunner()
         with patch("cli_anything.unreal.unreal_cli._require_editor") as mock_editor:
             mock_api = MagicMock()
-            mock_api.get_property.side_effect = [
-                {"X": 0, "Y": 0, "Z": 0},
-                {"Pitch": 0, "Yaw": 90, "Roll": 0},
-                {"X": 1, "Y": 1, "Z": 1},
-            ]
+            mock_api.exec_python_ex.return_value = {
+                "LogOutput": [{"Output": "TRANSFORM_DATA:0.0,0.0,0.0|0.0,90.0,0.0|1.0,1.0,1.0"}]
+            }
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [

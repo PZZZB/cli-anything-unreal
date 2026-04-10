@@ -102,17 +102,53 @@ def set_actor_property(api: UEEditorAPI, actor_path: str,
     return api.set_property(actor_path, property_name, value)
 
 
-def describe_actor(api: UEEditorAPI, actor_path: str) -> dict:
+def describe_actor(api: UEEditorAPI, actor_path: str, property_name: str | None = None) -> dict:
     """Describe an actor — list all its properties and functions.
 
     Args:
         api: Connected UEEditorAPI instance.
         actor_path: Full object path.
+        property_name: If provided, returns the full metadata for this specific property/function.
+                       If None, returns a lightweight list of all properties (names and types only).
 
     Returns:
-        {"Name": str, "Class": str, "Properties": [...], "Functions": [...]}
+        {"Name": str, "Class": str, "Properties": [...], "Functions": [...]} or full metadata dict for a property.
     """
-    return api.describe_object(actor_path)
+    raw_data = api.describe_object(actor_path)
+    if "error" in raw_data:
+        return raw_data
+
+    if property_name:
+        # Search for the specific property or function to get its full metadata
+        for prop in raw_data.get("Properties", []):
+            if isinstance(prop, dict) and prop.get("Name") == property_name:
+                return prop
+            elif prop == property_name:
+                return {"Name": prop}
+        for func in raw_data.get("Functions", []):
+            if isinstance(func, dict) and func.get("Name") == property_name:
+                return func
+            elif func == property_name:
+                return {"Name": func}
+        return {"error": f"Property or function '{property_name}' not found on actor '{actor_path}'."}
+
+    # Lightweight mode: strip out bulky metadata, ToolTips, and Descriptions
+    props = [
+        {"Name": p.get("Name"), "Type": p.get("Type")} if isinstance(p, dict) else {"Name": str(p)}
+        for p in raw_data.get("Properties", [])
+    ]
+    funcs = [
+        {"Name": f.get("Name")} if isinstance(f, dict) else {"Name": str(f)}
+        for f in raw_data.get("Functions", [])
+    ]
+    
+    return {
+        "Name": raw_data.get("Name"),
+        "Class": raw_data.get("Class"),
+        "Properties": props,
+        "Functions": funcs,
+        "hint": f"Output is summarized. To see full metadata/tooltips for a specific property, use: scene describe \"{actor_path}\" --property <Name>"
+    }
 
 
 def find_actor_by_name(api: UEEditorAPI, name: str) -> dict:
@@ -254,13 +290,13 @@ if not actor:
             break
 
 if not actor:
-    unreal.log_error(f"Actor not found: {actor_path}")
+    unreal.log_error(f"Actor not found: {{'{actor_path}'}}")
 else:
     transform = actor.get_actor_transform()
     loc = transform.translation
     rot = transform.rotation.rotator()
     scale = transform.scale3d
-    unreal.log(f"TRANSFORM_DATA:{loc.x},{loc.y},{loc.z}|{rot.pitch},{rot.yaw},{rot.roll}|{scale.x},{scale.y},{scale.z}")
+    unreal.log(f"TRANSFORM_DATA:{{loc.x}},{{loc.y}},{{loc.z}}|{{rot.pitch}},{{rot.yaw}},{{rot.roll}}|{{scale.x}},{{scale.y}},{{scale.z}}")
 """
     
     result = {"actor": actor_path}
