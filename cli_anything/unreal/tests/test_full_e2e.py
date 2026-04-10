@@ -620,12 +620,18 @@ if EAL.does_asset_exist(mat_path):
 
 if can_create:
     mat = ATH.create_asset("E2E_ErrorMaterial", "/Game", unreal.Material, unreal.MaterialFactoryNew())
-    custom = mel.create_material_expression(mat, unreal.MaterialExpressionCustom, -300, 0)
-    custom.set_editor_property("code", "return invalid_var;")
-    custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
-    mel.connect_material_property(custom, "", unreal.MaterialProperty.MP_BASE_COLOR)
-    mel.recompile_material(mat)
-    result = {"status": "ok"}
+    if not mat:
+        # Retry with load_asset in case create_asset failed but asset exists
+        mat = EAL.load_asset("/Game/E2E_ErrorMaterial")
+    if mat:
+        custom = mel.create_material_expression(mat, unreal.MaterialExpressionCustom, -300, 0)
+        custom.set_editor_property("code", "return invalid_var;")
+        custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+        mel.connect_material_property(custom, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        mel.recompile_material(mat)
+        result = {"status": "ok"}
+    else:
+        result = {"error": "Failed to create or load E2E_ErrorMaterial"}
 else:
     result = {"error": "delete_asset failed for E2E_ErrorMaterial"}
 '''

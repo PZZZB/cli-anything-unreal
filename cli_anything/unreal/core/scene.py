@@ -230,6 +230,10 @@ def get_actor_material(api: UEEditorAPI, actor_path: str,
 def get_actor_transform(api: UEEditorAPI, actor_path: str) -> dict:
     """Get an actor's world transform (location, rotation, scale).
 
+    Uses a Python script instead of direct Remote Control API property reads,
+    as UE 5.x often returns 400 Client Error for RelativeLocation/Rotation
+    when accessed directly via the Remote Control property endpoint.
+
     Args:
         api: Connected UEEditorAPI instance.
         actor_path: Full object path.
@@ -237,16 +241,44 @@ def get_actor_transform(api: UEEditorAPI, actor_path: str) -> dict:
     Returns:
         {"location": {...}, "rotation": {...}, "scale": {...}}
     """
-    # Read RootComponent transform properties
-    root = f"{actor_path}.DefaultSceneRoot"
+    script = f"""
+import unreal
+actor = unreal.EditorAssetLibrary.load_asset('{actor_path}')
+if not actor:
+    # It might be in the map, try to find it
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    actors = subsystem.get_all_level_actors()
+    for a in actors:
+        if a.get_path_name() == '{actor_path}':
+            actor = a
+            break
 
-    loc = api.get_property(actor_path, "RelativeLocation")
-    rot = api.get_property(actor_path, "RelativeRotation")
-    scale = api.get_property(actor_path, "RelativeScale3D")
+if not actor:
+    unreal.log_error(f"Actor not found: {actor_path}")
+else:
+    transform = actor.get_actor_transform()
+    loc = transform.translation
+    rot = transform.rotation.rotator()
+    scale = transform.scale3d
+    unreal.log(f"TRANSFORM_DATA:{loc.x},{loc.y},{loc.z}|{rot.pitch},{rot.yaw},{rot.roll}|{scale.x},{scale.y},{scale.z}")
+"""
+    
+    result = {"actor": actor_path}
+    
+    res = api.exec_python_ex(script)
+    for log_item in res.get("LogOutput", []):
+        line = log_item.get("Output", "")
+        if line.startswith("TRANSFORM_DATA:"):
+            try:
+                parts = line.split(":", 1)[1].strip().split("|")
+                lx, ly, lz = map(float, parts[0].split(","))
+                rp, ry, rr = map(float, parts[1].split(","))
+                sx, sy, sz = map(float, parts[2].split(","))
+                result["location"] = {"X": lx, "Y": ly, "Z": lz}
+                result["rotation"] = {"Pitch": rp, "Yaw": ry, "Roll": rr}
+                result["scale"] = {"X": sx, "Y": sy, "Z": sz}
+                return result
+            except Exception as e:
+                return {"error": f"Failed to parse transform data: {e}", "raw": line}
 
-    return {
-        "actor": actor_path,
-        "location": loc,
-        "rotation": rot,
-        "scale": scale,
-    }
+    return {"error": "Failed to get transform. Actor might not exist or script failed."}
