@@ -2552,6 +2552,67 @@ class TestAssets:
         assert result["status"] == "ok"
         assert result["renamed"] is True
 
+    def test_asset_describe(self):
+        from cli_anything.unreal.core.assets import describe_asset
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = True
+        api.exec_python_ex.return_value = {
+            "LogOutput": [{"Output": "LOADED_OBJECT:/Game/M_Test.M_Test"}]
+        }
+        api.describe_object.return_value = {
+            "Name": "M_Test",
+            "Class": "/Script/Engine.Material",
+            "Properties": [{"Name": "BlendMode", "Type": "TEnumAsByte<EBlendMode>"}],
+            "Functions": [{"Name": "GetBlendMode"}]
+        }
+
+        result = describe_asset(api, "/Game/M_Test")
+        assert result["Name"] == "M_Test"
+        assert len(result["Properties"]) == 1
+        assert result["Properties"][0]["Name"] == "BlendMode"
+        
+        # Test property specific
+        result_prop = describe_asset(api, "/Game/M_Test", "BlendMode")
+        assert result_prop["Name"] == "BlendMode"
+
+    def test_asset_describe_not_found(self):
+        from cli_anything.unreal.core.assets import describe_asset
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = False
+
+        result = describe_asset(api, "/Game/Missing")
+        assert "error" in result
+
+    def test_asset_property_get(self):
+        from cli_anything.unreal.core.assets import get_asset_property
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = True
+        api.exec_python_ex.return_value = {
+            "LogOutput": [{"Output": "LOADED_OBJECT:/Game/M_Test.M_Test"}]
+        }
+        api.get_property.return_value = {"BlendMode": "Opaque"}
+
+        result = get_asset_property(api, "/Game/M_Test", "BlendMode")
+        assert result["BlendMode"] == "Opaque"
+
+    def test_asset_property_set(self):
+        from cli_anything.unreal.core.assets import set_asset_property
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = True
+        api.exec_python_ex.return_value = {
+            "LogOutput": [{"Output": "LOADED_OBJECT:/Game/M_Test.M_Test"}]
+        }
+        api.set_property.return_value = {"status": "ok"}
+
+        result = set_asset_property(api, "/Game/M_Test", "BlendMode", "Masked")
+        assert result["status"] == "ok"
+        # Should have called exec_python_ex twice (once to load, once to save)
+        assert api.exec_python_ex.call_count == 2
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Test ue_http_api.py — asset & GC methods (mocked)

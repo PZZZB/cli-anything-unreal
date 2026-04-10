@@ -47,6 +47,8 @@ cli-anything-unreal --json editor run-script query.py --no-save
 | `project config write SECTION KEY VALUE FILE` | Write a .ini config value |
 | `project generate` | Generate Visual Studio project files |
 | `project asset-exists ASSET_PATH` | Check if asset exists (requires editor) |
+| `project asset-describe ASSET_PATH [--property Name]` | Describe UAsset properties (progressive disclosure) (requires editor) |
+| `project asset-property ASSET_PATH PROP [--set Val]` | Get or set property on a UAsset (requires editor) |
 | `project asset-delete ASSET_PATH [--force]` | Delete asset with reference detection (requires editor) |
 | `project asset-refs ASSET_PATH` | List all referencers of an asset (requires editor) |
 | `project asset-duplicate SRC DEST [--force]` | Duplicate asset, --force to overwrite (requires editor) |

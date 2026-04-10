@@ -184,3 +184,120 @@ def asset_rename(
     """Rename/move an asset."""
     script = _SCRIPT_RENAME_ASSET.format(source_path=source_path, dest_path=dest_path)
     return _exec(api, script, project_dir)
+
+def describe_asset(api: "UEEditorAPI", asset_path: str, property_name: str | None = None) -> dict:
+    """Describe a UAsset loaded in the Content Browser.
+    
+    Loads the asset into memory first, then uses describe_object.
+    Follows progressive disclosure like scene_describe.
+    """
+    if not api.does_asset_exist(asset_path):
+        return {"error": f"Asset not found: {asset_path}"}
+        
+    script = f'''
+import unreal
+asset = unreal.EditorAssetLibrary.load_asset('{asset_path}')
+if asset:
+    unreal.log(f'LOADED_OBJECT:{{asset.get_path_name()}}')
+'''
+    res = api.exec_python_ex(script)
+    object_path = None
+    for item in res.get("LogOutput", []):
+        line = item.get("Output", "")
+        if line.startswith("LOADED_OBJECT:"):
+            object_path = line.split(":", 1)[1].strip()
+            
+    if not object_path:
+        return {"error": f"Failed to load asset into memory: {asset_path}"}
+        
+    raw_data = api.describe_object(object_path)
+    if "error" in raw_data:
+        return raw_data
+
+    if property_name:
+        for prop in raw_data.get("Properties", []):
+            if isinstance(prop, dict) and prop.get("Name") == property_name:
+                return prop
+            elif prop == property_name:
+                return {"Name": prop}
+        for func in raw_data.get("Functions", []):
+            if isinstance(func, dict) and func.get("Name") == property_name:
+                return func
+            elif func == property_name:
+                return {"Name": func}
+        return {"error": f"Property or function '{property_name}' not found on asset '{asset_path}'."}
+
+    props = [
+        {"Name": p.get("Name"), "Type": p.get("Type")} if isinstance(p, dict) else {"Name": str(p)}
+        for p in raw_data.get("Properties", [])
+    ]
+    funcs = [
+        {"Name": f.get("Name")} if isinstance(f, dict) else {"Name": str(f)}
+        for f in raw_data.get("Functions", [])
+    ]
+    
+    return {
+        "Name": raw_data.get("Name"),
+        "Class": raw_data.get("Class"),
+        "Properties": props,
+        "Functions": funcs,
+        "hint": f"Output is summarized. To see full metadata/tooltips for a specific property, use: project asset-describe \"{asset_path}\" --property <Name>"
+    }
+
+def get_asset_property(api: "UEEditorAPI", asset_path: str, property_name: str) -> dict:
+    """Get a property value on a UAsset."""
+    if not api.does_asset_exist(asset_path):
+        return {"error": f"Asset not found: {asset_path}"}
+        
+    script = f'''
+import unreal
+asset = unreal.EditorAssetLibrary.load_asset('{asset_path}')
+if asset:
+    unreal.log(f'LOADED_OBJECT:{{asset.get_path_name()}}')
+'''
+    res = api.exec_python_ex(script)
+    object_path = None
+    for item in res.get("LogOutput", []):
+        line = item.get("Output", "")
+        if line.startswith("LOADED_OBJECT:"):
+            object_path = line.split(":", 1)[1].strip()
+            
+    if not object_path:
+        return {"error": f"Failed to load asset into memory: {asset_path}"}
+        
+    return api.get_property(object_path, property_name)
+
+def set_asset_property(api: "UEEditorAPI", asset_path: str, property_name: str, value) -> dict:
+    """Set a property value on a UAsset and mark it dirty."""
+    if not api.does_asset_exist(asset_path):
+        return {"error": f"Asset not found: {asset_path}"}
+        
+    script = f'''
+import unreal
+asset = unreal.EditorAssetLibrary.load_asset('{asset_path}')
+if asset:
+    unreal.log(f'LOADED_OBJECT:{{asset.get_path_name()}}')
+'''
+    res = api.exec_python_ex(script)
+    object_path = None
+    for item in res.get("LogOutput", []):
+        line = item.get("Output", "")
+        if line.startswith("LOADED_OBJECT:"):
+            object_path = line.split(":", 1)[1].strip()
+            
+    if not object_path:
+        return {"error": f"Failed to load asset into memory: {asset_path}"}
+        
+    set_res = api.set_property(object_path, property_name, value)
+    
+    # Mark package dirty so it can be saved
+    dirty_script = f'''
+import unreal
+asset = unreal.EditorAssetLibrary.load_asset('{asset_path}')
+if asset:
+    unreal.EditorAssetLibrary.save_asset('{asset_path}', only_if_is_dirty=False)
+    unreal.log('SAVED')
+'''
+    api.exec_python_ex(dirty_script)
+    
+    return set_res

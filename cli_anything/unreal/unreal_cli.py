@@ -475,6 +475,38 @@ def project_asset_rename(source_path, dest_path):
                           project_dir=_session.project_dir)
     output(result)
 
+@project_group.command("asset-describe")
+@click.argument("asset_path")
+@click.option("--property", "prop_name", default=None, help="Get full metadata for a specific property")
+@handle_error
+def project_asset_describe(asset_path, prop_name):
+    """Describe a UAsset loaded in the Content Browser.
+    
+    Use --property <Name> to get full metadata (tooltips, enums) for a specific item.
+    """
+    from cli_anything.unreal.core.assets import describe_asset
+
+    asset_path = _fix_ue_path(asset_path)
+    api = _require_editor()
+    result = describe_asset(api, asset_path, prop_name)
+    output(result)
+
+@project_group.command("asset-property")
+@click.argument("asset_path")
+@click.argument("property_name")
+@click.option("--set", "new_value", default=None, help="Set property to this value")
+@handle_error
+def project_asset_property(asset_path, property_name, new_value):
+    """Get (or set) a property on a UAsset in the Content Browser."""
+    from cli_anything.unreal.core.assets import get_asset_property, set_asset_property
+
+    asset_path = _fix_ue_path(asset_path)
+    api = _require_editor()
+    if new_value is not None:
+        result = set_asset_property(api, asset_path, property_name, new_value)
+    else:
+        result = get_asset_property(api, asset_path, property_name)
+    output(result)
 
 # ══════════════════════════════════════════════════════════════════════
 #  BUILD commands

@@ -1122,10 +1122,86 @@ class TestAssetsE2E:
         data = json.loads(result.output)
         assert "count" in data
 
+    def test_asset_describe_and_property_cli(self, cli_runner, api_port, api, project_path):
+        from cli_anything.unreal.unreal_cli import cli
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        project_dir = str(Path(project_path).parent)
+
+        # Ensure clean state via script (HTTP API delete unreliable)
+        cleanup_code = (
+            "import unreal\n"
+            "EAL = unreal.EditorAssetLibrary\n"
+            "can_create = True\n"
+            "if EAL.does_asset_exist('/Game/E2E_AssetPropTest'):\n"
+            "    if EAL.delete_asset('/Game/E2E_AssetPropTest'):\n"
+            "        unreal.SystemLibrary.collect_garbage()\n"
+            "    else:\n"
+            "        can_create = False\n"
+            "if can_create:\n"
+            "    ATH = unreal.AssetToolsHelpers.get_asset_tools()\n"
+            "    mat = ATH.create_asset('E2E_AssetPropTest', '/Game', "
+            "unreal.Material, unreal.MaterialFactoryNew())\n"
+            "    result = {'created': mat is not None}\n"
+            "else:\n"
+            "    result = {'created': False, 'error': 'delete failed'}\n"
+        )
+        run_python_code(api, cleanup_code, project_dir=project_dir, timeout=15, save=False)
+
+        # 1. Describe general
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port), "--project", project_path,
+            "project", "asset-describe", "/Game/E2E_AssetPropTest",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "Name" in data
+        assert data["Name"] == "E2E_AssetPropTest"
+        assert "Properties" in data
+        assert any(p.get("Name") == "BlendMode" for p in data["Properties"])
+
+        # 2. Describe property
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port), "--project", project_path,
+            "project", "asset-describe", "/Game/E2E_AssetPropTest", "--property", "BlendMode"
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "Name" in data
+        assert data["Name"] == "BlendMode"
+
+        # 3. Get Property
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port), "--project", project_path,
+            "project", "asset-property", "/Game/E2E_AssetPropTest", "BlendMode"
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "BlendMode" in data
+        assert data["BlendMode"] == "Opaque"
+
+        # 4. Set Property
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port), "--project", project_path,
+            "project", "asset-property", "/Game/E2E_AssetPropTest", "BlendMode", "--set", "BLEND_Masked"
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data.get("status") == "ok"
+
+        # 5. Get Property again to verify
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port), "--project", project_path,
+            "project", "asset-property", "/Game/E2E_AssetPropTest", "BlendMode"
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["BlendMode"] == "Masked"
+
         # Cleanup via script
         run_python_code(api, (
             "import unreal\n"
-            "unreal.EditorAssetLibrary.delete_asset('/Game/E2E_AssetTest')\n"
+            "unreal.EditorAssetLibrary.delete_asset('/Game/E2E_AssetPropTest')\n"
             "unreal.SystemLibrary.collect_garbage()\n"
             "result = {'cleaned': True}\n"
         ), project_dir=project_dir, timeout=10, save=False)

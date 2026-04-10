@@ -241,6 +241,24 @@ Script return conventions:
 
 Dirty packages are auto-saved after script execution. Use `--no-save` for read-only scripts.
 
+### Asset Manipulation
+```bash
+# 1. Modify UAsset properties directly (without Python scripts)
+# Works on DataAssets, Textures, Materials, Blueprints, etc.
+# Use describe first to find the property name, then property --set to change it.
+cli-anything-unreal --json project asset-describe /Game/MyAsset
+cli-anything-unreal --json project asset-describe /Game/MyAsset --property MyVar
+cli-anything-unreal --json project asset-property /Game/MyAsset MyVar --set 100
+
+# 2. Rename and duplicate
+cli-anything-unreal --json project asset-rename /Game/Old /Game/New
+cli-anything-unreal --json project asset-duplicate /Game/Old /Game/New
+
+# 3. Check references before deleting
+cli-anything-unreal --json project asset-refs /Game/MyAsset
+cli-anything-unreal --json project asset-delete /Game/MyAsset
+```
+
 ### Blueprint Editing
 ```bash
 # 1. Find the blueprint
