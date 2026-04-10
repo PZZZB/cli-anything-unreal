@@ -269,7 +269,9 @@ cli-anything-unreal --json blueprint compile /Game/BP_Enemy
 # 1. Find actors by name
 cli-anything-unreal --json scene find "DirectionalLight"
 
-# 2. Inspect all properties and functions on an actor
+# 2. Inspect ALL properties and functions on an actor (WARNING: Huge output!)
+# DO NOT use `describe` blindly as it returns hundreds of properties and will blow out your context window.
+# Prefer `scene transform`, `scene components`, or `scene material` first. Only use `describe` if you are searching for an unknown property name.
 cli-anything-unreal --json scene describe <actor_path>
 
 # 3. Read a property

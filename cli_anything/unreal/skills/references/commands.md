@@ -96,7 +96,7 @@ All scene commands require the editor to be running.
 |---------|-------------|
 | `scene actors` | List all actors in current level |
 | `scene find NAME` | Find actors by name (substring match) |
-| `scene describe ACTOR_PATH` | List all properties and functions on an actor |
+| `scene describe ACTOR_PATH` | List ALL properties and functions (Huge output! Use sparingly) |
 | `scene property ACTOR_PATH PROP [--set VALUE]` | Get or set a property on an actor |
 | `scene transform ACTOR_PATH` | Get actor transform (location, rotation, scale) |
 | `scene components ACTOR_PATH` | List components on an actor |
