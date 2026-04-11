@@ -415,7 +415,10 @@ import json
 mat = unreal.EditorAssetLibrary.load_asset("/Game/E2E_TestMaterial")
 if mat is not None:
     mel = unreal.MaterialEditingLibrary
-    mel.delete_all_material_expressions(mat)
+    # BUG WORKAROUND: UE 5.7 DeleteAllMaterialExpressions has a C++ modify-while-iterating bug
+    # which only deletes half the nodes per call. We loop until no expressions remain.
+    while len(mat.get_editor_property("expressions")) > 0:
+        mel.delete_all_material_expressions(mat)
     mel.recompile_material(mat)
     result = {{"status": "ok"}}
 else:

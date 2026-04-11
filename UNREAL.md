@@ -289,3 +289,9 @@ wrapper**, not a reimplementation. The main gaps are:
   Linux/Mac support would require path adjustments.
 - **Plugin dependency** — Remote Control plugin must be enabled; Python
   Script Plugin needed for advanced operations.
+
+## Known Engine Bugs
+
+- **`DeleteAllMaterialExpressions` (UE 5.7)**: Unreal Engine has a bug in `UMaterialEditingLibrary::DeleteAllMaterialExpressions` (`Engine/Plugins/Editor/EditorScriptingUtilities/Source/EditorScriptingUtilities/Private/MaterialEditingLibrary.cpp`). A `for` loop modifies an array while iterating over it forward, deleting only half the expressions per call.
+  - **Python script workaround**: Loop `delete_all_material_expressions(mat)` until the `len(mat.get_editor_property("expressions"))` is 0.
+  - **C++ Engine fix**: Use `TArray<TObjectPtr<UMaterialExpression>> ExpressionsCopy = Material->GetExpressions(); for (UMaterialExpression* Expression : ExpressionsCopy) { DeleteMaterialExpression(Material, Expression); }`.
