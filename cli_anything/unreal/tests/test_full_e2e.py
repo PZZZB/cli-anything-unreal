@@ -128,7 +128,7 @@ class TestProjectE2E:
 
         result = cli_runner.invoke(cli, [
             "--json", "--project", project_path,
-            "project", "content",
+            "asset", "list",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -224,7 +224,7 @@ class TestScreenshotE2E:
 
         result = cli_runner.invoke(cli, [
             "--json", "--project", project_path, "--port", str(api_port),
-            "screenshot", "static", "--filename", "e2e_cli_test",
+            "screenshot", "capture", "--filename", "e2e_cli_test",
         ])
 
         data = json.loads(result.output)
@@ -239,7 +239,7 @@ class TestScreenshotE2E:
 
         result = cli_runner.invoke(cli, [
             "--json", "--project", project_path, "--port", str(api_port),
-            "screenshot", "dynamic", "-n", "2", "-i", "0.35",
+            "screenshot", "capture-sequence", "-n", "2", "-i", "0.35",
         ])
         data = json.loads(result.output)
         if data.get("status") != "ok":
@@ -283,7 +283,7 @@ class TestScreenshotE2E:
 
         result = cli_runner.invoke(cli, [
             "--json", "--project", project_path, "--port", str(api_port),
-            "screenshot", "dynamic", "-n", "2", "-i", "0.35", "--no-compress",
+            "screenshot", "capture-sequence", "-n", "2", "-i", "0.35", "--no-compress",
         ])
         data = json.loads(result.output)
         if data.get("status") != "ok":
@@ -666,7 +666,7 @@ result = {"cleaned": True}
 
         result = cli_runner.invoke(cli, [
             "--json", "--project", project_path, "--port", str(api_port),
-            "material", "errors", "/Game/E2E_TestMaterial",
+            "material", "get-errors", "/Game/E2E_TestMaterial",
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
@@ -875,7 +875,7 @@ class TestSceneE2E:
 
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port),
-            "scene", "actors",
+            "scene", "list",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -939,7 +939,7 @@ class TestSceneE2E:
         actor_path = all_actors["actors"][0]["path"]
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port),
-            "scene", "transform", actor_path,
+            "scene", "get-transform", actor_path,
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1082,7 +1082,7 @@ class TestAssetsE2E:
 
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "project", "asset-exists", "/Game/E2E_NonExistent",
+            "asset", "exists", "/Game/E2E_NonExistent",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1116,7 +1116,7 @@ class TestAssetsE2E:
 
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "project", "asset-refs", self.TEST_ASSET,
+            "asset", "refs", self.TEST_ASSET,
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1151,7 +1151,7 @@ class TestAssetsE2E:
         # 1. Describe general
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "project", "asset-describe", "/Game/E2E_AssetPropTest",
+            "asset", "info", "/Game/E2E_AssetPropTest",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1163,7 +1163,7 @@ class TestAssetsE2E:
         # 2. Describe property
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "project", "asset-describe", "/Game/E2E_AssetPropTest", "--property", "BlendMode"
+            "asset", "info", "/Game/E2E_AssetPropTest", "--property", "BlendMode"
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1173,7 +1173,7 @@ class TestAssetsE2E:
         # 3. Get Property
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "project", "asset-property", "/Game/E2E_AssetPropTest", "BlendMode"
+            "asset", "get-property", "/Game/E2E_AssetPropTest", "BlendMode"
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1183,7 +1183,7 @@ class TestAssetsE2E:
         # 4. Set Property
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "project", "asset-property", "/Game/E2E_AssetPropTest", "BlendMode", "--set", "BLEND_Masked"
+            "asset", "get-property", "/Game/E2E_AssetPropTest", "BlendMode", "--set", "BLEND_Masked"
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -1192,7 +1192,7 @@ class TestAssetsE2E:
         # 5. Get Property again to verify
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "project", "asset-property", "/Game/E2E_AssetPropTest", "BlendMode"
+            "asset", "get-property", "/Game/E2E_AssetPropTest", "BlendMode"
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)

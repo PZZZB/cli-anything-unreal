@@ -60,10 +60,10 @@ If `load_asset` returns `None`, the test MUST fail, and you must report the corr
 When the user asks you to do something in Unreal, follow this sequence:
 
 1. **Is the editor running?** Run `editor status`. If not reachable, go through the Editor Lifecycle workflow below.
-2. **Do you know the asset path?** If not, discover it with `material list`, `blueprint list`, `scene actors`, or `project content`.
+2. **Do you know the asset path?** If not, discover it with `material list`, `blueprint list`, `scene list`, or `asset list`.
 3. **Does a CLI command exist for this?** Check the command reference in `references/commands.md`. Use CLI commands first.
 4. **No CLI command covers it?** Write a Python script and run it with `editor run-script`.
-5. **Need visual verification?** Use `screenshot static` and review the image.
+5. **Need visual verification?** Use `screenshot capture` and review the image.
 
 ## Handling Errors
 
@@ -71,11 +71,11 @@ CLI commands return JSON with an `error` field when something goes wrong. Common
 
 - **Connection refused** → editor not running. Run `editor launch` to start it, then `editor status` to confirm it's reachable.
 - **Timeout** → editor is busy (compiling shaders, loading a level). Run `editor status` to check; if reachable, wait 10-15 seconds and retry the original command.
-- **Asset not found** → path is wrong. Run `material list`, `blueprint list`, or `project content` to discover the correct path, then retry.
+- **Asset not found** → path is wrong. Run `material list`, `blueprint list`, or `asset list` to discover the correct path, then retry.
 - **"modules built with different engine version"** → Run `editor preflight` to diagnose → `build compile` to rebuild → `editor launch` to start fresh.
 - **Material `expressions` is protected** → Do not access `Material.expressions` directly. Use `material info` to read, CLI edit commands (`add-node`, `connect`, `delete-node`) to modify.
 - **Screenshot fails** → editor window must be visible. Retry — the CLI auto-brings it to foreground on the attempt.
-- **HLSL dump empty** → shader may need recompilation first. Run `material recompile`, then retry `material hlsl`.
+- **HLSL dump empty** → shader may need recompilation first. Run `material recompile`, then retry `material dump-hlsl`.
 - **Asset overwrite dialog blocks script** → see "Avoiding Asset Overwrite Dialogs" below.
 
 ## No Modal Dialogs in CLI Environment
@@ -171,7 +171,7 @@ cli-anything-unreal --json material info /Game/M_Water
 #          material_outputs{} showing which node feeds each output pin
 
 # 1b. Connection graph only (lightweight)
-cli-anything-unreal --json material connections /Game/M_Water
+cli-anything-unreal --json material get-connections /Game/M_Water
 
 # 2. Add nodes
 cli-anything-unreal --json material add-node /Game/M_Water --type MaterialExpressionPanner
@@ -185,10 +185,10 @@ cli-anything-unreal --json material connect /Game/M_Water \
 
 # 4. Recompile and verify
 cli-anything-unreal --json material recompile /Game/M_Water
-cli-anything-unreal --json material errors /Game/M_Water
+cli-anything-unreal --json material get-errors /Game/M_Water
 
 # 5. Visual check
-cli-anything-unreal --json screenshot static --filename material_check
+cli-anything-unreal --json screenshot capture --filename material_check
 ```
 
 **Connect to material output:** Use `--to __material_output__` with `--to-input` being the property name: `BaseColor`, `Metallic`, `Roughness`, `Normal`, `Emissive`, `Opacity`, `WorldPositionOffset`, etc.
@@ -245,18 +245,18 @@ Dirty packages are auto-saved after script execution. Use `--no-save` for read-o
 ```bash
 # 1. Modify UAsset properties directly (without Python scripts)
 # Works on DataAssets, Textures, Materials, Blueprints, etc.
-# Use describe first to find the property name, then property --set to change it.
-cli-anything-unreal --json project asset-describe /Game/MyAsset
-cli-anything-unreal --json project asset-describe /Game/MyAsset --property MyVar
-cli-anything-unreal --json project asset-property /Game/MyAsset MyVar --set 100
+# Use describe first to find the property name, then set-property to change it.
+cli-anything-unreal --json asset info /Game/MyAsset
+cli-anything-unreal --json asset info /Game/MyAsset --property MyVar
+cli-anything-unreal --json asset set-property /Game/MyAsset MyVar 100
 
 # 2. Rename and duplicate
-cli-anything-unreal --json project asset-rename /Game/Old /Game/New
-cli-anything-unreal --json project asset-duplicate /Game/Old /Game/New
+cli-anything-unreal --json asset rename /Game/Old /Game/New
+cli-anything-unreal --json asset duplicate /Game/Old /Game/New
 
 # 3. Check references before deleting
-cli-anything-unreal --json project asset-refs /Game/MyAsset
-cli-anything-unreal --json project asset-delete /Game/MyAsset
+cli-anything-unreal --json asset refs /Game/MyAsset
+cli-anything-unreal --json asset delete /Game/MyAsset
 ```
 
 ### Blueprint Editing
@@ -276,7 +276,7 @@ cli-anything-unreal --json blueprint add-function /Game/BP_Enemy \
     --name TakeDamage
 
 # 5. Clean up unused variables
-cli-anything-unreal --json blueprint remove-unused-variables /Game/BP_Enemy
+cli-anything-unreal --json blueprint delete-unused-variables /Game/BP_Enemy
 
 # 6. Compile and verify
 cli-anything-unreal --json blueprint compile /Game/BP_Enemy
@@ -289,26 +289,26 @@ cli-anything-unreal --json scene find "DirectionalLight"
 
 # 2. Inspect ALL properties and functions on an actor (WARNING: Huge output!)
 # DO NOT use `describe` blindly as it returns hundreds of properties and will blow out your context window.
-# Prefer `scene transform`, `scene components`, or `scene material` first. Only use `describe` if you are searching for an unknown property name.
-cli-anything-unreal --json scene describe <actor_path>
+# Prefer `scene get-transform`, `scene list-components`, or `scene get-material` first. Only use `describe` if you are searching for an unknown property name.
+cli-anything-unreal --json scene info <actor_path>
 
 # 3. Read a property
-cli-anything-unreal --json scene property <actor_path> Intensity
+cli-anything-unreal --json scene get-property <actor_path> Intensity
 
 # 4. Modify a property
-cli-anything-unreal --json scene property <actor_path> Intensity --set 5.0
+cli-anything-unreal --json scene set-property <actor_path> Intensity 5.0
 
 # 5. Check transform (location, rotation, scale)
-cli-anything-unreal --json scene transform <actor_path>
+cli-anything-unreal --json scene get-transform <actor_path>
 
 # 6. List components
-cli-anything-unreal --json scene components <actor_path>
+cli-anything-unreal --json scene list-components <actor_path>
 
 # 7. Find which material an actor uses
-cli-anything-unreal --json scene material <actor_path>
+cli-anything-unreal --json scene get-material <actor_path>
 ```
 
-Use `scene actors` to list everything in the current level when you don't know the actor name.
+Use `scene list` to list everything in the current level when you don't know the actor name.
 
 ### Build & Package
 ```bash
@@ -329,19 +329,19 @@ cli-anything-unreal --json --project F:\RXGame\RXGame.uproject build status
 ### Actor → Material → Shader Investigation
 ```bash
 cli-anything-unreal --json scene find "PostProcessVolume"
-cli-anything-unreal --json scene material "<actor_path>"
+cli-anything-unreal --json scene get-material "<actor_path>"
 cli-anything-unreal --json material info /Game/SomeMaterial
-cli-anything-unreal --json material hlsl /Game/SomeMaterial
+cli-anything-unreal --json material dump-hlsl /Game/SomeMaterial
 ```
 
 ### Visual Verification (Screenshots)
 ```bash
 # 1. Take a single static screenshot of the current editor viewport
-cli-anything-unreal --json screenshot static \
+cli-anything-unreal --json screenshot capture \
     --filename "my_screenshot"
 
 # 2. Take a sequence of screenshots (e.g. to capture motion/FX)
-cli-anything-unreal --json screenshot dynamic \
+cli-anything-unreal --json screenshot capture-sequence \
     --frames 3 --interval 0.5
 ```
 

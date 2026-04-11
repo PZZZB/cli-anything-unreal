@@ -263,6 +263,16 @@ def install_skills():
 #  PROJECT commands
 # ══════════════════════════════════════════════════════════════════════
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  ASSET commands
+# ══════════════════════════════════════════════════════════════════════
+
+@cli.group("asset")
+def asset_group():
+    """Asset operations (exists, delete, duplicate, info, etc.)."""
+    pass
+
 @cli.group("project")
 def project_group():
     """Project management — info, configs, content listing."""
@@ -341,12 +351,12 @@ def config_set(config_name, section, key, value):
     output(result)
 
 
-@project_group.command("content")
+@asset_group.command("list")
 @click.option("--ext", default="", help="Filter by extension (e.g., .uasset)")
 @click.option("--filter", "path_filter", default="", help="Filter by path substring")
 @click.option("--depth", default=5, help="Max directory depth")
 @handle_error
-def content_list(ext, path_filter, depth):
+def asset_list(ext, path_filter, depth):
     """List content assets in the project."""
     from cli_anything.unreal.core.project import list_content
 
@@ -374,10 +384,10 @@ def project_generate():
     output(result)
 
 
-@project_group.command("asset-exists")
+@asset_group.command("exists")
 @click.argument("asset_path")
 @handle_error
-def project_asset_exists(asset_path):
+def asset_exists_cmd(asset_path):
     """Check if an asset exists at the given content path.
 
     Example: project asset-exists /Game/Materials/M_Water
@@ -390,12 +400,12 @@ def project_asset_exists(asset_path):
     output(result)
 
 
-@project_group.command("asset-delete")
+@asset_group.command("delete")
 @click.argument("asset_path")
 @click.option("--force", is_flag=True, default=False,
               help="Delete even if other assets reference it (they will have broken references).")
 @handle_error
-def project_asset_delete(asset_path, force):
+def asset_delete_cmd(asset_path, force):
     """Safely delete an asset with reference detection.
 
     Without --force: if other assets reference it, returns the list of
@@ -413,10 +423,10 @@ def project_asset_delete(asset_path, force):
     output(result)
 
 
-@project_group.command("asset-refs")
+@asset_group.command("refs")
 @click.argument("asset_path")
 @handle_error
-def project_asset_refs(asset_path):
+def asset_refs_cmd(asset_path):
     """List all assets that reference the given asset.
 
     Useful before deleting — shows what would break.
@@ -431,13 +441,13 @@ def project_asset_refs(asset_path):
     output(result)
 
 
-@project_group.command("asset-duplicate")
+@asset_group.command("duplicate")
 @click.argument("source_path")
 @click.argument("dest_path")
 @click.option("--force", is_flag=True, default=False,
               help="Overwrite destination if it already exists.")
 @handle_error
-def project_asset_duplicate(source_path, dest_path, force):
+def asset_duplicate_cmd(source_path, dest_path, force):
     """Duplicate an asset to a new path.
 
     With --force: if destination exists, deletes it first then duplicates.
@@ -455,11 +465,11 @@ def project_asset_duplicate(source_path, dest_path, force):
     output(result)
 
 
-@project_group.command("asset-rename")
+@asset_group.command("rename")
 @click.argument("source_path")
 @click.argument("dest_path")
 @handle_error
-def project_asset_rename(source_path, dest_path):
+def asset_rename_cmd(source_path, dest_path):
     """Rename/move an asset to a new path.
 
     Fails if destination already exists.
@@ -475,11 +485,11 @@ def project_asset_rename(source_path, dest_path):
                           project_dir=_session.project_dir)
     output(result)
 
-@project_group.command("asset-describe")
+@asset_group.command("info")
 @click.argument("asset_path")
 @click.option("--property", "prop_name", default=None, help="Get full metadata for a specific property")
 @handle_error
-def project_asset_describe(asset_path, prop_name):
+def asset_info_cmd(asset_path, prop_name):
     """Describe a UAsset loaded in the Content Browser.
     
     Use --property <Name> to get full metadata (tooltips, enums) for a specific item.
@@ -491,21 +501,32 @@ def project_asset_describe(asset_path, prop_name):
     result = describe_asset(api, asset_path, prop_name)
     output(result)
 
-@project_group.command("asset-property")
+@asset_group.command("get-property")
 @click.argument("asset_path")
 @click.argument("property_name")
-@click.option("--set", "new_value", default=None, help="Set property to this value")
 @handle_error
-def project_asset_property(asset_path, property_name, new_value):
-    """Get (or set) a property on a UAsset in the Content Browser."""
-    from cli_anything.unreal.core.assets import get_asset_property, set_asset_property
+def asset_get_property(asset_path, property_name):
+    """Get a property on a UAsset in the Content Browser."""
+    from cli_anything.unreal.core.assets import get_asset_property
 
     asset_path = _fix_ue_path(asset_path)
     api = _require_editor()
-    if new_value is not None:
-        result = set_asset_property(api, asset_path, property_name, new_value)
-    else:
-        result = get_asset_property(api, asset_path, property_name)
+    result = get_asset_property(api, asset_path, property_name)
+    output(result)
+
+
+@asset_group.command("set-property")
+@click.argument("asset_path")
+@click.argument("property_name")
+@click.argument("new_value")
+@handle_error
+def asset_set_property(asset_path, property_name, new_value):
+    """Set a property on a UAsset in the Content Browser."""
+    from cli_anything.unreal.core.assets import set_asset_property
+
+    asset_path = _fix_ue_path(asset_path)
+    api = _require_editor()
+    result = set_asset_property(api, asset_path, property_name, new_value)
     output(result)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -592,10 +613,10 @@ def scene_group():
     pass
 
 
-@scene_group.command("actors")
+@scene_group.command("list")
 @click.option("--class", "actor_class", default=None, help="Filter by class (e.g., StaticMeshActor)")
 @handle_error
-def scene_actors(actor_class):
+def scene_list_actors(actor_class):
     """List all actors in the current level."""
     from cli_anything.unreal.core.scene import list_actors, list_actors_of_class
 
@@ -628,11 +649,11 @@ def scene_find(name):
     output(result)
 
 
-@scene_group.command("describe")
+@scene_group.command("info")
 @click.argument("actor_path")
 @click.option("--property", "prop_name", default=None, help="Get full metadata for a specific property/function")
 @handle_error
-def scene_describe(actor_path, prop_name):
+def scene_info_cmd(actor_path, prop_name):
     """Describe an actor — list properties and functions.
     
     Use --property <Name> to get full metadata (tooltips, enums) for a specific item.
@@ -644,27 +665,37 @@ def scene_describe(actor_path, prop_name):
     output(result)
 
 
-@scene_group.command("property")
+@scene_group.command("get-property")
 @click.argument("actor_path")
 @click.argument("property_name")
-@click.option("--set", "new_value", default=None, help="Set property to this value")
 @handle_error
-def scene_property(actor_path, property_name, new_value):
-    """Get (or set) a property on an actor."""
-    from cli_anything.unreal.core.scene import get_actor_property, set_actor_property
+def scene_get_property(actor_path, property_name):
+    """Get a property on an actor."""
+    from cli_anything.unreal.core.scene import get_actor_property
 
     api = _require_editor()
-    if new_value is not None:
-        result = set_actor_property(api, actor_path, property_name, new_value)
-    else:
-        result = get_actor_property(api, actor_path, property_name)
+    result = get_actor_property(api, actor_path, property_name)
     output(result)
 
 
-@scene_group.command("components")
+@scene_group.command("set-property")
+@click.argument("actor_path")
+@click.argument("property_name")
+@click.argument("new_value")
+@handle_error
+def scene_set_property(actor_path, property_name, new_value):
+    """Set a property on an actor."""
+    from cli_anything.unreal.core.scene import set_actor_property
+
+    api = _require_editor()
+    result = set_actor_property(api, actor_path, property_name, new_value)
+    output(result)
+
+
+@scene_group.command("list-components")
 @click.argument("actor_path")
 @handle_error
-def scene_components(actor_path):
+def scene_list_components(actor_path):
     """List components on an actor."""
     from cli_anything.unreal.core.scene import get_actor_components
 
@@ -673,11 +704,11 @@ def scene_components(actor_path):
     output(result)
 
 
-@scene_group.command("material")
+@scene_group.command("get-material")
 @click.argument("actor_path")
 @click.option("--index", default=0, help="Material slot index")
 @handle_error
-def scene_material(actor_path, index):
+def scene_get_material(actor_path, index):
     """Get the material assigned to an actor's mesh."""
     from cli_anything.unreal.core.scene import get_actor_material
 
@@ -686,10 +717,10 @@ def scene_material(actor_path, index):
     output(result)
 
 
-@scene_group.command("transform")
+@scene_group.command("get-transform")
 @click.argument("actor_path")
 @handle_error
-def scene_transform(actor_path):
+def scene_get_transform(actor_path):
     """Get an actor's transform (location, rotation, scale)."""
     from cli_anything.unreal.core.scene import get_actor_transform
 
@@ -733,7 +764,7 @@ def material_info(material_path):
     output(result)
 
 
-@material_group.command("stats")
+@material_group.command("get-stats")
 @click.argument("material_path")
 @handle_error
 def material_stats(material_path):
@@ -746,7 +777,7 @@ def material_stats(material_path):
     output(result)
 
 
-@material_group.command("errors")
+@material_group.command("get-errors")
 @click.argument("material_path")
 @handle_error
 def material_errors(material_path):
@@ -759,7 +790,7 @@ def material_errors(material_path):
     output(result)
 
 
-@material_group.command("textures")
+@material_group.command("list-textures")
 @click.argument("material_path")
 @handle_error
 def material_textures(material_path):
@@ -772,7 +803,7 @@ def material_textures(material_path):
     output(result)
 
 
-@material_group.command("connections")
+@material_group.command("get-connections")
 @click.argument("material_path")
 @handle_error
 def material_connections(material_path):
@@ -863,7 +894,7 @@ def material_analyze(material_path):
         output(result)
 
 
-@material_group.command("hlsl")
+@material_group.command("dump-hlsl")
 @click.argument("material_path")
 @click.option("--platform", default="sm6",
               help="Shader platform: sm6 (default), sm5, vulkan, vulkan_es31, opengl_es31, metal")
@@ -1017,6 +1048,22 @@ def material_disconnect(material_path, from_node, from_output, to_node, to_input
     output(result)
 
 
+@material_group.command("get-param")
+@click.argument("material_path")
+@click.option("--name", "param_name", required=True, help="Parameter name")
+@handle_error
+def material_get_param(material_path, param_name):
+    """Get a parameter on a MaterialInstanceConstant.
+    
+    Example: material get-param /Game/MI_Test --name Roughness
+    """
+    from cli_anything.unreal.core.materials import get_material_param
+
+    material_path = _fix_ue_path(material_path)
+    api = _require_editor()
+    result = get_material_param(api, material_path, param_name, project_dir=_session.project_dir)
+    output(result)
+
 @material_group.command("set-param")
 @click.argument("material_path")
 @click.option("--name", "param_name", required=True, help="Parameter name")
@@ -1111,11 +1158,11 @@ def blueprint_add_function(blueprint_path, func_name):
     output(result)
 
 
-@blueprint_group.command("remove-function")
+@blueprint_group.command("delete-function")
 @click.argument("blueprint_path")
 @click.option("--name", "func_name", required=True, help="Name of the function graph to remove")
 @handle_error
-def blueprint_remove_function(blueprint_path, func_name):
+def blueprint_delete_function(blueprint_path, func_name):
     """Remove a function graph from a blueprint.
 
     Example: blueprint remove-function /Game/BP_Test --name MyFunc
@@ -1149,10 +1196,26 @@ def blueprint_add_variable(blueprint_path, var_name, var_type):
     output(result)
 
 
-@blueprint_group.command("remove-unused-variables")
+@blueprint_group.command("delete-variable")
+@click.argument("blueprint_path")
+@click.option("--name", "var_name", required=True, help="Variable name")
+@handle_error
+def blueprint_delete_variable(blueprint_path, var_name):
+    """Delete a member variable from a blueprint.
+
+    Example: blueprint delete-variable /Game/BP_Test --name Health
+    """
+    from cli_anything.unreal.core.blueprint import remove_variable
+
+    blueprint_path = _fix_ue_path(blueprint_path)
+    api = _require_editor()
+    result = remove_variable(api, blueprint_path, var_name, project_dir=_session.project_dir)
+    output(result)
+
+@blueprint_group.command("delete-unused-variables")
 @click.argument("blueprint_path")
 @handle_error
-def blueprint_remove_unused_variables(blueprint_path):
+def blueprint_delete_unused_variables(blueprint_path):
     """Remove all unused variables from a blueprint.
 
     Example: blueprint remove-unused-variables /Game/BP_Test
@@ -1212,7 +1275,7 @@ def screenshot_group():
     pass
 
 
-@screenshot_group.command("static")
+@screenshot_group.command("capture")
 @click.option("--filename", default="screenshot", help="Output filename (no extension)")
 @click.option("--no-compress", is_flag=True, help="Return raw PNG instead of compressed JPG")
 @handle_error
@@ -1268,7 +1331,7 @@ def _exec_screenshot_dynamic(frames, interval, no_compress):
 
 
 @screenshot_group.command(
-    "dynamic",
+    "capture-sequence",
     help=(
         "Viewport frames over time merged into one atlas; "
         "default primary output is compressed JPG like static screenshot."
@@ -2120,12 +2183,15 @@ def _print_repl_help():
         "project config list": "List configuration files",
         "project config get <name>": "Read a config file",
         "project config set <name> <sec> <k> <v>": "Set a config value",
-        "project content": "List content assets",
-        "project asset-exists": "Check if asset exists",
-        "project asset-delete": "Delete asset (with ref check)",
-        "project asset-refs": "List asset referencers",
-        "project asset-duplicate": "Duplicate asset (--force to overwrite)",
-        "project asset-rename": "Rename/move asset",
+        "asset list": "List content assets",
+        "asset info <path>": "Describe a UAsset",
+        "asset exists <path>": "Check if asset exists",
+        "asset delete <path>": "Delete asset (with ref check)",
+        "asset refs <path>": "List asset referencers",
+        "asset duplicate <s_path> <d_path>": "Duplicate asset",
+        "asset rename <s_path> <d_path>": "Rename/move asset",
+        "asset get-property <path> <prop>": "Get asset property",
+        "asset set-property <path> <prop> <val>": "Set asset property",
         "project generate": "Generate VS project files",
         "": "",
         "build compile": "Compile C++ code",
@@ -2133,23 +2199,24 @@ def _print_repl_help():
         "build package": "Full package pipeline",
         "build status": "Check build status",
         " ": "",
-        "scene actors": "List all actors in level",
+        "scene list": "List all actors in level",
         "scene find <name>": "Find actor by name",
-        "scene describe <path>": "Describe actor properties",
-        "scene property <path> <prop>": "Get property value",
-        "scene components <path>": "List actor components",
-        "scene material <path>": "Get actor's material ★",
-        "scene transform <path>": "Get actor transform",
+        "scene info <path>": "Describe actor properties",
+        "scene get-property <path> <prop>": "Get property value",
+        "scene set-property <path> <prop> <val>": "Set property value",
+        "scene list-components <path>": "List actor components",
+        "scene get-material <path>": "Get actor's material ★",
+        "scene get-transform <path>": "Get actor transform",
         "material list": "List all materials",
         "material info <path>": "Material details + connections ★",
-        "material connections <path>": "Connection graph + orphans",
-        "material stats <path>": "Compilation statistics",
-        "material errors <path>": "Check for errors",
-        "material textures <path>": "List referenced textures",
+        "material get-connections <path>": "Connection graph + orphans",
+        "material get-stats <path>": "Compilation statistics",
+        "material get-errors <path>": "Check for errors",
+        "material list-textures <path>": "List referenced textures",
         "material analyze <path>": "Auto-analyze issues ★",
         "  ": "",
-        "screenshot static": "Capture viewport (static)",
-        "screenshot dynamic": "Time-ordered frame atlas (dynamic)",
+        "screenshot capture": "Capture viewport (static)",
+        "screenshot capture-sequence": "Time-ordered frame atlas (dynamic)",
         "   ": "",
         "editor status": "Check editor connection",
         "editor list": "Discover running editors",

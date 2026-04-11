@@ -1395,7 +1395,7 @@ class TestCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        result = runner.invoke(cli, ["screenshot", "dynamic", "--help"])
+        result = runner.invoke(cli, ["screenshot", "capture-sequence", "--help"])
         assert result.exit_code == 0
         out = result.output
         assert "--frames" in out and "--interval" in out and "--no-compress" in out
@@ -1421,7 +1421,7 @@ class TestCLI:
                 "--project",
                 temp_project["uproject"],
                 "screenshot",
-                "dynamic",
+                "capture-sequence",
                 "-n",
                 "3",
                 "-i",
@@ -1474,7 +1474,7 @@ class TestCLI:
         runner = CliRunner()
         result = runner.invoke(cli, [
             "--json", "--project", temp_project["uproject"],
-            "project", "content",
+            "asset", "list",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -2739,7 +2739,7 @@ class TestSceneCLI:
             }
             mock_editor.return_value = mock_api
 
-            result = runner.invoke(cli, ["--json", "scene", "actors"])
+            result = runner.invoke(cli, ["--json", "scene", "list"])
             assert result.exit_code == 0
             data = json.loads(result.output)
             assert data["count"] == 2
@@ -2757,7 +2757,7 @@ class TestSceneCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "scene", "actors", "--class", "PointLight",
+                "--json", "scene", "list", "--class", "PointLight",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -2800,7 +2800,7 @@ class TestSceneCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "scene", "describe", "/Game/Map:Actor_0",
+                "--json", "scene", "info", "/Game/Map:Actor_0",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -2817,7 +2817,7 @@ class TestSceneCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "scene", "property",
+                "--json", "scene", "get-property",
                 "/Game/Map:Actor_0", "bHidden",
             ])
             assert result.exit_code == 0
@@ -2840,7 +2840,7 @@ class TestSceneCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "scene", "components", "/Game/Map:Actor_0",
+                "--json", "scene", "list-components", "/Game/Map:Actor_0",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -2859,7 +2859,7 @@ class TestSceneCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "scene", "transform", "/Game/Map:Actor_0",
+                "--json", "scene", "get-transform", "/Game/Map:Actor_0",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -2884,7 +2884,7 @@ class TestAssetCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "project", "asset-exists", "/Game/M_Test",
+                "--json", "asset", "exists", "/Game/M_Test",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -2901,7 +2901,7 @@ class TestAssetCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "project", "asset-exists", "/Game/Missing",
+                "--json", "asset", "exists", "/Game/Missing",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -2921,7 +2921,7 @@ class TestAssetCLI:
             mock_exec.return_value = {"deleted": True}
 
             result = runner.invoke(cli, [
-                "--json", "project", "asset-delete", "/Game/M_Old",
+                "--json", "asset", "delete", "/Game/M_Old",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -2940,7 +2940,7 @@ class TestAssetCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "project", "asset-delete", "/Game/M_Old",
+                "--json", "asset", "delete", "/Game/M_Old",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -2960,7 +2960,7 @@ class TestAssetCLI:
             mock_exec.return_value = {"deleted": True}
 
             result = runner.invoke(cli, [
-                "--json", "project", "asset-delete", "/Game/M_Old", "--force",
+                "--json", "asset", "delete", "/Game/M_Old", "--force",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -2979,7 +2979,7 @@ class TestAssetCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "project", "asset-refs", "/Game/M_Test",
+                "--json", "asset", "refs", "/Game/M_Test",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -3001,7 +3001,7 @@ class TestAssetCLI:
             }
 
             result = runner.invoke(cli, [
-                "--json", "project", "asset-duplicate",
+                "--json", "asset", "duplicate",
                 "/Game/M_Src", "/Game/M_Dst",
             ])
             assert result.exit_code == 0
@@ -3022,7 +3022,7 @@ class TestAssetCLI:
             }
 
             result = runner.invoke(cli, [
-                "--json", "project", "asset-rename",
+                "--json", "asset", "rename",
                 "/Game/M_Old", "/Game/M_New",
             ])
             assert result.exit_code == 0

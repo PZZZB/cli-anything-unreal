@@ -42,17 +42,17 @@ cli-anything-unreal --json editor run-script query.py --no-save
 | Command | Description |
 |---------|-------------|
 | `project info` | Display project information (.uproject) |
-| `project content` | List content assets in the project |
+| `asset list` | List content assets in the project |
 | `project config read SECTION FILE` | Read a .ini config section |
 | `project config write SECTION KEY VALUE FILE` | Write a .ini config value |
 | `project generate` | Generate Visual Studio project files |
-| `project asset-exists ASSET_PATH` | Check if asset exists (requires editor) |
-| `project asset-describe ASSET_PATH [--property Name]` | Describe UAsset properties (progressive disclosure) (requires editor) |
-| `project asset-property ASSET_PATH PROP [--set Val]` | Get or set property on a UAsset (requires editor) |
-| `project asset-delete ASSET_PATH [--force]` | Delete asset with reference detection (requires editor) |
-| `project asset-refs ASSET_PATH` | List all referencers of an asset (requires editor) |
-| `project asset-duplicate SRC DEST [--force]` | Duplicate asset, --force to overwrite (requires editor) |
-| `project asset-rename SRC DEST` | Rename/move asset (requires editor) |
+| `asset exists ASSET_PATH` | Check if asset exists (requires editor) |
+| `asset info ASSET_PATH [--property Name]` | Describe UAsset properties (progressive disclosure) (requires editor) |
+| `asset get-property / asset set-property ASSET_PATH PROP [--set Val]` | Get or set property on a UAsset (requires editor) |
+| `asset delete ASSET_PATH [--force]` | Delete asset with reference detection (requires editor) |
+| `asset refs ASSET_PATH` | List all referencers of an asset (requires editor) |
+| `asset duplicate SRC DEST [--force]` | Duplicate asset, --force to overwrite (requires editor) |
+| `asset rename SRC DEST` | Rename/move asset (requires editor) |
 
 ### Asset Deletion — Safe Workflow
 
@@ -60,20 +60,20 @@ cli-anything-unreal --json editor run-script query.py --no-save
 
 ```bash
 # 1. Check what references the asset
-cli-anything-unreal --json project asset-refs /Game/M_Old
+cli-anything-unreal --json asset refs /Game/M_Old
 # → {"asset": "/Game/M_Old", "referencers": ["/Game/Maps/Level1"], "count": 1}
 
 # 2. Delete without --force — blocked because of references
-cli-anything-unreal --json project asset-delete /Game/M_Old
+cli-anything-unreal --json asset delete /Game/M_Old
 # → {"status": "has_references", "deleted": false, "referencers": ["/Game/Maps/Level1"],
 #    "hint": "Use --force to delete anyway"}
 
 # 3. Force delete (referencers will have broken references)
-cli-anything-unreal --json project asset-delete /Game/M_Old --force
+cli-anything-unreal --json asset delete /Game/M_Old --force
 # → {"status": "ok", "deleted": true, "had_references": true}
 
 # 4. Delete without references — works immediately
-cli-anything-unreal --json project asset-delete /Game/M_Unused
+cli-anything-unreal --json asset delete /Game/M_Unused
 # → {"status": "ok", "deleted": true, "had_references": false}
 ```
 
@@ -96,13 +96,13 @@ All scene commands require the editor to be running.
 
 | Command | Description |
 |---------|-------------|
-| `scene actors` | List all actors in current level |
+| `scene list` | List all actors in current level |
 | `scene find NAME` | Find actors by name (substring match) |
-| `scene describe ACTOR_PATH` | List ALL properties and functions (Huge output! Use sparingly) |
-| `scene property ACTOR_PATH PROP [--set VALUE]` | Get or set a property on an actor |
-| `scene transform ACTOR_PATH` | Get actor transform (location, rotation, scale) |
-| `scene components ACTOR_PATH` | List components on an actor |
-| `scene material ACTOR_PATH` | Get material assigned to actor's mesh |
+| `scene info ACTOR_PATH` | List ALL properties and functions (Huge output! Use sparingly) |
+| `scene get-property / scene set-property ACTOR_PATH PROP [--set VALUE]` | Get or set a property on an actor |
+| `scene get-transform ACTOR_PATH` | Get actor transform (location, rotation, scale) |
+| `scene list-components ACTOR_PATH` | List components on an actor |
+| `scene get-material ACTOR_PATH` | Get material assigned to actor's mesh |
 
 ## material — Material Viewing, Editing & Analysis
 
@@ -113,12 +113,12 @@ All material commands require the editor to be running.
 |---------|-------------|
 | `material list [--path /Game/]` | List all materials |
 | `material info MATERIAL_PATH` | Detailed info: nodes, parameters, textures, **connections**, Custom node code |
-| `material connections MATERIAL_PATH` | **Connection graph**: which node feeds each material output pin, orphan detection |
-| `material stats MATERIAL_PATH` | Compilation stats (instruction counts) |
-| `material errors MATERIAL_PATH` | Check for compilation errors |
-| `material textures MATERIAL_PATH` | List referenced textures |
+| `material get-connections MATERIAL_PATH` | **Connection graph**: which node feeds each material output pin, orphan detection |
+| `material get-stats MATERIAL_PATH` | Compilation stats (instruction counts) |
+| `material get-errors MATERIAL_PATH` | Check for compilation errors |
+| `material list-textures MATERIAL_PATH` | List referenced textures |
 | `material analyze MATERIAL_PATH` | Auto-detect common issues (includes connection analysis) |
-| `material hlsl MATERIAL_PATH [--platform sm6] [--shader-type pixel]` | Get compiled HLSL shader code |
+| `material dump-hlsl MATERIAL_PATH [--platform sm6] [--shader-type pixel]` | Get compiled HLSL shader code |
 
 ### Editing
 | Command | Description |
@@ -138,7 +138,7 @@ cli-anything-unreal --json material info /Game/M_Water
 #          material_outputs{} showing which node feeds each output pin
 
 # Connection graph only (lightweight — shows orphan nodes too)
-cli-anything-unreal --json material connections /Game/M_Water
+cli-anything-unreal --json material get-connections /Game/M_Water
 # Returns: material_outputs, connected_nodes, orphan_nodes
 ```
 
@@ -171,9 +171,9 @@ All blueprint commands require the editor to be running.
 | `blueprint list [--path /Game/]` | List all blueprints |
 | `blueprint info BLUEPRINT_PATH` | Detailed info: graphs, nodes, variables |
 | `blueprint add-function PATH --name FUNC_NAME` | Add a function graph |
-| `blueprint remove-function PATH --name FUNC_NAME` | Remove a function graph |
+| `blueprint delete-function PATH --name FUNC_NAME` | Remove a function graph |
 | `blueprint add-variable PATH --name VAR --type TYPE` | Add a member variable |
-| `blueprint remove-unused-variables PATH` | Remove all unused variables |
+| `blueprint delete-unused-variables PATH` | Remove all unused variables |
 | `blueprint rename-graph PATH --old OLD --new NEW` | Rename a graph |
 | `blueprint compile PATH` | Compile blueprint |
 
@@ -183,8 +183,8 @@ All screenshot commands require the editor to be running.
 
 | Command | Description |
 |---------|-------------|
-| `screenshot static [--filename NAME]` | Capture main editor window (Windows GDI from CLI + Pillow) |
-| `screenshot dynamic [-n N] [-i SEC] [--no-compress]` | Capture N screenshots at interval SEC, output as compressed JPG atlas (raw PNG sheet saved under Saved/) |
+| `screenshot capture [--filename NAME]` | Capture main editor window (Windows GDI from CLI + Pillow) |
+| `screenshot capture-sequence [-n N] [-i SEC] [--no-compress]` | Capture N screenshots at interval SEC, output as compressed JPG atlas (raw PNG sheet saved under Saved/) |
 
 ## session — Undo/Redo
 
