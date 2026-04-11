@@ -390,7 +390,7 @@ def project_generate():
 def asset_exists_cmd(asset_path):
     """Check if an asset exists at the given content path.
 
-    Example: project asset-exists /Game/Materials/M_Water
+    Example: asset exists /Game/Materials/M_Water
     """
     from cli_anything.unreal.core.assets import asset_exists
 
@@ -413,7 +413,7 @@ def asset_delete_cmd(asset_path, force):
 
     With --force: deletes regardless of references.
 
-    Example: project asset-delete /Game/Materials/M_Old --force
+    Example: asset delete /Game/Materials/M_Old --force
     """
     from cli_anything.unreal.core.assets import asset_delete
 
@@ -431,7 +431,7 @@ def asset_refs_cmd(asset_path):
 
     Useful before deleting — shows what would break.
 
-    Example: project asset-refs /Game/Materials/M_Water
+    Example: asset refs /Game/Materials/M_Water
     """
     from cli_anything.unreal.core.assets import asset_refs
 
@@ -453,7 +453,7 @@ def asset_duplicate_cmd(source_path, dest_path, force):
     With --force: if destination exists, deletes it first then duplicates.
     Without --force: fails if destination already exists.
 
-    Example: project asset-duplicate /Game/M_Water /Game/M_Water_v2
+    Example: asset duplicate /Game/M_Water /Game/M_Water_v2
     """
     from cli_anything.unreal.core.assets import asset_duplicate
 
@@ -474,7 +474,7 @@ def asset_rename_cmd(source_path, dest_path):
 
     Fails if destination already exists.
 
-    Example: project asset-rename /Game/M_Old /Game/M_New
+    Example: asset rename /Game/M_Old /Game/M_New
     """
     from cli_anything.unreal.core.assets import asset_rename
 
@@ -813,7 +813,7 @@ def material_connections(material_path):
     WorldPositionOffset, etc.) and identifies orphan nodes not connected
     to any output.  Custom nodes include HLSL code previews.
 
-    Example: material connections /Game/M_Water
+    Example: material get-connections /Game/M_Water
     """
     from cli_anything.unreal.core.materials import get_material_connections
 
@@ -1165,7 +1165,7 @@ def blueprint_add_function(blueprint_path, func_name):
 def blueprint_delete_function(blueprint_path, func_name):
     """Remove a function graph from a blueprint.
 
-    Example: blueprint remove-function /Game/BP_Test --name MyFunc
+    Example: blueprint delete-function /Game/BP_Test --name MyFunc
     """
     from cli_anything.unreal.core.blueprint import remove_function
 
@@ -1218,7 +1218,7 @@ def blueprint_delete_variable(blueprint_path, var_name):
 def blueprint_delete_unused_variables(blueprint_path):
     """Remove all unused variables from a blueprint.
 
-    Example: blueprint remove-unused-variables /Game/BP_Test
+    Example: blueprint delete-unused-variables /Game/BP_Test
     """
     from cli_anything.unreal.core.blueprint import remove_unused_variables
 

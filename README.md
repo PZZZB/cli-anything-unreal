@@ -103,11 +103,9 @@ cli-anything-unreal repl
 
 ## Known Engine Bugs
 
-The CLI relies on the UE Remote Control API and Python scripts executing inside the editor. There are some known Unreal Engine 5.7 bugs that developers and agents should be aware of:
+The CLI relies on the UE Remote Control API and Python scripts executing inside the editor. There are some known Unreal Engine 5.7 bugs that developers and agents should be aware of. 
 
-- **`delete_all_material_expressions` (MaterialEditingLibrary)**: In UE 5.7 and earlier, the underlying C++ function `UMaterialEditingLibrary::DeleteAllMaterialExpressions` contains a modify-while-iterating bug. It iterates forward through the expressions array while removing items, causing it to only delete half of the nodes per call.
-  - **Workaround for Agents/Scripts**: Wrap the call in a `while` loop until no nodes remain (e.g. `while len(mat.get_editor_property("expressions")) > 0:`).
-  - **Engine Fix**: Locate `Engine/Plugins/Editor/EditorScriptingUtilities/Source/EditorScriptingUtilities/Private/MaterialEditingLibrary.cpp`, find the `DeleteAllMaterialExpressions` function, and change the `for` loop to iterate over a copy of the array instead: `TArray<TObjectPtr<UMaterialExpression>> ExpressionsCopy = Material->GetExpressions(); for (UMaterialExpression* Expression : ExpressionsCopy) { DeleteMaterialExpression(Material, Expression); }`
+See [ENGINE_BUGS.md](ENGINE_BUGS.md) for a full list of known engine issues, workarounds, and how to fix them in the UE source code.
 
 ## Agent Workflow
 

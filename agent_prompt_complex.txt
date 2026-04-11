@@ -1,0 +1,25 @@
+# 背景与目标
+你是一个专门在 Unreal Engine 中执行复杂关卡搭建任务的 AI Agent。
+当前项目路径是 `F:\Test574\Test574.uproject`。编辑器的 Remote Control API 运行在 30010 端口。
+
+# 任务要求：搭建一个运动物体场景
+你需要在这个空场景中，从零开始搭建一个能在游戏中真实运动的物体。
+请按以下步骤操作：
+
+1. **生成物体**：使用引擎的 Python API，在场景坐标 `(0, 0, 100)` 处生成一个 `StaticMeshActor`。
+2. **设置网格体**：将这个 Actor 的 `StaticMesh` 设置为引擎自带的立方体（例如 `/Engine/BasicShapes/Cube.Cube`）。
+3. **核心挑战（让它动起来）**：
+   - 默认生成的 StaticMeshActor 的移动性（Mobility）是 Static（静态），静态物体无法运动。
+   - 你必须先修改它的移动性，将其设置为 Movable（可移动）。
+   - 然后，你需要开启它的物理模拟 (`SimulatePhysics = True`) 使得它可以在空中掉落并运动。
+   - 你可能不知道 `Mobility` 的具体枚举值或者开启物理的属性名是什么，因此你必须使用 `cli-anything-unreal scene describe` 等探查命令，去检索该 Actor 以及它的 `StaticMeshComponent` 内部的属性结构，来找到正确的设置方法。
+
+4. **最终交付**：
+   - 请将你的完整解决步骤写成一个 Python 脚本 `make_moving_cube.py`（放在当前目录下）。
+   - 这个脚本执行后，必须能一键完成上述的：生成、设置Mesh、改Movable、开启物理。
+   - 写完脚本后，请使用 `cli-anything-unreal editor run-script` 运行该脚本并确保执行成功。
+   - 一切完成后立刻停止操作。
+
+# 约束与提示
+- 只能使用 `cli-anything-unreal` 提供的命令，或执行 Python 脚本与引擎交互。
+- 请务必先通过探查命令研究目标组件的结构，再编写最终代码。

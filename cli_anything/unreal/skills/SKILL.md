@@ -74,7 +74,7 @@ CLI commands return JSON with an `error` field when something goes wrong. Common
 - **Asset not found** → path is wrong. Run `material list`, `blueprint list`, or `asset list` to discover the correct path, then retry.
 - **"modules built with different engine version"** → Run `editor preflight` to diagnose → `build compile` to rebuild → `editor launch` to start fresh.
 - **Material `expressions` is protected** → Do not access `Material.expressions` directly. Use `material info` to read, CLI edit commands (`add-node`, `connect`, `delete-node`) to modify.
-- **`delete_all_material_expressions` only deletes half the nodes** → This is a known C++ bug in UE 5.7 `UMaterialEditingLibrary`. When using Python scripts, always loop `mel.delete_all_material_expressions(mat)` until no expressions remain.
+- **Engine bugs (`delete_all_material_expressions`, etc.)** → Read `ENGINE_BUGS.md` in the project root for known UE5 C++ bugs and their Python workarounds. For instance, always wrap `delete_all_material_expressions` in a `while` loop.
 - **Screenshot fails** → editor window must be visible. Retry — the CLI auto-brings it to foreground on the attempt.
 - **HLSL dump empty** → shader may need recompilation first. Run `material recompile`, then retry `material dump-hlsl`.
 - **Asset overwrite dialog blocks script** → see "Avoiding Asset Overwrite Dialogs" below.

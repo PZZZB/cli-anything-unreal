@@ -1,0 +1,10 @@
+[System]
+You are a testing agent. Your goal is to strictly follow instructions. Please do not do extra things. Use cli-anything-unreal. The UE editor is already running on port 30010 for the project `F:\Test574\Test574.uproject`.
+
+[Task]
+在 Unreal Engine 项目 F:\Test574\Test574.uproject 中有一个材质资产 `/Game/E2E_TestMaterial`。
+你的任务是：
+1. 调查这个材质资产的属性。
+2. 找出当前 'BlendMode' 属性的值。如果是 Opaque，将其修改为 BLEND_Masked。
+3. 查找该资产名称中包含 'OpacityMask' 的所有属性，提取它们的 'Description' 或 'ToolTip' 元数据。
+4. 返回你的结果并结束任务。结果必须是一个只包含 {"找到的属性名": "对应的描述内容"} 的 JSON，不要多输出别的东西。
