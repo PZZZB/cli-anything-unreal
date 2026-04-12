@@ -522,9 +522,25 @@ if mat is None:
 else:
     mel = unreal.MaterialEditingLibrary
     try:
+        # Recompile is synchronous on the main thread for the material graph.
         mel.recompile_material(mat)
         mat.modify()
-        result = {{"status": "ok", "action": "recompile", "material": material_path}}
+        
+        errors = []
+        if hasattr(unreal, "CliAnythingBridgeLibrary"):
+            bridge = unreal.CliAnythingBridgeLibrary
+            errors = list(bridge.get_material_compile_errors(mat))
+            
+        if len(errors) > 0:
+            result = {{
+                "status": "error", 
+                "action": "recompile", 
+                "material": material_path,
+                "error": "Material compilation failed.",
+                "compile_errors": errors
+            }}
+        else:
+            result = {{"status": "ok", "action": "recompile", "material": material_path}}
     except Exception as e:
         result = {{"error": "recompile_material failed: " + str(e)}}
 '''

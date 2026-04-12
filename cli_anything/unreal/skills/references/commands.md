@@ -194,3 +194,125 @@ All screenshot commands require the editor to be running.
 | `session undo` | Undo last change |
 | `session redo` | Redo last undone change |
 | `session history` | Show undo history |
+
+## Advanced Workflows & Examples
+
+### Editor Lifecycle
+```bash
+# 1. Preflight check — catches build mismatches before they cause hangs
+cli-anything-unreal --json --project F:\RXGame\RXGame.uproject editor preflight
+
+# 2. If BuildId mismatch, compile first
+cli-anything-unreal --json --project F:\RXGame\RXGame.uproject build compile
+
+# 3. Launch editor
+cli-anything-unreal --json --project F:\RXGame\RXGame.uproject editor launch --map /Game/Maps/MyMap
+
+# 4. Verify it's reachable
+cli-anything-unreal --json editor status
+```
+
+### Python Scripting (for operations not covered by CLI commands)
+
+Use `editor run-script` for complex operations. Set a `result` dict variable to return structured data.
+
+#### run-script is synchronous — no tick callbacks
+
+`editor run-script` is a **synchronous blocking call**: the CLI waits for the Python main thread to finish, then returns the result and disconnects.
+
+1. **Never use tick-based async callbacks.** By the time they trigger, the CLI connection is already gone and the return value is lost.
+2. **Multi-frame operations must be split into separate scripts.** Call `editor run-script` once per frame-bound step.
+3. **All work must complete in the main thread before the script returns.**
+
+```bash
+# Write the script using the Write tool
+# Then execute it:
+cli-anything-unreal --json editor run-script setup_scene.py --timeout 60
+
+# Read-only script — skip auto-save
+cli-anything-unreal --json editor run-script query.py --no-save
+```
+
+Inline Python also works for quick one-liners:
+```bash
+cli-anything-unreal --json editor exec "py result = {'actors': 42}"
+```
+
+### Asset Manipulation
+```bash
+# Modify UAsset properties directly
+cli-anything-unreal --json asset info /Game/MyAsset
+cli-anything-unreal --json asset set-property /Game/MyAsset MyVar 100
+
+# Rename and duplicate
+cli-anything-unreal --json asset rename /Game/Old /Game/New
+cli-anything-unreal --json asset duplicate /Game/Old /Game/New
+
+# Check references before deleting
+cli-anything-unreal --json asset refs /Game/MyAsset
+cli-anything-unreal --json asset delete /Game/MyAsset
+```
+
+### Blueprint Editing
+```bash
+# 1. Find the blueprint
+cli-anything-unreal --json blueprint list --path /Game/Blueprints/
+
+# 2. Inspect current state (graphs, nodes, variables)
+cli-anything-unreal --json blueprint info /Game/BP_Enemy
+
+# 3. Add a variable
+cli-anything-unreal --json blueprint add-variable /Game/BP_Enemy --name Health --type Float
+
+# 4. Add a function
+cli-anything-unreal --json blueprint add-function /Game/BP_Enemy --name TakeDamage
+
+# 5. Clean up unused variables
+cli-anything-unreal --json blueprint delete-unused-variables /Game/BP_Enemy
+
+# 6. Compile and verify
+cli-anything-unreal --json blueprint compile /Game/BP_Enemy
+```
+
+### Scene Manipulation
+```bash
+# Find actors by name
+cli-anything-unreal --json scene find "DirectionalLight"
+
+# Inspect ALL properties and functions (WARNING: Huge output!)
+cli-anything-unreal --json scene info <actor_path>
+
+# Get/Set property
+cli-anything-unreal --json scene get-property <actor_path> Intensity
+cli-anything-unreal --json scene set-property <actor_path> Intensity 5.0
+
+# Check transform
+cli-anything-unreal --json scene get-transform <actor_path>
+
+# List components
+cli-anything-unreal --json scene list-components <actor_path>
+
+# Find which material an actor uses
+cli-anything-unreal --json scene get-material <actor_path>
+```
+
+### Actor → Material → Shader Investigation
+```bash
+cli-anything-unreal --json scene find "PostProcessVolume"
+cli-anything-unreal --json scene get-material "<actor_path>"
+cli-anything-unreal --json material info /Game/SomeMaterial
+cli-anything-unreal --json material dump-hlsl /Game/SomeMaterial
+```
+
+### Multi-Instance
+
+Multiple editors can run simultaneously — useful when working on different maps or comparing changes across project copies. Each instance listens on a different port. Use `editor list` to discover all running instances, then `--port` to target one.
+
+```bash
+# Discover all running editors (port, project, pid)
+cli-anything-unreal --json editor list
+
+# Target a specific instance by port
+cli-anything-unreal --json --port 30010 editor status
+cli-anything-unreal --json --port 30011 material list
+```

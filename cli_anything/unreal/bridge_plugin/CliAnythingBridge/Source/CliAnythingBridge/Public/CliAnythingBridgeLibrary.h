@@ -25,4 +25,10 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FIntVector4 GetActiveViewportScreenBounds();
+
+	/**
+	 * Gets recent engine error and warning logs.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static TArray<FString> GetRecentEngineErrors(int32 Count = 10);
 };

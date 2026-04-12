@@ -9,6 +9,7 @@
 #include "SLevelViewport.h"
 #include "Modules/ModuleManager.h"
 #include "Framework/Application/SlateApplication.h"
+#include "HAL/CriticalSection.h"
 
 TArray<FString> UCliAnythingBridgeLibrary::GetMaterialCompileErrors(UMaterialInterface* Material)
 {
@@ -85,4 +86,24 @@ FIntVector4 UCliAnythingBridgeLibrary::GetActiveViewportScreenBounds()
 	Bounds.W = FMath::RoundToInt(AbsoluteSize.Y);
 
 	return Bounds;
+}
+
+extern TArray<FString> GCapturedEngineErrors;
+extern FCriticalSection GCapturedEngineErrorsMutex;
+
+TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
+{
+	TArray<FString> Result;
+	{
+		FScopeLock Lock(&GCapturedEngineErrorsMutex);
+		
+		int32 NumLogs = GCapturedEngineErrors.Num();
+		int32 StartIdx = FMath::Max(0, NumLogs - Count);
+		
+		for (int32 i = StartIdx; i < NumLogs; ++i)
+		{
+			Result.Add(GCapturedEngineErrors[i]);
+		}
+	}
+	return Result;
 }
