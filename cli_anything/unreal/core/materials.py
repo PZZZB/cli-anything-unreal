@@ -211,6 +211,10 @@ else:
 '''
 
 
+# ── Shared helper snippet for property type coercion ─────────────────
+# Injected into _SCRIPT_ADD_NODE and _SCRIPT_SET_NODE_PROPERTY.
+# Supports: int, float, str, enum, and struct types (LinearColor, Vector, etc.)
+
 # ── Script templates for material editing ─────────────────────────────
 
 _SCRIPT_ADD_NODE = '''
@@ -230,6 +234,62 @@ else:
         if expr is None:
             result = {{"error": "Failed to create expression. Class 'unreal.{expression_class}' may not exist."}}
         else:
+            # Set properties from --set key=value (simple types only: int, float, str, enum)
+            # For struct types (LinearColor, Vector, etc.), use editor run-script instead.
+            set_props = {set_props}
+            set_warnings = []
+            for key, value in set_props:
+                try:
+                    typed_value = value
+                    if isinstance(value, str):
+                        try:
+                            typed_value = int(value)
+                        except ValueError:
+                            try:
+                                typed_value = float(value)
+                            except ValueError:
+                                typed_value = value
+                    try:
+                        expr.set_editor_property(key, typed_value)
+                    except (TypeError, ValueError):
+                        if isinstance(typed_value, str) and '_' in typed_value and typed_value[0].isupper():
+                            resolved = False
+                            candidates = [typed_value]
+                            upper = typed_value.upper()
+                            if upper != typed_value:
+                                candidates.append(upper)
+                            for attr_name in dir(unreal):
+                                if resolved:
+                                    break
+                                try:
+                                    enum_cls = getattr(unreal, attr_name)
+                                    for cand in candidates:
+                                        if hasattr(enum_cls, cand):
+                                            expr.set_editor_property(key, getattr(enum_cls, cand))
+                                            resolved = True
+                                            break
+                                except Exception:
+                                    continue
+                            if not resolved:
+                                raise
+                        else:
+                            raise
+                except Exception as e:
+                    set_warnings.append(f"{{key}}={{value}}: {{e}}")
+
+            # Add inputs for Custom nodes from --add-input Name
+            add_input_names = {add_input_names}
+            if add_input_names:
+                inputs = []
+                for input_name in add_input_names:
+                    ci = unreal.CustomInput()
+                    ci.set_editor_property("input_name", input_name)
+                    inputs.append(ci)
+                try:
+                    expr.set_editor_property("inputs", inputs)
+                except Exception as e:
+                    set_warnings.append(f"inputs: {{e}}")
+
             result = {{
                 "status": "ok",
                 "action": "add_node",
@@ -239,6 +299,8 @@ else:
                     "type": expr.get_class().get_name(),
                 }},
             }}
+            if set_warnings:
+                result["property_warnings"] = set_warnings
             mel.recompile_material(mat)
             mat.modify()
     except Exception as e:
@@ -632,37 +694,10 @@ def get_material_info(
             }
             break
 
-    # Step 2: Try to get detailed info via Remote Control object API
-    #         (No Python script needed — works even when py is blocked)
-    full_asset_path = basic_info.get("path", material_path)
-    # Normalize: ensure it has the .ObjectName suffix
-    if "." not in full_asset_path.split("/")[-1]:
-        # Add object name: /Game/Foo → /Game/Foo.Foo
-        name_part = full_asset_path.rsplit("/", 1)[-1]
-        full_asset_path = f"{full_asset_path}.{name_part}"
-
-    # Try describe_object for properties list
-    desc = api.describe_object(full_asset_path)
-    if "error" not in desc and "errorMessage" not in desc:
-        basic_info["properties"] = [
-            {"name": p.get("Name", ""), "type": p.get("Type", "")}
-            for p in desc.get("Properties", [])
-        ]
-        basic_info["functions"] = [
-            f.get("Name", "") for f in desc.get("Functions", [])
-        ]
-        basic_info["property_count"] = len(desc.get("Properties", []))
-
-    # Try reading specific material properties via Remote Control
-    for prop_name in ["BlendMode", "MaterialDomain", "ShadingModel",
-                      "ShadingModels", "TwoSided", "bUsedWithStaticLighting"]:
-        prop_result = api.get_property(full_asset_path, prop_name)
-        if "error" not in prop_result and "errorMessage" not in str(prop_result):
-            basic_info[prop_name] = prop_result.get(prop_name, prop_result)
-
-    # Step 3: Try Python script for deep node/expression info
-    #         Requires editor Remote Python plugin (EditorScriptingUtilities).
-    #         Falls back gracefully if unavailable.
+    # Step 2: Python script for deep node/expression info and material properties.
+    #         This also reads blend_mode, shading_model, etc. — no need for a
+    #         separate Remote Control get_property pass (which would trigger
+    #         "AllowPrivateAccess" log spam on private props).
     script_result = _exec_material_script(
         api,
         _SCRIPT_MATERIAL_DETAIL,
@@ -739,6 +774,63 @@ else:
     }}
 '''
 
+_PLUGIN_GET_HLSL_CODE_SCRIPT = r'''import unreal
+import os
+
+mat = unreal.EditorAssetLibrary.load_asset("{material_path}")
+if mat is None:
+    result = {{"error": "Material not found: {material_path}"}}
+else:
+    bridge = unreal.CliAnythingBridgeLibrary
+    # Construct output path under project Saved/CliAnything/
+    _saved = unreal.Paths.project_saved_dir()
+    output_path = os.path.join(_saved, "CliAnything", "{mat_name}.ush")
+    output_path = output_path.replace("\\\\", "/")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    ret = bridge.get_material_hlsl_code(mat, output_path)
+    if ret:
+        with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = len(f.readlines())
+        result = {{
+            "material": "{material_path}",
+            "file": output_path,
+            "lines": lines,
+            "source": "plugin",
+        }}
+    else:
+        result = {{"error": "GetMaterialHLSLCode returned empty. Material may not be compiled yet."}}
+'''
+
+_PLUGIN_GET_SHADER_SOURCE_SCRIPT = r'''import unreal
+import os
+
+mat = unreal.EditorAssetLibrary.load_asset("{material_path}")
+if mat is None:
+    result = {{"error": "Material not found: {material_path}"}}
+else:
+    bridge = unreal.CliAnythingBridgeLibrary
+    # Construct output dir under project Saved/CliAnything/
+    _saved = unreal.Paths.project_saved_dir()
+    output_dir = os.path.join(_saved, "CliAnything", "{mat_name}_shaders")
+    output_dir = output_dir.replace("\\\\", "/")
+    os.makedirs(output_dir, exist_ok=True)
+    entries = bridge.get_material_shader_source(mat, output_dir)
+    shaders = []
+    for entry in entries:
+        parts = entry.split("\t")
+        if len(parts) >= 3:
+            shaders.append({{"name": parts[0], "file": parts[1], "lines": int(parts[2])}})
+        elif len(parts) >= 2:
+            shaders.append({{"name": parts[0], "file": parts[1]}})
+    result = {{
+        "material": "{material_path}",
+        "shader_count": len(shaders),
+        "shaders": shaders,
+        "output_dir": output_dir,
+        "source": "plugin",
+    }}
+'''
+
 
 def get_material_errors(
     api: UEEditorAPI,
@@ -782,7 +874,110 @@ def get_material_errors(
             "error": (
                 "Bridge plugin not loaded. "
                 f"Plugin source has been deployed to {plugin_dir}. "
-                "Please recompile the project and start the editor to activate it."
+                "Run 'editor plugin-upgrade' to compile and activate, "
+                "or manually recompile the project and restart the editor."
+            )
+        }
+
+    return result
+
+
+def get_material_hlsl_code(
+    api: UEEditorAPI,
+    material_path: str,
+    output_path: str | None = None,
+    project_dir: str | None = None,
+) -> dict:
+    """Get the material's HLSL expression source code via the Bridge plugin.
+
+    This calls FMaterialResource::GetMaterialExpressionSource() which returns
+    /Engine/Generated/Material.ush — the material's translated HLSL including
+    FMaterialPixelParameters struct and all custom node code.
+
+    Output is written to <project>/Saved/CliAnything/<MaterialName>.ush by default.
+
+    Args:
+        api: Connected UEEditorAPI instance.
+        material_path: Content path (e.g. /Game/M_Test).
+        output_path: Optional custom output path. Defaults to project Saved dir.
+        project_dir: Project directory for auto-deploying the plugin.
+
+    Returns:
+        {"material": str, "file": str, "lines": int, "source": "plugin"}
+    """
+    if project_dir:
+        deploy_result = ensure_plugin_deployed(project_dir)
+        if not deploy_result["deployed"]:
+            return {"error": deploy_result.get("error", "Plugin deployment failed")}
+
+    mat_name = material_path.rsplit("/", 1)[-1].split(".")[0]
+
+    result = _exec_material_script(
+        api,
+        _PLUGIN_GET_HLSL_CODE_SCRIPT,
+        timeout=60.0,
+        material_path=material_path,
+        mat_name=mat_name,
+    )
+
+    if "error" in result and "CliAnythingBridgeLibrary" in result.get("error", ""):
+        plugin_dir = f"{project_dir}/Plugins/CliAnythingBridge" if project_dir else "<project>/Plugins/CliAnythingBridge"
+        return {
+            "error": (
+                "Bridge plugin not loaded. "
+                f"Plugin source has been deployed to {plugin_dir}. "
+                "Run 'editor plugin-upgrade' to compile and activate, "
+                "or manually recompile the project and restart the editor."
+            )
+        }
+
+    return result
+
+
+def get_material_shader_source(
+    api: UEEditorAPI,
+    material_path: str,
+    output_dir: str | None = None,
+    project_dir: str | None = None,
+) -> dict:
+    """Get the compiled shader source (.usf files) for a material via the Bridge plugin.
+
+    This forces a synchronous recompile with bExtractShaderSource=true,
+    then writes each compiled shader (BasePassPS, BasePassVS, LumenCardPS, etc.)
+    to a .usf file. Output goes to <project>/Saved/CliAnything/<MaterialName>_shaders/ by default.
+
+    Args:
+        api: Connected UEEditorAPI instance.
+        material_path: Content path (e.g. /Game/M_Test).
+        output_dir: Optional custom output directory. Defaults to project Saved dir.
+        project_dir: Project directory for auto-deploying the plugin.
+
+    Returns:
+        {"material": str, "shader_count": int, "shaders": [...], "output_dir": str}
+    """
+    if project_dir:
+        deploy_result = ensure_plugin_deployed(project_dir)
+        if not deploy_result["deployed"]:
+            return {"error": deploy_result.get("error", "Plugin deployment failed")}
+
+    mat_name = material_path.rsplit("/", 1)[-1].split(".")[0]
+
+    result = _exec_material_script(
+        api,
+        _PLUGIN_GET_SHADER_SOURCE_SCRIPT,
+        timeout=120.0,
+        material_path=material_path,
+        mat_name=mat_name,
+    )
+
+    if "error" in result and "CliAnythingBridgeLibrary" in result.get("error", ""):
+        plugin_dir = f"{project_dir}/Plugins/CliAnythingBridge" if project_dir else "<project>/Plugins/CliAnythingBridge"
+        return {
+            "error": (
+                "Bridge plugin not loaded. "
+                f"Plugin source has been deployed to {plugin_dir}. "
+                "Run 'editor plugin-upgrade' to compile and activate, "
+                "or manually recompile the project and restart the editor."
             )
         }
 
@@ -1030,6 +1225,8 @@ def add_material_node(
     expression_class: str,
     pos_x: int = 0,
     pos_y: int = 0,
+    set_props: list[tuple[str, str]] | None = None,
+    add_input_names: list[str] | None = None,
     project_dir: str | None = None,
 ) -> dict:
     """Add a new material expression node.
@@ -1041,6 +1238,8 @@ def add_material_node(
             (e.g., "MaterialExpressionConstant3Vector").
         pos_x: Node X position in the material graph.
         pos_y: Node Y position in the material graph.
+        set_props: List of (key, value) pairs to set on the node via set_editor_property.
+        add_input_names: List of input names to add (for MaterialExpressionCustom).
         project_dir: Project directory for temp files.
 
     Returns:
@@ -1054,6 +1253,8 @@ def add_material_node(
         expression_class=expression_class,
         pos_x=str(pos_x),
         pos_y=str(pos_y),
+        set_props=repr(set_props or []),
+        add_input_names=repr(add_input_names or []),
     )
 
 

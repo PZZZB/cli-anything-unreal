@@ -3,6 +3,7 @@
 import click
 
 from cli_anything.unreal.commands import AppState, handle_error, output, require_editor
+from cli_anything.unreal.commands._parse_value import parse_property_value
 
 
 @click.group("scene")
@@ -13,97 +14,62 @@ def scene_group():
 
 @scene_group.command("list")
 @click.option("--class", "actor_class", default=None, help="Filter by class (e.g., StaticMeshActor)")
+@click.option("--query", "-q", default=None, help="Filter by name (substring match)")
 @handle_error
 @click.pass_obj
-def scene_list_actors(state: AppState, actor_class):
-    """List all actors in the current level."""
-    from cli_anything.unreal.core.scene import list_actors, list_actors_of_class
+def scene_list_actors(state: AppState, actor_class, query):
+    """List actors in the current level (like the World Outliner).
+
+    \b
+    Examples:
+        scene list                              # all actors
+        scene list --class StaticMeshActor      # filter by class
+        scene list -q Light                     # search by name
+        scene list --class PointLight -q Fill   # combine filters
+    """
+    from cli_anything.unreal.core.scene import list_actors
 
     api = require_editor(state)
-    if actor_class:
-        result = list_actors_of_class(api, actor_class)
-    else:
-        result = list_actors(api)
+    result = list_actors(api, actor_class=actor_class, name_filter=query)
 
     if not state.json_output:
         actors = result.get("actors", [])
         state.skin.info(f"Found {len(actors)} actors")
         if actors:
-            headers = ["Name", "Path"]
-            rows = [[a["name"], a.get("path", "")[:60]] for a in actors]
+            headers = ["Name", "Class", "Path"]
+            rows = [[a["name"], a["class"], a.get("path", "")[:60]] for a in actors]
             state.skin.table(headers, rows)
     else:
         output(result, state)
 
 
-@scene_group.command("find")
-@click.argument("name")
-@handle_error
-@click.pass_obj
-def scene_find(state: AppState, name):
-    """Find actors by name (substring match)."""
-    from cli_anything.unreal.core.scene import find_actor_by_name
-
-    api = require_editor(state)
-    result = find_actor_by_name(api, name)
-    output(result, state)
-
-
-@scene_group.command("info")
+@scene_group.command("property")
 @click.argument("actor_path")
-@click.option("--filter", "prop_filter", default=None,
-              help="Case-insensitive substring filter for property names.")
-@click.option("--property", "prop_name", default=None,
-              help="Get full metadata for a specific property/function (legacy C++ mode).")
+@click.argument("expression")
 @handle_error
 @click.pass_obj
-def scene_info_cmd(state: AppState, actor_path, prop_filter, prop_name):
-    """Describe an actor — list properties and methods with Python-safe names.
+def scene_property(state: AppState, actor_path, expression):
+    """Get or set a property on an actor.
 
-    Returns snake_case property names and current values that can be used
-    directly in Python scripts. Use --filter to search for specific properties.
-    Use --property for legacy C++ reflection metadata (PascalCase names).
+    Read:  scene property <path> PropertyName
+    Write: scene property <path> PropertyName=NewValue
+
+    \b
+    Examples:
+        scene property <actor_path> Intensity           # read
+        scene property <actor_path> Intensity=5.0       # write
+        scene property <actor_path> bHidden=true        # write bool
     """
-    if prop_name:
-        # Legacy mode: use C++ describe API for full metadata on a single property
-        from cli_anything.unreal.core.scene import describe_actor
-        api = require_editor(state)
-        result = describe_actor(api, actor_path, prop_name)
+    from cli_anything.unreal.core.scene import get_actor_property, set_actor_property
+
+    api = require_editor(state)
+
+    if "=" in expression:
+        prop_name, raw_value = expression.split("=", 1)
+        result = set_actor_property(api, actor_path, prop_name, parse_property_value(raw_value))
     else:
-        # New mode: Python runtime inspection with snake_case names
-        from cli_anything.unreal.core.script_runner import inspect_instance
-        api = require_editor(state)
-        result = inspect_instance(api, actor_path, mode="actor",
-                                  prop_filter=prop_filter)
-    output(result, state)
+        result = get_actor_property(api, actor_path, expression)
 
-
-@scene_group.command("get-property")
-@click.argument("actor_path")
-@click.argument("property_name")
-@handle_error
-@click.pass_obj
-def scene_get_property(state: AppState, actor_path, property_name):
-    """Get a property on an actor."""
-    from cli_anything.unreal.core.scene import get_actor_property
-
-    api = require_editor(state)
-    result = get_actor_property(api, actor_path, property_name)
-    output(result, state)
-
-
-@scene_group.command("set-property")
-@click.argument("actor_path")
-@click.argument("property_name")
-@click.argument("new_value")
-@handle_error
-@click.pass_obj
-def scene_set_property(state: AppState, actor_path, property_name, new_value):
-    """Set a property on an actor."""
-    from cli_anything.unreal.core.scene import set_actor_property
-
-    api = require_editor(state)
-    result = set_actor_property(api, actor_path, property_name, new_value)
     output(result, state)
 
 

@@ -8,117 +8,65 @@ description: |
   TRIGGER on any mention of Unreal Engine, UE5, UE editor, materials, blueprints,
   levels, actors, meshes, shaders, HLSL, or game development workflows involving
   an Unreal project — even if the user doesn't explicitly mention "CLI" or "cli-anything".
+  Also trigger on Chinese equivalents: 虚幻引擎, 材质, 蓝图, 关卡, 场景, 编译, 打包,
+  截图, actor, .uproject files, cook, compile, or any UE5 asset path like /Game/...
 ---
 
 # Unreal Engine CLI Skill
 
-You are an AI Agent with access to `cli-anything-unreal`, a CLI tool that controls Unreal Engine 5 editor. Your users are UE5 game developers.
+You are an AI agent with access to `cli-anything-unreal`, a CLI tool that controls Unreal Engine 5 editor. Your users are UE5 game developers.
 
-## Step 0: Verify Installation
-Before running any commands, verify that the CLI is installed and available in your environment:
-Run `cli-anything-unreal --version` to ensure the tool is available in your PATH. Do not assume it is installed without checking.
+Before running any commands, verify the CLI is installed: `cli-anything-unreal --version`.
 
-## Core Principles & Hard Constraints
+## Core Principles
 
-1. **Use `editor launch` to open the editor, not UnrealEditor.exe directly.** The `editor launch` command runs a preflight build compatibility check before opening — without this, a version mismatch between engine and project binaries causes the editor to hang silently with no error message.
-2. **Always pass `--json`.** When parsing `--json` outputs, always look for the structured JSON block, as it may occasionally be preceded by Unreal Engine warning logs in stdout.
-3. **Specify `--project` on the first command** (or set the env var). Subsequent commands in the same shell session inherit it.
-4. **Prefer CLI commands over writing Python scripts.** Most operations (material editing, blueprint editing, scene queries) already have dedicated commands. Check `references/commands.md` first.
-5. **UE5 Python API restriction:** `Material.expressions` is protected in UE5.7+ — use `material info` to read nodes, and CLI commands (`add-node`, `connect`, `delete-node`) to edit them.
-6. **HARD CONSTRAINT for `.uasset` Creation:** When creating UE `.uasset` files, you MUST use `cli-anything-unreal editor run-script` combined with the UE Python API. **NEVER** use generic Write tools to directly write text to a file and rename it to `.uasset`. `.uasset` is a proprietary binary format; writing plain text to it will instantly corrupt it.
-7. **HARD CONSTRAINT for Script Execution:** **NEVER** run scripts containing `import unreal` using the local OS `python` command (e.g., `python script.py`). This will fail with `ModuleNotFoundError`. They MUST be executed via `cli-anything-unreal editor run-script script.py`.
-8. **HARD CONSTRAINT for Asset Paths:** Always use UE virtual paths (e.g., `/Game/MyAsset`) when interacting with engine assets. **NEVER** use OS file system paths with `.uasset` extensions (e.g., `C:/Project/Content/MyAsset.uasset`) unless specifically dealing with build/cook artifacts.
-9. **HARD CONSTRAINT for Temp Files:** After executing a temporary Python script or writing output to a temp file, you MUST proactively delete the file to keep the user's workspace clean.
-10. **Context Window Protection:** For commands that yield massive outputs (like `scene info` or `blueprint info`), **DO NOT** run them directly into your context window if you only need a single field. Either redirect the output to a temporary JSON file (`> temp.json`) and parse specific lines with the Read tool, or pipe the output through `jq` or `grep`.
+**Query First, Then Set.** Before modifying any UE object property, always query its reflection info with `editor api-discover` to discover the correct property names and types. Never guess property names or types — UE's Python API requires exact types (e.g., `unreal.LinearColor`, not a tuple string). This applies to all operations: material nodes, actor properties, blueprint variables, etc.
 
-## Test Phase Requirements (Test Agent)
+**Two-step discovery.** `editor api-discover` mirrors how people use the Details panel — glance first, then hover for details:
+1. **Overview** (default): `editor api-discover ClassName` — returns property/function **names** only. Quick scan of what's available.
+2. **Detail** (on demand): `editor api-discover ClassName -d Prop1,Func2` — returns full info (tooltips, categories, parameter types, return types, read/write) for the **specific** items you care about. Comma-separated names let you get multiple details in one call.
 
-If you are a Test agent verifying Unreal assets (e.g. after a Dev agent has created or modified them), you MUST explicitly verify that the asset is valid and can be successfully loaded by the engine API. Simply checking if the `.uasset` file exists on disk is **NOT** enough.
+**CLI is the interface to UE5.** All engine operations go through CLI commands — direct file manipulation bypasses engine locks and reference tracking, causing corruption. Read `references/safety.md` before any destructive operation.
 
-**First step of ANY asset test:**
-Run `editor run-script` with a script that calls `unreal.EditorAssetLibrary.load_asset()`.
-Example:
-```python
-import unreal
-path = "/Game/MyNewAsset"
-asset = unreal.EditorAssetLibrary.load_asset(path)
-if not asset:
-    unreal.log_error(f"Asset at {path} exists on disk but FAILED to load in engine. It may be corrupted.")
-else:
-    unreal.log(f"Successfully loaded asset: {asset.get_name()}")
-```
-If `load_asset` returns `None`, the test MUST fail, and you must report the corruption back to the Dev agent.
+**Prefer `cli-anything-unreal ... editor launch --wait` for normal startup.** `editor launch` and `editor status` both return `startup_precheck` in JSON for startup blockers (BuildId/module mismatch). If a workflow must launch the editor externally (e.g., RenderDoc/frame-capture injection), that is allowed; when startup appears stuck, use `cli-anything-unreal ... editor status` (with the intended `--port`) plus `editor list` to diagnose runtime API/dialog blocking.
+
+**Always pass `--json`.** Parse the structured JSON block in output. UE warning logs may appear before the JSON — extract the JSON block, not the raw stdout.
+
+**Specify `--project` on the first command.** Subsequent commands in the same shell session inherit it automatically.
+
+**Prefer CLI commands over Python scripts.** Most operations already have dedicated commands. Check `references/commands.md` first. Only fall back to `editor run-script` when no CLI command covers the operation.
+
+**UE asset boundary — two hard rules:**
+1. `.uasset` is a proprietary binary format. Writing text to a `.uasset` file with generic file-write tools will corrupt it instantly. Create assets via `editor run-script` + UE Python API.
+2. Scripts with `import unreal` require the engine runtime. Run them via `editor run-script`, not OS `python` (which lacks the `unreal` module).
+
+**Use UE virtual paths** (`/Game/MyAsset`) when interacting with engine assets, not OS filesystem paths with `.uasset` extensions.
+
+**Clean up temp files.** After executing a temporary Python script or writing output to a temp file, delete it to keep the workspace clean.
+
+**Protect your context window.** Commands like `blueprint info` or `editor api-discover` can return large outputs. If you only need a single field, either redirect to a temp JSON file and parse it, or use targeted commands like `scene property`.
 
 ## Decision Flow
 
-When the user asks you to do something in Unreal, follow this sequence:
+When the user asks you to do something in Unreal:
 
-1. **Verify Installation:** Run `cli-anything-unreal --version`.
-2. **Is the editor running?** Run `editor status`. If not reachable, use `editor launch`.
-3. **Do you know the asset path?** If not, discover it with `material list`, `blueprint list`, `scene list`, or `asset list`.
-4. **Does a CLI command exist for this?** Check the command reference located in the same directory as this SKILL.md file (`references/commands.md`). Use CLI commands first.
-5. **No CLI command covers it?** Write a Python script and run it with `editor run-script`. (Remember to delete it afterwards!)
+1. **Is the editor running?** Run `editor status`. If not reachable, read `references/workflows-editor.md` and follow the Editor Lifecycle flow.
+2. **Do you know the asset path?** If not, discover it with `material list`, `blueprint list`, `scene list`, or `asset list`. These return class names too.
+3. **Do you know what properties/functions this object has?** Use `editor api-discover <path-or-class>` for an overview (names only), then `-d Name1,Name2` for details (types, tooltips, params). You can pass a class name, an asset path (`/Game/...`), or an actor path — it auto-detects the type.
+4. **Does a CLI command exist for this?** Read `references/commands.md` to find the right command.
+5. **No CLI command covers it?** Write and run a Python script with `editor run-script`, using the reflection data from step 3 to get correct property names and types. Delete the script afterwards.
 6. **Need visual verification?** Use `screenshot capture` and review the image.
 
-## Handling Errors
+If a command fails, check the JSON `error` field. Common causes: connection refused (editor not running), timeout (editor busy — retry after 10-15s), asset not found (wrong path — use list commands to discover).
 
-CLI commands return JSON with an `error` field when something goes wrong. Common patterns:
-- **Connection refused** → editor not running. Run `editor launch`.
-- **Timeout** → editor is busy. Run `editor status` to check; if reachable, wait 10-15 seconds and retry.
-- **Asset not found** → path is wrong. Run `material list` or `asset list` to discover it.
-- **"modules built with different engine version"** → Run `editor preflight` → `build compile` → `editor launch`.
-- **Material `expressions` is protected** → Do not access `Material.expressions` directly in Python. Use CLI commands.
-- **Engine bugs** → Read `ENGINE_BUGS.md` in the project root.
-- **Screenshot fails** → editor window must be visible. Retry.
-- **Asset overwrite dialog blocks script** → see "Avoiding Asset Overwrite Dialogs" below.
-- **Silent Failures (C++ Errors without Python Exceptions)** → Check recent engine errors: `cli-anything-unreal --json editor exec "py import unreal; result = list(unreal.CliAnythingBridgeLibrary.get_recent_engine_errors(10))"`
-- **JSON Parsing Errors** → The output may contain UE warnings before the JSON. Extract the JSON block.
+## Reference Files — Load on Demand
 
-## No Modal Dialogs in CLI Environment
+| When you need to... | Read this file |
+|------|------|
+| Find the right CLI command or its arguments | `references/commands.md` |
+| Launch, close, or troubleshoot the editor; write Python scripts | `references/workflows-editor.md` |
+| Edit materials, write HLSL, inspect shaders | `references/workflows-materials.md` |
+| Manipulate assets, query scenes, edit blueprints | `references/workflows-assets-scenes.md` |
+| Delete/overwrite assets, or before any destructive operation | `references/safety.md` |
 
-> **Any modal dialog blocks CLI execution indefinitely.** This is not limited to asset overwrite dialogs — it applies to *all* UI-blocking operations in the UE editor.
-
-**Common triggers:**
-- `new_level(path)`: Delete + GC first if level exists.
-- `save_asset()` with dirty referencers: Use `--no-save` and handle saves explicitly.
-- `import_asset()` with naming conflict: Delete existing + GC first.
-- Any `unreal.EditorDialog` call: Never use in scripts.
-
-## Avoiding Asset Overwrite Dialogs
-
-`create_asset` / `duplicate_asset` will pop a modal "Overwrite Existing Object" dialog if the target path already has an asset loaded in memory, blocking CLI execution indefinitely.
-
-**Fix**: check `delete_asset` return value, then call `collect_garbage()` before creating.
-
-```python
-import unreal
-EAL = unreal.EditorAssetLibrary
-target = "/Game/MyAsset"
-can_create = True
-if EAL.does_asset_exist(target):
-    if EAL.delete_asset(target):           # Returns True if fully deleted
-        unreal.SystemLibrary.collect_garbage()  # Flush the old UObject from memory
-    else:
-        can_create = False                 # Delete failed — do NOT create
-
-if can_create:
-    ATH = unreal.AssetToolsHelpers.get_asset_tools()
-    new_asset = ATH.create_asset(...)
-```
-
-## Command Index & Workflows
-
-To keep this prompt concise, all specific CLI commands, arguments, and detailed workflow examples have been moved to `references/commands.md`. 
-
-**Whenever you need to perform a specific action, read `references/commands.md` in this directory to find the right syntax.**
-
-Key topics covered in `references/commands.md`:
-* **Editor Control & Python Execution** (`editor status`, `editor run-script`, etc.)
-* **Project Management** (`project info`, `asset delete`, etc.)
-* **Build System** (`build compile`, `build cook`)
-* **Scene Queries** (`scene list`, `scene info`, transform, materials)
-* **Material Viewing & Editing** (Add nodes, connect, recompile, dump HLSL)
-* **Blueprint Editing** (Add variables/functions, compile)
-* **Screenshots** (`screenshot capture`)
-* **Multi-Instance Support** (Targeting specific editors via `--port`)
-* **Advanced Workflows & Examples** (Step-by-step examples for Editor Lifecycle, Scripting, and Actor->Material Investigation)
+Read the relevant file before attempting the operation. Do not guess commands or workflows from memory.

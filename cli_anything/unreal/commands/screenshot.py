@@ -12,13 +12,30 @@ def screenshot_group():
 
 
 @screenshot_group.command("capture")
-@click.option("--filename", default="screenshot", help="Output filename (no extension)")
+@click.option("--path", "output_path", default=None,
+              help="Full output file path with extension (e.g., F:/shots/result.png)")
+@click.option("--filename", default="screenshot",
+              help="Output filename prefix, no extension (legacy, use --path instead)")
 @click.option("--no-compress", is_flag=True, help="Return raw PNG instead of compressed JPG")
 @handle_error
 @click.pass_obj
-def screenshot_static(state: AppState, filename, no_compress):
-    """Take a single static screenshot. Returns compressed JPG by default."""
+def screenshot_static(state: AppState, output_path, filename, no_compress):
+    """Take a single static screenshot. Returns compressed JPG by default.
+
+    Use --path for a full file path (e.g., F:/Test574/round7_result.png).
+    Use --filename for a name prefix only (legacy mode).
+    """
     from cli_anything.unreal.core.screenshot import take_screenshot
+
+    # If --path given, extract directory-safe filename prefix from it
+    if output_path:
+        import os
+        # Determine extension to set no_compress
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext == ".png":
+            no_compress = True
+        # Use full path stem as filename prefix (take_screenshot adds extension)
+        filename = os.path.splitext(output_path)[0]
 
     api = require_editor(state)
     result = take_screenshot(

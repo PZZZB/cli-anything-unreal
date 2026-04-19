@@ -682,7 +682,172 @@ result = {"cleaned": True}
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  E2E: Blueprint Editing (BlueprintEditorLibrary)
+#  E2E: Material HLSL/Shader Source via Bridge Plugin
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.e2e
+class TestMaterialHlslShaderSourceE2E:
+    """Test get_material_hlsl_code and get_material_shader_source via Bridge plugin.
+
+    Uses the E2E_TestMaterial created by TestMaterialEditingE2E, or falls back
+    to any available material in the project.
+    """
+
+    def _get_test_material(self, api, project_path):
+        """Find a usable material for testing."""
+        from cli_anything.unreal.core.materials import list_materials
+
+        project_dir = str(Path(project_path).parent)
+
+        # Try E2E_TestMaterial first
+        result = list_materials(api, "/Game/", project_dir)
+        for mat in result.get("materials", []):
+            if "E2E_TestMaterial" in mat.get("path", ""):
+                return mat["path"]
+
+        # Fallback to any material
+        if result.get("materials"):
+            return result["materials"][0]["path"]
+
+        pytest.skip("No materials in project")
+
+    def test_hlsl_code(self, api, project_path):
+        """Test get_material_hlsl_code returns valid HLSL expression source."""
+        from cli_anything.unreal.core.materials import get_material_hlsl_code
+
+        project_dir = str(Path(project_path).parent)
+        mat_path = self._get_test_material(api, project_path)
+
+        result = get_material_hlsl_code(api, mat_path, project_dir=project_dir)
+
+        if "error" in result and "not loaded" in result.get("error", ""):
+            pytest.skip("Bridge plugin not loaded in editor")
+
+        assert result.get("source") == "plugin"
+        assert result.get("lines", 0) > 0, "HLSL code should have content"
+        assert result.get("file"), "Should have output file path"
+
+    def test_hlsl_code_contains_material_structs(self, api, project_path):
+        """Verify HLSL code contains FMaterialPixelParameters."""
+        from cli_anything.unreal.core.materials import get_material_hlsl_code
+
+        project_dir = str(Path(project_path).parent)
+        mat_path = self._get_test_material(api, project_path)
+
+        result = get_material_hlsl_code(api, mat_path, project_dir=project_dir)
+        if "error" in result:
+            pytest.skip(f"Bridge not available: {result.get('error')}")
+
+        file_path = result.get("file", "")
+        if file_path and Path(file_path).exists():
+            content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+            assert "FMaterialPixelParameters" in content, \
+                "HLSL code should contain FMaterialPixelParameters struct"
+
+    def test_shader_source(self, api, project_path):
+        """Test get_material_shader_source returns compiled .usf files."""
+        from cli_anything.unreal.core.materials import get_material_shader_source
+
+        project_dir = str(Path(project_path).parent)
+        mat_path = self._get_test_material(api, project_path)
+
+        result = get_material_shader_source(api, mat_path, project_dir=project_dir)
+
+        if "error" in result and "not loaded" in result.get("error", ""):
+            pytest.skip("Bridge plugin not loaded in editor")
+
+        assert result.get("source") == "plugin"
+        assert result.get("shader_count", 0) > 0, "Should have at least one compiled shader"
+        assert len(result.get("shaders", [])) > 0, "Shaders list should not be empty"
+
+    def test_shader_source_contains_cbuffers(self, api, project_path):
+        """Verify shader source files contain cbuffer View and struct definitions."""
+        from cli_anything.unreal.core.materials import get_material_shader_source
+
+        project_dir = str(Path(project_path).parent)
+        mat_path = self._get_test_material(api, project_path)
+
+        result = get_material_shader_source(api, mat_path, project_dir=project_dir)
+        if "error" in result:
+            pytest.skip(f"Bridge not available: {result.get('error')}")
+
+        shaders = result.get("shaders", [])
+        # Check that at least one shader file has cbuffer View and FMaterialPixelParameters
+        found_view = False
+        found_pixel_params = False
+
+        for shader in shaders:
+            file_path = shader.get("file", "")
+            if file_path and Path(file_path).exists():
+                content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+                if "cbuffer View" in content:
+                    found_view = True
+                if "FMaterialPixelParameters" in content:
+                    found_pixel_params = True
+
+        assert found_view, "At least one shader should contain 'cbuffer View'"
+        assert found_pixel_params, "At least one shader should contain 'FMaterialPixelParameters'"
+
+    def test_hlsl_code_cli(self, cli_runner, project_path, api_port):
+        """Test material hlsl-code CLI command."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        # First get a material path
+        result = cli_runner.invoke(cli, [
+            "--json", "--project", project_path, "--port", str(api_port),
+            "material", "list",
+        ])
+        if result.exit_code != 0:
+            pytest.skip("Could not list materials")
+
+        data = json.loads(result.output)
+        if not data.get("materials"):
+            pytest.skip("No materials in project")
+
+        mat_path = data["materials"][0]["path"]
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--project", project_path, "--port", str(api_port),
+            "material", "hlsl-code", mat_path,
+        ])
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        data = json.loads(result.output)
+
+        if "error" in data and "not loaded" in data.get("error", ""):
+            pytest.skip("Bridge plugin not loaded")
+
+        assert data.get("source") == "plugin"
+        assert data.get("lines", 0) > 0
+
+    def test_shader_source_cli(self, cli_runner, project_path, api_port):
+        """Test material shader-source CLI command."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--project", project_path, "--port", str(api_port),
+            "material", "list",
+        ])
+        if result.exit_code != 0:
+            pytest.skip("Could not list materials")
+
+        data = json.loads(result.output)
+        if not data.get("materials"):
+            pytest.skip("No materials in project")
+
+        mat_path = data["materials"][0]["path"]
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--project", project_path, "--port", str(api_port),
+            "material", "shader-source", mat_path,
+        ])
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        data = json.loads(result.output)
+
+        if "error" in data and "not loaded" in data.get("error", ""):
+            pytest.skip("Bridge plugin not loaded")
+
+        assert data.get("source") == "plugin"
+        assert data.get("shader_count", 0) > 0
 # ═══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.e2e
@@ -901,22 +1066,12 @@ class TestSceneE2E:
 
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port),
-            "scene", "find", "Light",
+            "scene", "list", "-q", "Light",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "actors" in data
 
-    def test_describe_actor(self, api):
-        from cli_anything.unreal.core.scene import list_actors, describe_actor
-
-        all_actors = list_actors(api)
-        if not all_actors.get("actors"):
-            pytest.skip("No actors in level")
-
-        actor_path = all_actors["actors"][0]["path"]
-        result = describe_actor(api, actor_path)
-        assert "Properties" in result or "error" in result
 
     def test_get_actor_transform(self, api):
         from cli_anything.unreal.core.scene import list_actors, get_actor_transform
@@ -1151,51 +1306,39 @@ class TestAssetsE2E:
         )
         run_python_code(api, cleanup_code, project_dir=project_dir, timeout=15, save=False)
 
-        # 1. Describe general
+        # 1. List with filter to find the asset
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "asset", "info", "/Game/E2E_AssetPropTest",
+            "asset", "list", "-q", "E2E_AssetPropTest",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "Name" in data
-        assert data["Name"] == "E2E_AssetPropTest"
-        assert "Properties" in data
-        assert any(p.get("Name") == "BlendMode" for p in data["Properties"])
+        assert "assets" in data
+        assert any(a["name"] == "E2E_AssetPropTest" for a in data["assets"])
 
-        # 2. Describe property
+        # 2. Get Property via asset property
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "asset", "info", "/Game/E2E_AssetPropTest", "--property", "BlendMode"
-        ])
-        assert result.exit_code == 0
-        data = json.loads(result.output)
-        assert "Name" in data
-        assert data["Name"] == "BlendMode"
-
-        # 3. Get Property
-        result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port), "--project", project_path,
-            "asset", "get-property", "/Game/E2E_AssetPropTest", "BlendMode"
+            "asset", "property", "/Game/E2E_AssetPropTest", "BlendMode",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "BlendMode" in data
         assert data["BlendMode"] == "Opaque"
 
-        # 4. Set Property
+        # 3. Set Property
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "asset", "get-property", "/Game/E2E_AssetPropTest", "BlendMode", "--set", "BLEND_Masked"
+            "asset", "property", "/Game/E2E_AssetPropTest", "BlendMode=BLEND_Masked",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data.get("status") == "ok"
 
-        # 5. Get Property again to verify
+        # 4. Get Property again to verify
         result = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port), "--project", project_path,
-            "asset", "get-property", "/Game/E2E_AssetPropTest", "BlendMode"
+            "asset", "property", "/Game/E2E_AssetPropTest", "BlendMode",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)

@@ -22,10 +22,16 @@ _SCRIPT_DELETE_ASSET = r'''
 import unreal
 path = "{asset_path}"
 EAL = unreal.EditorAssetLibrary
+
+# Single attempt at deletion. Do NOT retry — repeated ForceDelete calls
+# can mark the package as "potentially corrupt" in UE, making all future
+# deletions impossible until editor restart.
 deleted = EAL.delete_asset(path)
 if deleted:
     unreal.SystemLibrary.collect_garbage()
-result = {{"deleted": deleted}}
+    result = {{"deleted": True}}
+else:
+    result = {{"deleted": False, "hint": "ForceDelete failed. The package may be locked by an open asset editor, Content Browser, or undo buffer. Try: 1) Close any material/asset editors for this asset, 2) Use 'editor close' then restart the editor, 3) Delete after restart."}}
 '''
 
 _SCRIPT_DUPLICATE_ASSET = r'''
@@ -84,6 +90,78 @@ def _exec(api: "UEEditorAPI", script: str, project_dir: str | None, timeout: flo
 
 
 # ── Public API ───────────────────────────────────────────────────────
+
+
+def search_assets(
+    api: "UEEditorAPI",
+    query: str = "",
+    class_name: str | None = None,
+    package_path: str = "/Game",
+    limit: int = 0,
+) -> dict:
+    """Search assets via the Asset Registry (same as Content Browser).
+
+    Runs entirely engine-side in a single HTTP call via Python script.
+    Uses ``AssetRegistry.get_assets_by_path()`` — the same system the
+    Content Browser and Asset Picker use.
+
+    Parameters
+    ----------
+    api:
+        A connected :class:`UEEditorAPI` instance.
+    query:
+        Name substring filter (case-insensitive).
+    class_name:
+        Short class name (e.g., ``"Material"``, ``"Texture2D"``).
+        Resolved engine-side — no mapping table needed.
+    package_path:
+        Content path to search (default ``"/Game"``).
+    limit:
+        Max results (0 = unlimited).
+
+    Returns
+    -------
+    dict
+        ``{"assets": [{"name", "class", "path"}], "count": int}``
+    """
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    class_repr = repr(class_name) if class_name else "None"
+    query_repr = repr(query) if query else "None"
+    limit_val = limit or 0
+
+    script = f'''\
+import unreal as _u
+
+_ar = _u.AssetRegistryHelpers.get_asset_registry()
+_assets = _ar.get_assets_by_path({repr(package_path)}, recursive=True)
+
+_class_filter = {class_repr}
+_name_query = {query_repr}
+_limit = {limit_val}
+
+_results = []
+for _ad in _assets:
+    _cls = str(_ad.asset_class_path.asset_name)
+    _name = str(_ad.asset_name)
+
+    if _class_filter and _cls != _class_filter:
+        continue
+    if _name_query and _name_query.lower() not in _name.lower():
+        continue
+
+    _results.append({{
+        "name": _name,
+        "class": _cls,
+        "path": str(_ad.package_name),
+    }})
+    if _limit and len(_results) >= _limit:
+        break
+
+result = {{"assets": _results, "count": len(_results)}}
+'''
+    return run_python_code(api, script, save=False)
+
 
 def asset_exists(api: "UEEditorAPI", asset_path: str, **_kw) -> dict:
     """Check whether an asset exists. Single HTTP call."""
@@ -184,65 +262,6 @@ def asset_rename(
     """Rename/move an asset."""
     script = _SCRIPT_RENAME_ASSET.format(source_path=source_path, dest_path=dest_path)
     return _exec(api, script, project_dir)
-
-def describe_asset(api: "UEEditorAPI", asset_path: str, property_name: str | None = None) -> dict:
-    """Describe a UAsset loaded in the Content Browser.
-    
-    Loads the asset into memory first, then uses describe_object.
-    Follows progressive disclosure like scene_describe.
-    """
-    if not api.does_asset_exist(asset_path):
-        return {"error": f"Asset not found: {asset_path}"}
-        
-    script = f'''
-import unreal
-asset = unreal.EditorAssetLibrary.load_asset('{asset_path}')
-if asset:
-    unreal.log(f'LOADED_OBJECT:{{asset.get_path_name()}}')
-'''
-    res = api.exec_python_ex(script)
-    object_path = None
-    for item in res.get("LogOutput", []):
-        line = item.get("Output", "")
-        if line.startswith("LOADED_OBJECT:"):
-            object_path = line.split(":", 1)[1].strip()
-            
-    if not object_path:
-        return {"error": f"Failed to load asset into memory: {asset_path}"}
-        
-    raw_data = api.describe_object(object_path)
-    if "error" in raw_data:
-        return raw_data
-
-    if property_name:
-        for prop in raw_data.get("Properties", []):
-            if isinstance(prop, dict) and prop.get("Name") == property_name:
-                return prop
-            elif prop == property_name:
-                return {"Name": prop}
-        for func in raw_data.get("Functions", []):
-            if isinstance(func, dict) and func.get("Name") == property_name:
-                return func
-            elif func == property_name:
-                return {"Name": func}
-        return {"error": f"Property or function '{property_name}' not found on asset '{asset_path}'."}
-
-    props = [
-        {"Name": p.get("Name"), "Type": p.get("Type")} if isinstance(p, dict) else {"Name": str(p)}
-        for p in raw_data.get("Properties", [])
-    ]
-    funcs = [
-        {"Name": f.get("Name")} if isinstance(f, dict) else {"Name": str(f)}
-        for f in raw_data.get("Functions", [])
-    ]
-    
-    return {
-        "Name": raw_data.get("Name"),
-        "Class": raw_data.get("Class"),
-        "Properties": props,
-        "Functions": funcs,
-        "hint": f"Output is summarized. To see full metadata/tooltips for a specific property, use: project asset-describe \"{asset_path}\" --property <Name>"
-    }
 
 def get_asset_property(api: "UEEditorAPI", asset_path: str, property_name: str) -> dict:
     """Get a property value on a UAsset."""

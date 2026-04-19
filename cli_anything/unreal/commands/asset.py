@@ -3,35 +3,48 @@
 import click
 
 from cli_anything.unreal.commands import AppState, handle_error, output, require_editor, require_project
+from cli_anything.unreal.commands._parse_value import parse_property_value
 
 
 @click.group("asset")
 def asset_group():
-    """Asset operations (exists, delete, duplicate, info, etc.)."""
+    """Asset operations (list, exists, delete, duplicate, rename, properties)."""
     pass
 
 
 @asset_group.command("list")
-@click.option("--ext", default="", help="Filter by extension (e.g., .uasset)")
-@click.option("--filter", "path_filter", default="", help="Filter by path substring")
-@click.option("--depth", default=5, help="Max directory depth")
+@click.option("--query", "-q", default="", help="Search query (name substring)")
+@click.option("--class", "class_name", default=None, help="Filter by class (e.g., Material, Texture2D, Blueprint)")
+@click.option("--path", "package_path", default="/Game", help="Content path to search (default: /Game)")
+@click.option("--limit", default=0, type=int, help="Max results (0 = unlimited)")
 @handle_error
 @click.pass_obj
-def asset_list(state: AppState, ext, path_filter, depth):
-    """List content assets in the project."""
-    from cli_anything.unreal.core.project import list_content
+def asset_list(state: AppState, query, class_name, package_path, limit):
+    """Search and list assets via the Asset Registry (same as Content Browser).
 
-    require_project(state)
-    assets = list_content(state.session.project_dir, filter_ext=ext, filter_path=path_filter, max_depth=depth)
+    \b
+    Examples:
+        asset list                              # all assets under /Game
+        asset list -q BlackHole                 # search by name
+        asset list --class Material             # filter by class
+        asset list --class Material -q Water    # combine filters
+        asset list --path /Game/Blueprints      # search specific folder
+    """
+    from cli_anything.unreal.core.assets import search_assets
 
-    if state.json_output:
-        output({"assets": assets, "count": len(assets)}, state)
-    else:
+    api = require_editor(state)
+    result = search_assets(api, query=query, class_name=class_name,
+                           package_path=package_path, limit=limit)
+
+    if not state.json_output:
+        assets = result.get("assets", [])
         state.skin.info(f"Found {len(assets)} assets")
         if assets:
-            headers = ["Name", "Extension", "Content Path"]
-            rows = [[a["name"], a["ext"], a.get("content_path", "")] for a in assets]
+            headers = ["Name", "Class", "Path"]
+            rows = [[a["name"], a["class"], a["path"]] for a in assets]
             state.skin.table(headers, rows)
+    else:
+        output(result, state)
 
 
 @asset_group.command("exists")
@@ -134,59 +147,30 @@ def asset_rename_cmd(state: AppState, source_path, dest_path):
     output(result, state)
 
 
-@asset_group.command("info")
+@asset_group.command("property")
 @click.argument("asset_path")
-@click.option("--filter", "prop_filter", default=None,
-              help="Case-insensitive substring filter for property names.")
-@click.option("--property", "prop_name", default=None,
-              help="Get full metadata for a specific property (legacy C++ mode).")
+@click.argument("expression")
 @handle_error
 @click.pass_obj
-def asset_info_cmd(state: AppState, asset_path, prop_filter, prop_name):
-    """Describe a UAsset with Python-safe property names.
+def asset_property(state: AppState, asset_path, expression):
+    """Get or set a property on a UAsset.
 
-    Returns snake_case property names and current values that can be used
-    directly in Python scripts. Use --filter to search for specific properties.
-    Use --property for legacy C++ reflection metadata (PascalCase names).
+    Read:  asset property <path> PropertyName
+    Write: asset property <path> PropertyName=NewValue
+
+    \b
+    Examples:
+        asset property /Game/M_Water BlendMode           # read
+        asset property /Game/M_Water BlendMode=Translucent  # write
     """
-    if prop_name:
-        # Legacy mode: use C++ describe API for full metadata on a single property
-        from cli_anything.unreal.core.assets import describe_asset
-        api = require_editor(state)
-        result = describe_asset(api, asset_path, prop_name)
+    from cli_anything.unreal.core.assets import get_asset_property, set_asset_property
+
+    api = require_editor(state)
+
+    if "=" in expression:
+        prop_name, raw_value = expression.split("=", 1)
+        result = set_asset_property(api, asset_path, prop_name, parse_property_value(raw_value))
     else:
-        # New mode: Python runtime inspection with snake_case names
-        from cli_anything.unreal.core.script_runner import inspect_instance
-        api = require_editor(state)
-        result = inspect_instance(api, asset_path, mode="asset",
-                                  prop_filter=prop_filter)
-    output(result, state)
+        result = get_asset_property(api, asset_path, expression)
 
-
-@asset_group.command("get-property")
-@click.argument("asset_path")
-@click.argument("property_name")
-@handle_error
-@click.pass_obj
-def asset_get_property(state: AppState, asset_path, property_name):
-    """Get a property on a UAsset in the Content Browser."""
-    from cli_anything.unreal.core.assets import get_asset_property
-
-    api = require_editor(state)
-    result = get_asset_property(api, asset_path, property_name)
-    output(result, state)
-
-
-@asset_group.command("set-property")
-@click.argument("asset_path")
-@click.argument("property_name")
-@click.argument("new_value")
-@handle_error
-@click.pass_obj
-def asset_set_property(state: AppState, asset_path, property_name, new_value):
-    """Set a property on a UAsset in the Content Browser."""
-    from cli_anything.unreal.core.assets import set_asset_property
-
-    api = require_editor(state)
-    result = set_asset_property(api, asset_path, property_name, new_value)
     output(result, state)

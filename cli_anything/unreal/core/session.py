@@ -34,11 +34,20 @@ class Session:
         """Load a project into the session.
 
         Args:
-            uproject_path: Path to the .uproject file.
+            uproject_path: Path to the .uproject file or its containing directory.
         """
         path = Path(uproject_path)
         if not path.exists():
             raise FileNotFoundError(f"Project not found: {uproject_path}")
+
+        # If a directory is passed, try to find a .uproject file inside it
+        if path.is_dir():
+            uprojects = list(path.glob("*.uproject"))
+            if not uprojects:
+                raise FileNotFoundError(f"No .uproject file found in directory: {path}")
+            elif len(uprojects) > 1:
+                raise ValueError(f"Multiple .uproject files found in directory: {path}. Please specify one.")
+            path = uprojects[0]
 
         self.project_path = str(path)
         self.project_dir = str(path.parent)
@@ -46,7 +55,7 @@ class Session:
 
         # Auto-detect engine
         from cli_anything.unreal.utils.ue_backend import find_engine_root
-        self.engine_root = find_engine_root(uproject_path)
+        self.engine_root = find_engine_root(str(path))
 
         # Load initial state
         self._state = {

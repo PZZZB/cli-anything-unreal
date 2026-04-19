@@ -713,8 +713,6 @@ class TestMaterials:
 
         # Should still have RC API data
         assert result["name"] == "TestMat"
-        assert len(result["properties"]) == 1
-        assert "SetBlendMode" in result["functions"]
         # Should have detail_note explaining script failure
         assert "detail_note" in result
         assert "Python script unavailable" in result["detail_note"]
@@ -1472,10 +1470,23 @@ class TestCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        result = runner.invoke(cli, [
-            "--json", "--project", temp_project["uproject"],
-            "asset", "list",
-        ])
+        with patch("cli_anything.unreal.commands.asset.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_api = MagicMock()
+            mock_editor.return_value = mock_api
+            mock_run.return_value = {
+                "assets": [
+                    {"name": "NewMaterial", "class": "Material", "path": "/Game/NewMaterial"},
+                    {"name": "NewBlueprint", "class": "Blueprint", "path": "/Game/NewBlueprint"},
+                    {"name": "NewTexture", "class": "Texture2D", "path": "/Game/NewTexture"},
+                    {"name": "NewMesh", "class": "StaticMesh", "path": "/Game/NewMesh"},
+                ],
+                "count": 4,
+            }
+            result = runner.invoke(cli, [
+                "--json", "--project", temp_project["uproject"],
+                "asset", "list",
+            ])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["count"] == 4
@@ -1493,6 +1504,126 @@ class TestCLI:
         data = json.loads(result.output)
         # Empty port vs running-but-blocked API both resolve to non-online.
         assert data["status"] in ("offline", "offline_api_blocked")
+
+    @patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False)
+    @patch("cli_anything.unreal.utils.ue_backend.preflight_check")
+    def test_editor_status_includes_startup_precheck(self, mock_preflight, _mock_alive, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_preflight.return_value = {
+            "ready": False,
+            "engine": {"errors": ["engine error"], "warnings": ["engine warning"]},
+            "project": {"errors": ["project error"], "warnings": []},
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "--json", "--project", temp_project["uproject"],
+            "editor", "status",
+        ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "startup_precheck" in data
+        assert data["startup_precheck"]["ready"] is False
+        assert data["startup_precheck"]["errors"] == ["engine error", "project error"]
+        assert data["startup_precheck"]["warnings"] == ["engine warning"]
+
+    def test_editor_status_offline_api_blocked_includes_log_error(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[{"pid": 1234, "project": temp_project["uproject"]}]), \
+             patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
+             patch("cli_anything.unreal.commands.editor._check_log_errors", return_value="Plugin 'libzstd' failed to load"), \
+             patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+                 "ready": True,
+                 "engine": {"errors": [], "warnings": []},
+                 "project": {"errors": [], "warnings": []},
+             }):
+            result = runner.invoke(cli, [
+                "--json", "--project", temp_project["uproject"],
+                "editor", "status",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "offline_api_blocked"
+        assert data["log_error"] == "Plugin 'libzstd' failed to load"
+        assert data["running_editors"][0]["pid"] == 1234
+        assert data["startup_precheck"]["ready"] is True
+
+    @patch("cli_anything.unreal.utils.ue_backend.preflight_check")
+    def test_editor_launch_preflight_failed_includes_startup_precheck(self, mock_preflight, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_preflight.return_value = {
+            "ready": False,
+            "engine": {"errors": ["engine error"], "warnings": ["engine warning"]},
+            "project": {"errors": ["project error"], "warnings": []},
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "--json", "--project", temp_project["uproject"],
+            "editor", "launch", "--no-wait",
+        ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "preflight_failed"
+        assert data["startup_precheck"]["ready"] is False
+        assert data["startup_precheck"]["errors"] == ["engine error", "project error"]
+        assert data["startup_precheck"]["warnings"] == ["engine warning"]
+
+    @patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None)
+    @patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None)
+    @patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={"deployed": False})
+    @patch("cli_anything.unreal.commands.editor._run_preflight")
+    @patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Engine/Binaries/Win64/UnrealEditor.exe")
+    @patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine")
+    @patch("cli_anything.unreal.commands.editor.sp.Popen")
+    def test_editor_launch_success_includes_startup_precheck(
+        self,
+        mock_popen,
+        _mock_find_engine_root,
+        _mock_find_editor_exe,
+        mock_run_preflight,
+        _mock_deploy_bridge,
+        _mock_check_already_running,
+        _mock_check_port_in_use,
+        temp_project,
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_popen.return_value = mock_proc
+
+        mock_run_preflight.return_value = {
+            "ready": True,
+            "engine": {"errors": [], "warnings": ["engine warning"]},
+            "project": {"errors": [], "warnings": ["project warning"]},
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "--json", "--project", temp_project["uproject"],
+            "editor", "launch", "--no-wait",
+        ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "launched"
+        assert data["pid"] == 12345
+        assert data["startup_precheck"]["ready"] is True
+        assert data["startup_precheck"]["errors"] == []
+        assert data["startup_precheck"]["warnings"] == ["engine warning", "project warning"]
 
     def test_session_status(self, temp_project):
         from click.testing import CliRunner
@@ -2119,27 +2250,51 @@ class TestScriptRunner:
 
         mock_api.exec_python_ex.side_effect = _fake_exec
 
+    @staticmethod
+    def _make_fake_bridge(class_info_map):
+        """Create a fake CliAnythingBridgeLibrary with get_class_info.
+
+        class_info_map: dict mapping class_name -> dict with "properties" and "functions".
+        """
+        import json as _json
+        class FakeBridge:
+            @staticmethod
+            def get_class_info(class_name, include_inherited):
+                data = class_info_map.get(class_name)
+                if data is None:
+                    return "{}"
+                return _json.dumps(data)
+        return FakeBridge
+
     def test_api_discover_basic(self):
-        """api_discover should return structured API info."""
+        """api_discover overview should return property/function names only."""
         from cli_anything.unreal.core.script_runner import api_discover
 
         mock_api = MagicMock()
 
         import types, sys
 
-        class FakeEditorLevelLibrary:
-            """Editor Level Library\nDeprecationWarning: This class is deprecated."""
-            def get_all_level_actors(self):
-                """X.get_all_level_actors() -> Array[Actor]\nReturns all actors."""
-                pass
-            def get_editor_world(self):
-                """X.get_editor_world() -> World\nReturns the Editor World."""
-                pass
-            some_property = 42
+        bridge_data = {
+            "EditorLevelLibrary": {
+                "class": "EditorLevelLibrary",
+                "properties": [
+                    {"name": "some_property", "type": "int32", "owner": "EditorLevelLibrary",
+                     "category": "EditorLevelLibrary", "read": True, "write": True}
+                ],
+                "functions": [
+                    {"name": "get_all_level_actors", "owner": "EditorLevelLibrary",
+                     "tooltip": "Returns all actors.", "return_type": "TArray",
+                     "params": []},
+                    {"name": "get_editor_world", "owner": "EditorLevelLibrary",
+                     "tooltip": "Returns the Editor World.", "return_type": "UWorld*",
+                     "params": []},
+                ],
+            }
+        }
 
         fake_unreal = types.ModuleType("unreal")
         fake_unreal.log = lambda msg: None
-        fake_unreal.EditorLevelLibrary = FakeEditorLevelLibrary
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
 
         old_unreal = sys.modules.get("unreal")
         sys.modules["unreal"] = fake_unreal
@@ -2151,12 +2306,10 @@ class TestScriptRunner:
             )
             assert result["target_name"] == "EditorLevelLibrary"
             assert result["full_path"] == "unreal.EditorLevelLibrary"
-            assert "DeprecationWarning" in result["docstring"]
-            method_names = [m["name"] for m in result["methods"]]
-            assert "get_all_level_actors" in method_names
-            assert "get_editor_world" in method_names
-            gal = [m for m in result["methods"] if m["name"] == "get_all_level_actors"][0]
-            assert "->" in gal["signature"]
+            # Overview returns plain name lists
+            assert result["properties"] == ["some_property"]
+            assert "get_all_level_actors" in result["functions"]
+            assert "get_editor_world" in result["functions"]
         finally:
             if old_unreal is not None:
                 sys.modules["unreal"] = old_unreal
@@ -2171,13 +2324,17 @@ class TestScriptRunner:
 
         import types, sys
 
-        class FakeActor:
-            """Base actor class."""
-            pass
+        bridge_data = {
+            "Actor": {
+                "class": "Actor",
+                "properties": [],
+                "functions": [],
+            }
+        }
 
         fake_unreal = types.ModuleType("unreal")
         fake_unreal.log = lambda msg: None
-        fake_unreal.Actor = FakeActor
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
 
         old_unreal = sys.modules.get("unreal")
         sys.modules["unreal"] = fake_unreal
@@ -2193,28 +2350,31 @@ class TestScriptRunner:
                 sys.modules.pop("unreal", None)
 
     def test_api_discover_method_filter(self):
-        """api_discover with method_filter should only return matching methods."""
+        """api_discover with method_filter should only return matching names."""
         from cli_anything.unreal.core.script_runner import api_discover
 
         mock_api = MagicMock()
 
         import types, sys
 
-        class FakeLib:
-            """A library."""
-            def get_all_level_actors(self):
-                """X.get_all_level_actors() -> Array[Actor]\nGet actors."""
-                pass
-            def get_editor_world(self):
-                """X.get_editor_world() -> World\nGet world."""
-                pass
-            def spawn_actor(self):
-                """X.spawn_actor() -> Actor\nSpawn."""
-                pass
+        bridge_data = {
+            "FakeLib": {
+                "class": "FakeLib",
+                "properties": [],
+                "functions": [
+                    {"name": "get_all_level_actors", "owner": "FakeLib",
+                     "tooltip": "Get actors.", "return_type": "TArray", "params": []},
+                    {"name": "get_editor_world", "owner": "FakeLib",
+                     "tooltip": "Get world.", "return_type": "UWorld*", "params": []},
+                    {"name": "spawn_actor", "owner": "FakeLib",
+                     "tooltip": "Spawn.", "return_type": "AActor*", "params": []},
+                ],
+            }
+        }
 
         fake_unreal = types.ModuleType("unreal")
         fake_unreal.log = lambda msg: None
-        fake_unreal.FakeLib = FakeLib
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
 
         old_unreal = sys.modules.get("unreal")
         sys.modules["unreal"] = fake_unreal
@@ -2225,47 +2385,103 @@ class TestScriptRunner:
                 method_filter="get",
                 timeout=5,
             )
-            method_names = [m["name"] for m in result["methods"]]
-            assert "get_all_level_actors" in method_names
-            assert "get_editor_world" in method_names
-            assert "spawn_actor" not in method_names
+            # Overview returns plain name lists, filtered
+            assert "get_all_level_actors" in result["functions"]
+            assert "get_editor_world" in result["functions"]
+            assert "spawn_actor" not in result["functions"]
         finally:
             if old_unreal is not None:
                 sys.modules["unreal"] = old_unreal
             else:
                 sys.modules.pop("unreal", None)
 
-    def test_api_discover_max_methods(self):
-        """api_discover with max_methods should limit returned method count."""
+    def test_api_discover_detail_single(self):
+        """api_discover detail for a single property/function name."""
         from cli_anything.unreal.core.script_runner import api_discover
 
         mock_api = MagicMock()
 
         import types, sys
 
-        class FakeBigLib:
-            """Big library."""
-            def method_a(self): """X.method_a() -> None\nA."""; pass
-            def method_b(self): """X.method_b() -> None\nB."""; pass
-            def method_c(self): """X.method_c() -> None\nC."""; pass
-            def method_d(self): """X.method_d() -> None\nD."""; pass
-            def method_e(self): """X.method_e() -> None\nE."""; pass
+        bridge_data = {
+            "SomeClass": {
+                "class": "SomeClass",
+                "properties": [
+                    {"name": "MyProp", "type": "float", "owner": "SomeClass",
+                     "category": "SomeClass", "tooltip": "A float property.", "read": True, "write": True}
+                ],
+                "functions": [
+                    {"name": "do_thing", "owner": "SomeClass",
+                     "tooltip": "Does a thing.", "return_type": "bool",
+                     "params": [{"name": "x", "type": "int32"}]},
+                ],
+            }
+        }
 
         fake_unreal = types.ModuleType("unreal")
         fake_unreal.log = lambda msg: None
-        fake_unreal.FakeBigLib = FakeBigLib
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
 
         old_unreal = sys.modules.get("unreal")
         sys.modules["unreal"] = fake_unreal
         try:
             self._make_discover_mock(mock_api, fake_unreal)
-            result = api_discover(
-                mock_api, "unreal.FakeBigLib",
-                max_methods=2,
-                timeout=5,
-            )
-            assert result["method_count"] == 2
-            assert len(result["methods"]) == 2
+
+            # Overview: names only
+            result_summary = api_discover(mock_api, "unreal.SomeClass", timeout=5)
+            assert result_summary["properties"] == ["MyProp"]
+            assert result_summary["functions"] == ["do_thing"]
+
+            # Detail for one property
+            result_prop = api_discover(mock_api, "unreal.SomeClass", detail="MyProp", timeout=5)
+            assert result_prop["items"][0]["kind"] == "property"
+            assert result_prop["items"][0]["detail"]["tooltip"] == "A float property."
+
+            # Detail for one function
+            result_func = api_discover(mock_api, "unreal.SomeClass", detail="do_thing", timeout=5)
+            assert result_func["items"][0]["kind"] == "function"
+            assert result_func["items"][0]["detail"]["params"][0]["name"] == "x"
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+    def test_api_discover_detail_multiple(self):
+        """api_discover detail with comma-separated names returns multiple items."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        mock_api = MagicMock()
+
+        import types, sys
+
+        bridge_data = {
+            "SomeClass": {
+                "class": "SomeClass",
+                "properties": [
+                    {"name": "Prop1", "type": "float", "owner": "SomeClass",
+                     "category": "SomeClass", "tooltip": "P1", "read": True, "write": True}
+                ],
+                "functions": [
+                    {"name": "Func1", "owner": "SomeClass",
+                     "tooltip": "F1", "return_type": "void", "params": []},
+                ],
+            }
+        }
+
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(mock_api, "unreal.SomeClass", detail="Prop1,Func1,NotFound", timeout=5)
+            names = [item["name"] for item in result["items"]]
+            assert "Prop1" in names
+            assert "Func1" in names
+            assert result["not_found"] == ["NotFound"]
         finally:
             if old_unreal is not None:
                 sys.modules["unreal"] = old_unreal
@@ -2280,8 +2496,10 @@ class TestScriptRunner:
 
         import types, sys
 
+        # Empty bridge — get_class_info returns "{}" for everything
         fake_unreal = types.ModuleType("unreal")
         fake_unreal.log = lambda msg: None
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge({})
 
         old_unreal = sys.modules.get("unreal")
         sys.modules["unreal"] = fake_unreal
@@ -2289,7 +2507,7 @@ class TestScriptRunner:
             self._make_discover_mock(mock_api, fake_unreal)
             result = api_discover(mock_api, "unreal.NonExistentClass", timeout=5)
             assert "error" in result
-            assert "Cannot resolve" in result["error"]
+            assert "Class not found" in result["error"]
         finally:
             if old_unreal is not None:
                 sys.modules["unreal"] = old_unreal
@@ -2308,10 +2526,13 @@ class TestScriptRunner:
             mock_discover.return_value = {
                 "target_name": "EditorLevelLibrary",
                 "full_path": "unreal.EditorLevelLibrary",
-                "methods": [{"name": "get_editor_world", "signature": "() -> World", "docstring": "..."}],
+                "class": "EditorLevelLibrary",
+                "functions": [{"name": "get_editor_world"}],
                 "properties": [],
-                "method_count": 1,
+                "function_count": 1,
                 "property_count": 0,
+                "total_functions_available": 1,
+                "truncated": False,
             }
 
             result = runner.invoke(cli, [
@@ -2323,7 +2544,7 @@ class TestScriptRunner:
             mock_discover.assert_called_once()
 
     def test_api_discover_cli_with_options(self):
-        """editor api-discover CLI with -m and -n options."""
+        """editor api-discover CLI with -m and -d options."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
@@ -2333,256 +2554,211 @@ class TestScriptRunner:
             mock_editor.return_value = MagicMock()
             mock_discover.return_value = {
                 "target_name": "Actor",
-                "full_path": "unreal.Actor",
-                "methods": [],
-                "properties": [],
-                "method_count": 0,
-                "property_count": 0,
+                "items": [{"kind": "function", "name": "GetOwner", "detail": {}}],
             }
 
             result = runner.invoke(cli, [
                 "--json", "editor", "api-discover",
-                "unreal.Actor", "-m", "spawn", "-n", "10",
+                "unreal.Actor", "-m", "spawn", "-d", "GetOwner",
             ])
             assert result.exit_code == 0
             mock_discover.assert_called_once()
             call_kw = mock_discover.call_args[1]
             assert call_kw["method_filter"] == "spawn"
-            assert call_kw["max_methods"] == 10
+            assert call_kw["detail"] == "GetOwner"
 
-    # -- inspect_instance tests -------------------------------------------
+    # -- Instance path tests (actor / asset) ----------------------------------
+
+    def _setup_instance_discover(self, bridge_data, *, actors=None, assets=None):
+        """Helper: set up fake unreal module with actor/asset support.
+
+        Returns (mock_api, fake_unreal, cleanup) where cleanup restores sys.modules.
+        """
+        import types, sys
+
+        mock_api = MagicMock()
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        # Mock EditorActorSubsystem + get_all_level_actors
+        fake_actors = actors or []
+        fake_subsystem = MagicMock()
+        fake_subsystem.get_all_level_actors.return_value = fake_actors
+        fake_unreal.EditorActorSubsystem = type("EditorActorSubsystem", (), {})
+        fake_unreal.get_editor_subsystem = lambda cls: fake_subsystem
+
+        # Mock EditorAssetLibrary
+        assets_map = assets or {}
+        fake_asset_lib = MagicMock()
+        fake_asset_lib.does_asset_exist.side_effect = lambda p: p in assets_map
+        fake_asset_lib.load_asset.side_effect = lambda p: assets_map.get(p)
+        fake_unreal.EditorAssetLibrary = fake_asset_lib
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        self._make_discover_mock(mock_api, fake_unreal)
+
+        def cleanup():
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+        return mock_api, fake_unreal, cleanup
 
     def test_inspect_instance_actor(self):
-        """inspect_instance in actor mode should return snake_case properties."""
-        from cli_anything.unreal.core.script_runner import inspect_instance
+        """api_discover with an actor path should resolve class and return actor context."""
+        from cli_anything.unreal.core.script_runner import api_discover
 
-        mock_api = MagicMock()
+        bridge_data = {
+            "PointLight": {
+                "class": "PointLight",
+                "properties": [
+                    {"name": "Intensity", "type": "float", "owner": "PointLight",
+                     "read": True, "write": True},
+                ],
+                "functions": [],
+            }
+        }
 
-        import types, sys
+        fake_actor = MagicMock()
+        fake_actor.get_path_name.return_value = "/Game/Maps/L.L:PersistentLevel.Light_0"
+        fake_actor.get_name.return_value = "Light_0"
+        fake_actor.get_actor_label.return_value = "Light_0"
+        fake_actor.__class__ = type("PointLight", (), {})
 
-        class FakeActor:
-            def __init__(self):
-                self.cast_shadows = True
-                self.b_hidden = False
-                self.actor_label = "TestLight"
-            def get_name(self):
-                return "TestLight"
-            def get_path_name(self):
-                return "/Game/Map.Map:PersistentLevel.TestLight"
-            def some_method(self):
-                pass
-
-        fake_actor = FakeActor()
-        fake_subsystem_cls = type("EditorActorSubsystem", (), {})
-        fake_subsystem = type("Subsystem", (), {
-            "get_all_level_actors": lambda self: [fake_actor],
-        })()
-
-        fake_unreal = types.ModuleType("unreal")
-        fake_unreal.log = lambda msg: None
-        fake_unreal.EditorActorSubsystem = fake_subsystem_cls
-        fake_unreal.get_editor_subsystem = lambda cls: fake_subsystem
-
-        old_unreal = sys.modules.get("unreal")
-        sys.modules["unreal"] = fake_unreal
+        mock_api, _, cleanup = self._setup_instance_discover(
+            bridge_data, actors=[fake_actor],
+        )
         try:
-            self._make_discover_mock(mock_api, fake_unreal)
-            result = inspect_instance(
-                mock_api, "/Game/Map.Map:PersistentLevel.TestLight",
-                mode="actor",
+            result = api_discover(
+                mock_api,
+                "/Game/Maps/L.L:PersistentLevel.Light_0",
+                timeout=5,
             )
-            assert result["instance_name"] == "TestLight"
-            # Key assertion: properties must be snake_case, not PascalCase
-            assert "cast_shadows" in result["properties"]
-            assert "b_hidden" in result["properties"]
-            assert "actor_label" in result["properties"]
-            assert "some_method" in result["methods"]
+            assert "error" not in result
+            assert result["class"] == "PointLight"
+            assert result["actor"] == "/Game/Maps/L.L:PersistentLevel.Light_0"
+            assert result["actor_name"] == "Light_0"
+            assert "Intensity" in result["properties"]
         finally:
-            if old_unreal is not None:
-                sys.modules["unreal"] = old_unreal
-            else:
-                sys.modules.pop("unreal", None)
+            cleanup()
 
-    def test_inspect_instance_with_filter(self):
-        """inspect_instance with prop_filter should only return matching properties."""
-        from cli_anything.unreal.core.script_runner import inspect_instance
+    def test_inspect_instance_actor_not_found(self):
+        """api_discover should return error for non-existent actor path."""
+        from cli_anything.unreal.core.script_runner import api_discover
 
-        mock_api = MagicMock()
-
-        import types, sys
-
-        class FakeActor:
-            def __init__(self):
-                self.cast_shadows = True
-                self.b_hidden = False
-                self.intensity = 5.0
-            def get_name(self):
-                return "Light"
-            def get_path_name(self):
-                return "/Game/Map.Map:PersistentLevel.Light"
-
-        fake_actor = FakeActor()
-        fake_subsystem_cls = type("EditorActorSubsystem", (), {})
-        fake_subsystem = type("Subsystem", (), {
-            "get_all_level_actors": lambda self: [fake_actor],
-        })()
-
-        fake_unreal = types.ModuleType("unreal")
-        fake_unreal.log = lambda msg: None
-        fake_unreal.EditorActorSubsystem = fake_subsystem_cls
-        fake_unreal.get_editor_subsystem = lambda cls: fake_subsystem
-
-        old_unreal = sys.modules.get("unreal")
-        sys.modules["unreal"] = fake_unreal
+        mock_api, _, cleanup = self._setup_instance_discover(
+            {}, actors=[],  # no actors in level
+        )
         try:
-            self._make_discover_mock(mock_api, fake_unreal)
-            result = inspect_instance(
-                mock_api, "/Game/Map.Map:PersistentLevel.Light",
-                mode="actor", prop_filter="shadow",
-            )
-            assert "cast_shadows" in result["properties"]
-            assert "b_hidden" not in result["properties"]
-            assert "intensity" not in result["properties"]
-        finally:
-            if old_unreal is not None:
-                sys.modules["unreal"] = old_unreal
-            else:
-                sys.modules.pop("unreal", None)
-
-    def test_inspect_instance_not_found(self):
-        """inspect_instance should return error for non-existent actor."""
-        from cli_anything.unreal.core.script_runner import inspect_instance
-
-        mock_api = MagicMock()
-
-        import types, sys
-
-        fake_subsystem_cls = type("EditorActorSubsystem", (), {})
-        fake_subsystem = type("Subsystem", (), {
-            "get_all_level_actors": lambda self: [],
-        })()
-
-        fake_unreal = types.ModuleType("unreal")
-        fake_unreal.log = lambda msg: None
-        fake_unreal.EditorActorSubsystem = fake_subsystem_cls
-        fake_unreal.get_editor_subsystem = lambda cls: fake_subsystem
-
-        old_unreal = sys.modules.get("unreal")
-        sys.modules["unreal"] = fake_unreal
-        try:
-            self._make_discover_mock(mock_api, fake_unreal)
-            result = inspect_instance(
-                mock_api, "/Game/Map.Map:PersistentLevel.NonExistent",
-                mode="actor",
+            result = api_discover(
+                mock_api,
+                "/Game/Maps/L.L:PersistentLevel.DoesNotExist",
+                timeout=5,
             )
             assert "error" in result
+            assert "not found" in result["error"].lower()
         finally:
-            if old_unreal is not None:
-                sys.modules["unreal"] = old_unreal
-            else:
-                sys.modules.pop("unreal", None)
+            cleanup()
 
-    def test_scene_info_cli_uses_inspect(self):
-        """scene info CLI should use inspect_instance by default."""
-        from click.testing import CliRunner
-        from cli_anything.unreal.unreal_cli import cli
+    def test_inspect_instance_actor_with_filter(self):
+        """api_discover actor path + method_filter should filter results."""
+        from cli_anything.unreal.core.script_runner import api_discover
 
-        runner = CliRunner()
-        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
-             patch("cli_anything.unreal.core.script_runner.inspect_instance") as mock_inspect:
-            mock_editor.return_value = MagicMock()
-            mock_inspect.return_value = {
-                "instance_name": "Light",
-                "class_name": "DirectionalLight",
-                "properties": {"cast_shadows": "True"},
-                "methods": [],
-                "property_count": 1,
-                "method_count": 0,
+        bridge_data = {
+            "StaticMeshActor": {
+                "class": "StaticMeshActor",
+                "properties": [
+                    {"name": "StaticMeshComponent", "type": "UStaticMeshComponent*",
+                     "owner": "StaticMeshActor", "read": True, "write": False},
+                    {"name": "bHidden", "type": "bool",
+                     "owner": "StaticMeshActor", "read": True, "write": True},
+                ],
+                "functions": [
+                    {"name": "SetMobility", "owner": "StaticMeshActor",
+                     "params": [], "return_type": "void"},
+                ],
             }
+        }
 
-            result = runner.invoke(cli, [
-                "--json", "scene", "info", "/Game/Map.Map:PersistentLevel.Light",
-            ])
-            assert result.exit_code == 0
-            data = json.loads(result.output)
-            assert data["instance_name"] == "Light"
-            mock_inspect.assert_called_once()
+        fake_actor = MagicMock()
+        fake_actor.get_path_name.return_value = "/Game/Maps/L.L:PersistentLevel.Cube_0"
+        fake_actor.get_name.return_value = "Cube_0"
+        fake_actor.get_actor_label.return_value = "Cube_0"
+        fake_actor.__class__ = type("StaticMeshActor", (), {})
 
-    def test_scene_info_cli_with_filter(self):
-        """scene info CLI with --filter option."""
-        from click.testing import CliRunner
-        from cli_anything.unreal.unreal_cli import cli
+        mock_api, _, cleanup = self._setup_instance_discover(
+            bridge_data, actors=[fake_actor],
+        )
+        try:
+            result = api_discover(
+                mock_api,
+                "/Game/Maps/L.L:PersistentLevel.Cube_0",
+                method_filter="mesh",
+                timeout=5,
+            )
+            assert "error" not in result
+            # "mesh" filter should keep StaticMeshComponent but not bHidden
+            assert "StaticMeshComponent" in result["properties"]
+            assert "bHidden" not in result["properties"]
+        finally:
+            cleanup()
 
-        runner = CliRunner()
-        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
-             patch("cli_anything.unreal.core.script_runner.inspect_instance") as mock_inspect:
-            mock_editor.return_value = MagicMock()
-            mock_inspect.return_value = {
-                "instance_name": "Light",
-                "class_name": "DirectionalLight",
-                "properties": {"cast_shadows": "True"},
-                "methods": [],
-                "property_count": 1,
-                "method_count": 0,
+    def test_inspect_instance_asset(self):
+        """api_discover with an asset path should resolve class and return asset context."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        bridge_data = {
+            "MaterialInstanceConstant": {
+                "class": "MaterialInstanceConstant",
+                "properties": [
+                    {"name": "Parent", "type": "UMaterialInterface*",
+                     "owner": "MaterialInstanceConstant", "read": True, "write": False},
+                ],
+                "functions": [],
             }
+        }
 
-            result = runner.invoke(cli, [
-                "--json", "scene", "info", "/Game/Map.Map:PersistentLevel.Light",
-                "--filter", "shadow",
-            ])
-            assert result.exit_code == 0
-            call_kw = mock_inspect.call_args[1]
-            assert call_kw["prop_filter"] == "shadow"
+        fake_asset = MagicMock()
+        fake_asset.__class__ = type("MaterialInstanceConstant", (), {})
+        fake_asset.get_path_name.return_value = "/Game/Materials/MI_Water.MI_Water"
 
-    def test_scene_info_legacy_property_mode(self):
-        """scene info with --property should use legacy C++ describe API."""
-        from click.testing import CliRunner
-        from cli_anything.unreal.unreal_cli import cli
+        mock_api, _, cleanup = self._setup_instance_discover(
+            bridge_data, assets={"/Game/Materials/MI_Water": fake_asset},
+        )
+        try:
+            result = api_discover(
+                mock_api,
+                "/Game/Materials/MI_Water",
+                timeout=5,
+            )
+            assert "error" not in result
+            assert result["class"] == "MaterialInstanceConstant"
+            assert result["asset"] == "/Game/Materials/MI_Water"
+            assert "Parent" in result["properties"]
+        finally:
+            cleanup()
 
-        runner = CliRunner()
-        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
-             patch("cli_anything.unreal.core.scene.describe_actor") as mock_describe:
-            mock_editor.return_value = MagicMock()
-            mock_describe.return_value = {
-                "Name": "CastShadows",
-                "Type": "bool",
-                "Description": "Whether to cast shadows.",
-            }
+    def test_inspect_instance_asset_not_found(self):
+        """api_discover should return error for non-existent asset path."""
+        from cli_anything.unreal.core.script_runner import api_discover
 
-            result = runner.invoke(cli, [
-                "--json", "scene", "info", "/Game/Map.Map:PersistentLevel.Light",
-                "--property", "CastShadows",
-            ])
-            assert result.exit_code == 0
-            mock_describe.assert_called_once()
+        mock_api, _, cleanup = self._setup_instance_discover(
+            {}, assets={},  # no assets
+        )
+        try:
+            result = api_discover(
+                mock_api,
+                "/Game/Materials/DoesNotExist",
+                timeout=5,
+            )
+            assert "error" in result
+            assert "not found" in result["error"].lower()
+        finally:
+            cleanup()
 
-    def test_asset_info_cli_uses_inspect(self):
-        """asset info CLI should use inspect_instance by default."""
-        from click.testing import CliRunner
-        from cli_anything.unreal.unreal_cli import cli
-
-        runner = CliRunner()
-        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
-             patch("cli_anything.unreal.core.script_runner.inspect_instance") as mock_inspect:
-            mock_editor.return_value = MagicMock()
-            mock_inspect.return_value = {
-                "instance_name": "M_Water",
-                "class_name": "Material",
-                "properties": {"two_sided": "False"},
-                "methods": [],
-                "property_count": 1,
-                "method_count": 0,
-            }
-
-            result = runner.invoke(cli, [
-                "--json", "asset", "info", "/Game/M_Water",
-            ])
-            assert result.exit_code == 0
-            data = json.loads(result.output)
-            assert data["instance_name"] == "M_Water"
-            mock_inspect.assert_called_once()
-            call_kw = mock_inspect.call_args[1]
-            assert call_kw["mode"] == "asset"
 
     def test_non_dict_result_wrapped(self):
         """A non-dict ``result`` should be wrapped as {"value": ...}."""
@@ -2747,14 +2923,17 @@ class TestScene:
         from cli_anything.unreal.core.scene import list_actors
 
         api = self._mock_api()
-        api.call_function.return_value = {
-            "ReturnValue": [
-                "/Game/Map.Map:PersistentLevel.StaticMeshActor_0",
-                "/Game/Map.Map:PersistentLevel.PointLight_1",
-            ]
-        }
-
-        result = list_actors(api)
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "actors": [
+                    {"path": "/Game/Map.Map:PersistentLevel.StaticMeshActor_0",
+                     "name": "StaticMeshActor_0", "class": "StaticMeshActor"},
+                    {"path": "/Game/Map.Map:PersistentLevel.PointLight_1",
+                     "name": "PointLight_1", "class": "PointLight"},
+                ],
+                "count": 2,
+            }
+            result = list_actors(api)
         assert result["count"] == 2
         assert result["actors"][0]["name"] == "StaticMeshActor_0"
         assert result["actors"][1]["name"] == "PointLight_1"
@@ -2763,18 +2942,18 @@ class TestScene:
         from cli_anything.unreal.core.scene import list_actors
 
         api = self._mock_api()
-        api.call_function.return_value = {"error": "Not connected"}
-
-        result = list_actors(api)
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"error": "Not connected"}
+            result = list_actors(api)
         assert "error" in result
 
     def test_list_actors_empty(self):
         from cli_anything.unreal.core.scene import list_actors
 
         api = self._mock_api()
-        api.call_function.return_value = {"ReturnValue": []}
-
-        result = list_actors(api)
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"actors": [], "count": 0}
+            result = list_actors(api)
         assert result["count"] == 0
         assert result["actors"] == []
 
@@ -2782,28 +2961,27 @@ class TestScene:
         from cli_anything.unreal.core.scene import list_actors_of_class
 
         api = self._mock_api()
-        api.call_function.return_value = {
-            "ReturnValue": [
-                "/Game/Map.Map:PersistentLevel.PointLight_0",
-                "/Game/Map.Map:PersistentLevel.PointLight_1",
-            ]
-        }
-
-        result = list_actors_of_class(api, "PointLight")
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "actors": [
+                    {"path": "/Game/Map.Map:PersistentLevel.PointLight_0",
+                     "name": "PointLight_0", "class": "PointLight"},
+                    {"path": "/Game/Map.Map:PersistentLevel.PointLight_1",
+                     "name": "PointLight_1", "class": "PointLight"},
+                ],
+                "count": 2,
+            }
+            result = list_actors_of_class(api, "PointLight")
         assert result["count"] == 2
-        api.call_function.assert_called_once_with(
-            "/Script/UnrealEd.Default__EditorActorSubsystem",
-            "GetAllLevelActorsOfClass",
-            {"ActorClass": "/Script/Engine.PointLight"},
-        )
+        mock_run.assert_called_once()
 
     def test_list_actors_of_class_error(self):
         from cli_anything.unreal.core.scene import list_actors_of_class
 
         api = self._mock_api()
-        api.call_function.return_value = {"error": "Invalid class"}
-
-        result = list_actors_of_class(api, "BadClass")
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"error": "Class not found: BadClass"}
+            result = list_actors_of_class(api, "BadClass")
         assert "error" in result
 
     def test_get_actor_property(self):
@@ -2826,70 +3004,58 @@ class TestScene:
         assert result["status"] == "ok"
         api.set_property.assert_called_once_with("/Game/Map:Actor_0", "bHidden", True)
 
-    def test_describe_actor(self):
-        from cli_anything.unreal.core.scene import describe_actor
-
-        api = self._mock_api()
-        api.describe_object.return_value = {
-            "Name": "StaticMeshActor_0",
-            "Class": "StaticMeshActor",
-            "Properties": [{"Name": "bHidden", "Type": "bool"}],
-            "Functions": ["GetActorLocation"],
-        }
-
-        result = describe_actor(api, "/Game/Map:Actor_0")
-        assert result["Name"] == "StaticMeshActor_0"
-        assert len(result["Properties"]) == 1
-
-    def test_find_actor_by_name(self):
         from cli_anything.unreal.core.scene import find_actor_by_name
 
         api = self._mock_api()
-        api.call_function.return_value = {
-            "ReturnValue": [
-                "/Game/Map.Map:PersistentLevel.Cube_0",
-                "/Game/Map.Map:PersistentLevel.CubeRed_1",
-                "/Game/Map.Map:PersistentLevel.Sphere_0",
-            ]
-        }
-
-        result = find_actor_by_name(api, "Cube")
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "actors": [
+                    {"path": "/Game/Map.Map:PersistentLevel.Cube_0",
+                     "name": "Cube_0", "class": "StaticMeshActor"},
+                    {"path": "/Game/Map.Map:PersistentLevel.CubeRed_1",
+                     "name": "CubeRed_1", "class": "StaticMeshActor"},
+                ],
+                "count": 2,
+            }
+            result = find_actor_by_name(api, "Cube")
         assert result["count"] == 2
         assert result["query"] == "Cube"
         names = [a["name"] for a in result["actors"]]
         assert "Cube_0" in names
         assert "CubeRed_1" in names
-        assert "Sphere_0" not in names
 
     def test_find_actor_by_name_no_match(self):
         from cli_anything.unreal.core.scene import find_actor_by_name
 
         api = self._mock_api()
-        api.call_function.return_value = {
-            "ReturnValue": ["/Game/Map.Map:PersistentLevel.Sphere_0"]
-        }
-
-        result = find_actor_by_name(api, "Cube")
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"actors": [], "count": 0}
+            result = find_actor_by_name(api, "Cube")
         assert result["count"] == 0
+        assert result["query"] == "Cube"
 
     def test_find_actor_case_insensitive(self):
         from cli_anything.unreal.core.scene import find_actor_by_name
 
         api = self._mock_api()
-        api.call_function.return_value = {
-            "ReturnValue": ["/Game/Map.Map:PersistentLevel.MyCube_0"]
-        }
-
-        result = find_actor_by_name(api, "mycube")
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "actors": [
+                    {"path": "/Game/Map.Map:PersistentLevel.MyCube_0",
+                     "name": "MyCube_0", "class": "StaticMeshActor"},
+                ],
+                "count": 1,
+            }
+            result = find_actor_by_name(api, "mycube")
         assert result["count"] == 1
 
     def test_find_actor_error(self):
         from cli_anything.unreal.core.scene import find_actor_by_name
 
         api = self._mock_api()
-        api.call_function.return_value = {"error": "No level loaded"}
-
-        result = find_actor_by_name(api, "Cube")
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"error": "No level loaded"}
+            result = find_actor_by_name(api, "Cube")
         assert "error" in result
 
     def test_get_actor_components(self):
@@ -3144,40 +3310,6 @@ class TestAssets:
         assert result["status"] == "ok"
         assert result["renamed"] is True
 
-    def test_asset_describe(self):
-        from cli_anything.unreal.core.assets import describe_asset
-
-        api = self._mock_api()
-        api.does_asset_exist.return_value = True
-        api.exec_python_ex.return_value = {
-            "LogOutput": [{"Output": "LOADED_OBJECT:/Game/M_Test.M_Test"}]
-        }
-        api.describe_object.return_value = {
-            "Name": "M_Test",
-            "Class": "/Script/Engine.Material",
-            "Properties": [{"Name": "BlendMode", "Type": "TEnumAsByte<EBlendMode>"}],
-            "Functions": [{"Name": "GetBlendMode"}]
-        }
-
-        result = describe_asset(api, "/Game/M_Test")
-        assert result["Name"] == "M_Test"
-        assert len(result["Properties"]) == 1
-        assert result["Properties"][0]["Name"] == "BlendMode"
-        
-        # Test property specific
-        result_prop = describe_asset(api, "/Game/M_Test", "BlendMode")
-        assert result_prop["Name"] == "BlendMode"
-
-    def test_asset_describe_not_found(self):
-        from cli_anything.unreal.core.assets import describe_asset
-
-        api = self._mock_api()
-        api.does_asset_exist.return_value = False
-
-        result = describe_asset(api, "/Game/Missing")
-        assert "error" in result
-
-    def test_asset_property_get(self):
         from cli_anything.unreal.core.assets import get_asset_property
 
         api = self._mock_api()
@@ -3321,15 +3453,19 @@ class TestSceneCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor:
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
             mock_api = MagicMock()
-            mock_api.call_function.return_value = {
-                "ReturnValue": [
-                    "/Game/Map:PersistentLevel.Cube_0",
-                    "/Game/Map:PersistentLevel.Light_0",
-                ]
-            }
             mock_editor.return_value = mock_api
+            mock_run.return_value = {
+                "actors": [
+                    {"path": "/Game/Map:PersistentLevel.Cube_0",
+                     "name": "Cube_0", "class": "StaticMeshActor"},
+                    {"path": "/Game/Map:PersistentLevel.Light_0",
+                     "name": "Light_0", "class": "Light"},
+                ],
+                "count": 2,
+            }
 
             result = runner.invoke(cli, ["--json", "scene", "list"])
             assert result.exit_code == 0
@@ -3341,12 +3477,17 @@ class TestSceneCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor:
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
             mock_api = MagicMock()
-            mock_api.call_function.return_value = {
-                "ReturnValue": ["/Game/Map:PersistentLevel.PointLight_0"]
-            }
             mock_editor.return_value = mock_api
+            mock_run.return_value = {
+                "actors": [
+                    {"path": "/Game/Map:PersistentLevel.PointLight_0",
+                     "name": "PointLight_0", "class": "PointLight"},
+                ],
+                "count": 1,
+            }
 
             result = runner.invoke(cli, [
                 "--json", "scene", "list", "--class", "PointLight",
@@ -3360,47 +3501,24 @@ class TestSceneCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor:
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
             mock_api = MagicMock()
-            mock_api.call_function.return_value = {
-                "ReturnValue": [
-                    "/Game/Map:PersistentLevel.MyCube_0",
-                    "/Game/Map:PersistentLevel.Sphere_0",
-                ]
-            }
             mock_editor.return_value = mock_api
+            mock_run.return_value = {
+                "actors": [
+                    {"path": "/Game/Map:PersistentLevel.MyCube_0",
+                     "name": "MyCube_0", "class": "StaticMeshActor"},
+                ],
+                "count": 1,
+                "query": "Cube",
+            }
 
-            result = runner.invoke(cli, ["--json", "scene", "find", "Cube"])
+            result = runner.invoke(cli, ["--json", "scene", "list", "-q", "Cube"])
             assert result.exit_code == 0
             data = json.loads(result.output)
             assert data["count"] == 1
             assert data["query"] == "Cube"
-
-    def test_scene_describe_cli(self):
-        from click.testing import CliRunner
-        from cli_anything.unreal.unreal_cli import cli
-
-        runner = CliRunner()
-        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
-             patch("cli_anything.unreal.core.script_runner.inspect_instance") as mock_inspect:
-            mock_api = MagicMock()
-            mock_editor.return_value = mock_api
-            mock_inspect.return_value = {
-                "instance_name": "Actor_0",
-                "class_name": "StaticMeshActor",
-                "properties": {"b_hidden": "False"},
-                "methods": [],
-                "property_count": 1,
-                "method_count": 0,
-            }
-
-            result = runner.invoke(cli, [
-                "--json", "scene", "info", "/Game/Map:Actor_0",
-            ])
-            assert result.exit_code == 0
-            data = json.loads(result.output)
-            assert data["instance_name"] == "Actor_0"
-            assert "b_hidden" in data["properties"]
 
     def test_scene_property_get_cli(self):
         from click.testing import CliRunner
@@ -3413,7 +3531,7 @@ class TestSceneCLI:
             mock_editor.return_value = mock_api
 
             result = runner.invoke(cli, [
-                "--json", "scene", "get-property",
+                "--json", "scene", "property",
                 "/Game/Map:Actor_0", "bHidden",
             ])
             assert result.exit_code == 0
@@ -3642,7 +3760,7 @@ class TestPluginBridge:
 
         assert result["deployed"] is True
         assert result["action"] == "fresh_install"
-        assert result["version"] == "1.3"
+        assert result["version"] == "1.8"
 
         plugin_dir = tmp_path / "Plugins" / "CliAnythingBridge"
         assert (plugin_dir / "CliAnythingBridge.uplugin").exists()
@@ -3678,7 +3796,7 @@ class TestPluginBridge:
         result = ensure_plugin_deployed(project_dir)
         assert result["deployed"] is True
         assert "updated" in result["action"]
-        assert result["version"] == "1.3"
+        assert result["version"] == "1.8"
 
     def test_is_plugin_loaded_true(self):
         """is_plugin_loaded returns True when probe script succeeds."""
@@ -3706,6 +3824,60 @@ class TestPluginBridge:
         with patch("cli_anything.unreal.core.plugin_bridge.run_python_code") as mock_run:
             mock_run.side_effect = Exception("connection refused")
             assert is_plugin_loaded(mock_api) is False
+
+    def test_get_bundled_version(self):
+        """get_bundled_version returns the bundled plugin version."""
+        from cli_anything.unreal.core.plugin_bridge import get_bundled_version
+
+        version = get_bundled_version()
+        assert version is not None
+        assert version == "1.8"
+
+    def test_get_loaded_plugin_version(self):
+        """get_loaded_plugin_version queries the running editor."""
+        from cli_anything.unreal.core.plugin_bridge import get_loaded_plugin_version
+
+        mock_api = MagicMock()
+        with patch("cli_anything.unreal.core.plugin_bridge.run_python_code") as mock_run:
+            mock_run.return_value = {"version": "1.3"}
+            assert get_loaded_plugin_version(mock_api) == "1.3"
+
+    def test_get_loaded_plugin_version_not_loaded(self):
+        """get_loaded_plugin_version returns None when plugin not loaded."""
+        from cli_anything.unreal.core.plugin_bridge import get_loaded_plugin_version
+
+        mock_api = MagicMock()
+        with patch("cli_anything.unreal.core.plugin_bridge.run_python_code") as mock_run:
+            mock_run.return_value = {"version": None}
+            assert get_loaded_plugin_version(mock_api) is None
+
+    def test_check_plugin_version_match(self):
+        """check_plugin_version returns match=True when versions agree."""
+        from cli_anything.unreal.core.plugin_bridge import check_plugin_version
+
+        mock_api = MagicMock()
+        with patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version") as mock_loaded, \
+             patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed") as mock_deploy:
+            mock_loaded.return_value = "1.8"
+            mock_deploy.return_value = {"deployed": True, "action": "already_up_to_date"}
+            result = check_plugin_version(mock_api, "/tmp/project")
+            assert result["match"] is True
+            assert result["action_needed"] == "none"
+
+    def test_check_plugin_version_mismatch(self):
+        """check_plugin_version detects version mismatch."""
+        from cli_anything.unreal.core.plugin_bridge import check_plugin_version
+
+        mock_api = MagicMock()
+        with patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version") as mock_loaded, \
+             patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed") as mock_deploy:
+            mock_loaded.return_value = "1.3"
+            mock_deploy.return_value = {"deployed": True, "action": "updated_1.3_to_1.8", "version": "1.8"}
+            result = check_plugin_version(mock_api, "/tmp/project")
+            assert result["match"] is False
+            assert result["action_needed"] == "recompile"
+            assert result["loaded_version"] == "1.3"
+            assert result["bundled_version"] == "1.8"
 
 
 # ═══════════════════════════════════════════════════════════════════════

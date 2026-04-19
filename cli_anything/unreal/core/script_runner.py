@@ -241,191 +241,185 @@ def _execute(
 
 # ── API Discovery ────────────────────────────────────────────────────
 
-_API_DISCOVER_TEMPLATE = '''\
-import json as _cli_json, inspect as _cli_inspect, re as _cli_re, unreal as _cli_unreal
+# Shared reflection logic used by both class-name and instance templates.
+# Injected as a function definition at the top of the generated script.
+_DISCOVER_FUNC = '''\
+import json as _cli_json, unreal as _cli_unreal
 
-def _cli_discover(_target_str, _method_filter=None, _max_methods=50):
-    # Resolve target object
-    _parts = _target_str.split(".")
-    if _parts[0] != "unreal":
-        _parts = ["unreal"] + _parts
-    _full_path = ".".join(_parts)
+def _cli_discover_class(_class_name, _method_filter=None, _detail=None):
+    _raw = _cli_unreal.CliAnythingBridgeLibrary.get_class_info(_class_name, True)
+    if not _raw or _raw == "{}":
+        return {"error": "Class not found: " + _class_name}
 
-    _obj = _cli_unreal
-    for _part in _parts[1:]:
-        _obj = getattr(_obj, _part, None)
-        if _obj is None:
-            return {{"error": "Cannot resolve " + _full_path, "target_name": _target_str}}
+    _data = _cli_json.loads(_raw)
 
-    _doc = _cli_inspect.getdoc(_obj) or ""
-    _methods = []
-    _properties = []
-    _sig_re = _cli_re.compile(r"^[\\w.]+\\(([^)]*)\\)\\s*(?:->\\s*(.+))?", _cli_re.MULTILINE)
+    if _detail:
+        _names = [n.strip() for n in _detail.split(",") if n.strip()]
+        _name_set = set(_names)
+        _items = []
+        _found = set()
+        for _p in _data.get("properties", []):
+            if _p["name"] in _name_set:
+                _items.append({"kind": "property", "name": _p["name"], "detail": _p})
+                _found.add(_p["name"])
+        for _f in _data.get("functions", []):
+            if _f["name"] in _name_set:
+                _items.append({"kind": "function", "name": _f["name"], "detail": _f})
+                _found.add(_f["name"])
+        _not_found = [n for n in _names if n not in _found]
+        _out = {"class": _class_name, "items": _items}
+        if _not_found:
+            _out["not_found"] = _not_found
+        return _out
 
-    for _name, _member in _cli_inspect.getmembers(_obj):
-        if _name.startswith("__"):
-            continue
-        if _method_filter and _method_filter.lower() not in _name.lower():
-            continue
+    _funcs = _data.get("functions", [])
+    _props = _data.get("properties", [])
+    if _method_filter:
+        _fl = _method_filter.lower()
+        _funcs = [f for f in _funcs if _fl in f["name"].lower()]
+        _props = [p for p in _props if _fl in p["name"].lower()]
 
-        if _cli_inspect.isbuiltin(_member) or _cli_inspect.ismethoddescriptor(_member) or _cli_inspect.isroutine(_member):
-            _m_doc = _cli_inspect.getdoc(_member) or ""
-            _sig = ""
-            _m = _sig_re.search(_m_doc)
-            if _m:
-                _params = _m.group(1).strip()
-                _ret = _m.group(2).strip() if _m.group(2) else ""
-                _sig = "(" + _params + ")" + (" -> " + _ret if _ret else "")
-            _methods.append({{"name": _name, "signature": _sig, "docstring": _m_doc}})
-        else:
-            _p_doc = _cli_inspect.getdoc(_member) or ""
-            _properties.append({{"name": _name, "type": type(_member).__name__, "docstring": _p_doc}})
-
-    if len(_methods) > _max_methods:
-        _methods = _methods[:_max_methods]
-
-    return {{
-        "target_name": _parts[-1],
-        "full_path": _full_path,
-        "docstring": _doc,
-        "methods": _methods,
-        "properties": _properties,
-        "method_count": len(_methods),
-        "property_count": len(_properties),
-    }}
-
-result = _cli_discover({target!r}, _method_filter={method_filter!r}, _max_methods={max_methods})
+    return {
+        "class": _class_name,
+        "properties": [_p["name"] for _p in _props],
+        "property_count": len(_props),
+        "functions": [_f["name"] for _f in _funcs],
+        "function_count": len(_funcs),
+    }
 '''
+
+_API_DISCOVER_CLASS_CALL = '''\
+_parts = {target!r}.split(".")
+if _parts[0] != "unreal":
+    _parts = ["unreal"] + _parts
+_class_name = _parts[-1]
+
+result = _cli_discover_class(_class_name, _method_filter={method_filter!r}, _detail={detail!r})
+if "error" not in result and "full_path" not in result:
+    result["target_name"] = _class_name
+    result["full_path"] = ".".join(_parts)
+'''
+
+_API_DISCOVER_INSTANCE_CALL = '''\
+{resolve_block}
+
+if _cli_resolve_ok:
+    _discover_result = _cli_discover_class(_resolved_class, _method_filter={method_filter!r}, _detail={detail!r})
+    _discover_result.update(_instance_context)
+    result = _discover_result
+'''
+
+_RESOLVE_ACTOR = '''\
+_cli_resolve_ok = False
+_sub = _cli_unreal.get_editor_subsystem(_cli_unreal.EditorActorSubsystem)
+_target = None
+for _a in _sub.get_all_level_actors():
+    if _a.get_path_name() == {actor_path!r}:
+        _target = _a
+        break
+
+if _target is None:
+    result = {{"error": "Actor not found: " + {actor_path!r}}}
+else:
+    _resolved_class = _target.__class__.__name__
+    _instance_context = {{
+        "actor": _target.get_path_name(),
+        "actor_name": _target.get_name(),
+        "actor_label": _target.get_actor_label(),
+    }}
+    _cli_resolve_ok = True
+'''
+
+_RESOLVE_ASSET = '''\
+_cli_resolve_ok = False
+if not _cli_unreal.EditorAssetLibrary.does_asset_exist({asset_path!r}):
+    result = {{"error": "Asset not found: " + {asset_path!r}}}
+else:
+    _asset = _cli_unreal.EditorAssetLibrary.load_asset({asset_path!r})
+    if _asset is None:
+        result = {{"error": "Failed to load asset: " + {asset_path!r}}}
+    else:
+        _resolved_class = _asset.__class__.__name__
+        _instance_context = {{
+            "asset": {asset_path!r},
+            "object_path": _asset.get_path_name(),
+        }}
+        _cli_resolve_ok = True
+'''
+
 
 def api_discover(
     api: "UEEditorAPI",
     target: str,
+    *,
     method_filter: str | None = None,
-    max_methods: int = 50,
+    detail: str | None = None,
     timeout: float = 30.0,
 ) -> dict:
-    """Discover the API surface of an ``unreal.*`` class or module.
+    """Discover the API surface of a UE class via C++ reflection.
 
-    Generates a Python probe script that uses ``inspect`` to enumerate
-    methods and properties, parses docstrings for signatures, and
-    returns the result as structured JSON.
+    Uses ``CliAnythingBridgeLibrary.get_class_info()`` — the same reflection
+    system the UE Details panel uses.
+
+    **TARGET is auto-detected from the string format:**
+
+    - Starts with ``/Game/`` → asset path, class is auto-resolved.
+    - Contains ``PersistentLevel`` → actor path, class is auto-resolved.
+    - Otherwise → treated as a UE class name (e.g. ``DirectionalLight``).
+
+    Instance modes resolve the class and run reflection in a single HTTP call.
+
+    **Progressive disclosure** (like the Details panel — glance, then hover):
+
+    1. **Overview** (default): Returns property names and function names only.
+    2. **Detail** (``detail="Name1,Name2"``): Returns full info for the
+       specified properties/functions — type, tooltip, category, params, etc.
 
     Parameters
     ----------
     api:
         A connected :class:`UEEditorAPI` instance.
     target:
-        Python class or module name (e.g. ``"unreal.EditorLevelLibrary"``
-        or ``"EditorLevelLibrary"``).
+        UE class name, asset path (``/Game/...``), or actor path
+        (containing ``PersistentLevel``).
     method_filter:
-        Optional case-insensitive substring filter for method names.
-    max_methods:
-        Maximum number of methods to return (default 50).
+        Optional case-insensitive substring filter for property/function names.
+        Only used in overview mode.
+    detail:
+        Comma-separated names of properties/functions to get full detail for.
     timeout:
         Maximum seconds to wait for the HTTP response.
 
     Returns
     -------
     dict
-        API surface information including methods with signatures,
-        properties, and docstrings.
+        Overview mode: ``class``, ``properties`` (list of names),
+        ``functions`` (list of names), ``property_count``, ``function_count``.
+        Detail mode: ``class``, ``items`` (list of ``{kind, name, detail}``).
+        Instance modes also include ``actor``/``asset`` context fields.
     """
-    code = _API_DISCOVER_TEMPLATE.format(
-        target=target,
-        method_filter=method_filter,
-        max_methods=max_methods,
-    )
-    return _execute(api, code, timeout=timeout, save=False)
-
-
-# ── Instance Inspection ─────────────────────────────────────────────
-
-_INSTANCE_INSPECT_TEMPLATE = '''\
-import json as _cli_json, unreal as _cli_unreal
-
-def _cli_inspect_instance(_target_path, _mode="actor", _prop_filter=None):
-    _obj = None
-    if _mode == "actor":
-        _subsystem = _cli_unreal.get_editor_subsystem(_cli_unreal.EditorActorSubsystem)
-        for _a in _subsystem.get_all_level_actors():
-            if _a.get_path_name() == _target_path:
-                _obj = _a
-                break
+    # Auto-detect target type from string format
+    if "PersistentLevel" in target:
+        resolve_block = _RESOLVE_ACTOR.format(actor_path=target)
+        call = _API_DISCOVER_INSTANCE_CALL.format(
+            resolve_block=resolve_block,
+            method_filter=method_filter,
+            detail=detail,
+        )
+    elif target.startswith("/Game/") or target.startswith("/Engine/"):
+        resolve_block = _RESOLVE_ASSET.format(asset_path=target)
+        call = _API_DISCOVER_INSTANCE_CALL.format(
+            resolve_block=resolve_block,
+            method_filter=method_filter,
+            detail=detail,
+        )
     else:
-        _obj = _cli_unreal.EditorAssetLibrary.load_asset(_target_path)
+        call = _API_DISCOVER_CLASS_CALL.format(
+            target=target,
+            method_filter=method_filter,
+            detail=detail,
+        )
 
-    if _obj is None:
-        return {{"error": "Instance not found: " + _target_path}}
-
-    _instance_name = _obj.get_name()
-    _class_name = _obj.__class__.__name__
-    _properties = {{}}
-    _methods = []
-
-    for _attr_name in dir(_obj):
-        if _attr_name.startswith("_"):
-            continue
-        if _prop_filter and _prop_filter.lower() not in _attr_name.lower():
-            continue
-        try:
-            _attr_val = getattr(_obj, _attr_name)
-            if callable(_attr_val):
-                _methods.append(_attr_name)
-            else:
-                _properties[_attr_name] = str(_attr_val)
-        except Exception:
-            continue
-
-    return {{
-        "instance_name": _instance_name,
-        "class_name": _class_name,
-        "properties": _properties,
-        "methods": _methods,
-        "property_count": len(_properties),
-        "method_count": len(_methods),
-    }}
-
-result = _cli_inspect_instance({target_path!r}, _mode={mode!r}, _prop_filter={prop_filter!r})
-'''
-
-def inspect_instance(
-    api: "UEEditorAPI",
-    target_path: str,
-    mode: str = "actor",
-    prop_filter: str | None = None,
-    timeout: float = 30.0,
-) -> dict:
-    """Inspect a UE object instance using Python runtime reflection.
-
-    Returns snake_case property names and current values that are safe
-    to use directly in Python scripts — unlike the C++ ``/remote/object/describe``
-    API which returns PascalCase names that cause ``AttributeError`` in Python.
-
-    Parameters
-    ----------
-    api:
-        A connected :class:`UEEditorAPI` instance.
-    target_path:
-        Object path. For actors, the full path like
-        ``"/Game/Map.Map:PersistentLevel.DirectionalLight_0"``.
-        For assets, a content path like ``"/Game/M_Material"``.
-    mode:
-        ``"actor"`` to search in the current level,
-        ``"asset"`` to load from the content browser.
-    prop_filter:
-        Optional case-insensitive substring filter for property names.
-    timeout:
-        Maximum seconds to wait for the HTTP response.
-
-    Returns
-    -------
-    dict
-        Instance info with ``properties`` (snake_case names → str values)
-        and ``methods`` (snake_case names).
-    """
-    code = _INSTANCE_INSPECT_TEMPLATE.format(
-        target_path=target_path,
-        mode=mode,
-        prop_filter=prop_filter,
-    )
+    code = _DISCOVER_FUNC + call
     return _execute(api, code, timeout=timeout, save=False)
+

@@ -15,61 +15,80 @@ from typing import Optional
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
-def list_actors(api: UEEditorAPI) -> dict:
-    """List all actors in the current level.
+def list_actors(
+    api: UEEditorAPI,
+    actor_class: str | None = None,
+    name_filter: str | None = None,
+) -> dict:
+    """List actors in the current level with optional filtering.
 
-    Uses EditorActorSubsystem.GetAllLevelActors via Remote Control.
+    Uses ``EditorActorSubsystem.get_all_level_actors()`` for unfiltered listing,
+    or ``GameplayStatics.get_all_actors_of_class()`` when a class filter is
+    provided (more efficient — filtering happens engine-side).
 
-    Returns:
-        {"actors": [{"path": str, "name": str}, ...], "count": int}
+    Parameters
+    ----------
+    api:
+        Connected :class:`UEEditorAPI` instance.
+    actor_class:
+        Optional class name to filter by (e.g., ``"StaticMeshActor"``).
+    name_filter:
+        Optional name substring filter (case-insensitive).
+
+    Returns
+    -------
+    dict
+        ``{"actors": [{"path": str, "name": str, "class": str}, ...], "count": int}``
     """
-    result = api.call_function(
-        "/Script/UnrealEd.Default__EditorActorSubsystem",
-        "GetAllLevelActors",
-    )
+    from cli_anything.unreal.core.script_runner import run_python_code
 
-    if "error" in result:
-        return result
+    class_repr = repr(actor_class) if actor_class else "None"
+    name_repr = repr(name_filter) if name_filter else "None"
 
-    actor_paths = result.get("ReturnValue", [])
+    script = f'''\
+import unreal as _u
 
-    actors = []
-    for path in actor_paths:
-        # Path looks like: /Game/Map.Map:PersistentLevel.StaticMeshActor_0
-        name = path.rsplit(".", 1)[-1] if "." in path else path
-        actors.append({
-            "path": path,
-            "name": name,
-        })
+_actor_class = {class_repr}
+_name_filter = {name_repr}
 
-    return {"actors": actors, "count": len(actors)}
+if _actor_class:
+    _cls = getattr(_u, _actor_class, None)
+    if _cls is None:
+        result = {{"error": "Class not found: " + _actor_class}}
+    else:
+        _world = _u.EditorLevelLibrary.get_editor_world()
+        _raw = _u.GameplayStatics.get_all_actors_of_class(_world, _cls)
+        _actors = []
+        for _a in _raw:
+            _name = _a.get_name()
+            if _name_filter and _name_filter.lower() not in _name.lower():
+                continue
+            _actors.append({{
+                "path": _a.get_path_name(),
+                "name": _name,
+                "class": _a.__class__.__name__,
+            }})
+        result = {{"actors": _actors, "count": len(_actors)}}
+else:
+    _sub = _u.get_editor_subsystem(_u.EditorActorSubsystem)
+    _actors = []
+    for _a in _sub.get_all_level_actors():
+        _name = _a.get_name()
+        if _name_filter and _name_filter.lower() not in _name.lower():
+            continue
+        _actors.append({{
+            "path": _a.get_path_name(),
+            "name": _name,
+            "class": _a.__class__.__name__,
+        }})
+    result = {{"actors": _actors, "count": len(_actors)}}
+'''
+    return run_python_code(api, script)
 
 
 def list_actors_of_class(api: UEEditorAPI, actor_class: str) -> dict:
-    """List actors of a specific class in the current level.
-
-    Args:
-        actor_class: Actor class name (e.g., "StaticMeshActor", "PointLight").
-
-    Returns:
-        {"actors": [...]}
-    """
-    result = api.call_function(
-        "/Script/UnrealEd.Default__EditorActorSubsystem",
-        "GetAllLevelActorsOfClass",
-        {"ActorClass": f"/Script/Engine.{actor_class}"},
-    )
-
-    if "error" in result:
-        return result
-
-    actor_paths = result.get("ReturnValue", [])
-    actors = []
-    for path in actor_paths:
-        name = path.rsplit(".", 1)[-1] if "." in path else path
-        actors.append({"path": path, "name": name})
-
-    return {"actors": actors, "count": len(actors)}
+    """List actors of a specific class. Wrapper for backwards compat."""
+    return list_actors(api, actor_class=actor_class)
 
 
 def get_actor_property(api: UEEditorAPI, actor_path: str, property_name: str) -> dict:
@@ -102,76 +121,16 @@ def set_actor_property(api: UEEditorAPI, actor_path: str,
     return api.set_property(actor_path, property_name, value)
 
 
-def describe_actor(api: UEEditorAPI, actor_path: str, property_name: str | None = None) -> dict:
-    """Describe an actor — list all its properties and functions.
-
-    Args:
-        api: Connected UEEditorAPI instance.
-        actor_path: Full object path.
-        property_name: If provided, returns the full metadata for this specific property/function.
-                       If None, returns a lightweight list of all properties (names and types only).
-
-    Returns:
-        {"Name": str, "Class": str, "Properties": [...], "Functions": [...]} or full metadata dict for a property.
-    """
-    raw_data = api.describe_object(actor_path)
-    if "error" in raw_data:
-        return raw_data
-
-    if property_name:
-        # Search for the specific property or function to get its full metadata
-        for prop in raw_data.get("Properties", []):
-            if isinstance(prop, dict) and prop.get("Name") == property_name:
-                return prop
-            elif prop == property_name:
-                return {"Name": prop}
-        for func in raw_data.get("Functions", []):
-            if isinstance(func, dict) and func.get("Name") == property_name:
-                return func
-            elif func == property_name:
-                return {"Name": func}
-        return {"error": f"Property or function '{property_name}' not found on actor '{actor_path}'."}
-
-    # Lightweight mode: strip out bulky metadata, ToolTips, and Descriptions
-    props = [
-        {"Name": p.get("Name"), "Type": p.get("Type")} if isinstance(p, dict) else {"Name": str(p)}
-        for p in raw_data.get("Properties", [])
-    ]
-    funcs = [
-        {"Name": f.get("Name")} if isinstance(f, dict) else {"Name": str(f)}
-        for f in raw_data.get("Functions", [])
-    ]
-    
-    return {
-        "Name": raw_data.get("Name"),
-        "Class": raw_data.get("Class"),
-        "Properties": props,
-        "Functions": funcs,
-        "hint": f"Output is summarized. To see full metadata/tooltips for a specific property, use: scene describe \"{actor_path}\" --property <Name>"
-    }
-
-
 def find_actor_by_name(api: UEEditorAPI, name: str) -> dict:
     """Find an actor by display name (substring match).
 
-    Args:
-        api: Connected UEEditorAPI instance.
-        name: Actor name or substring to search for.
-
-    Returns:
-        {"actors": [...]} matching actors.
+    Equivalent to ``list_actors(name_filter=name)``. Kept for backwards
+    compatibility — prefer ``scene list -q`` in new code.
     """
-    all_actors = list_actors(api)
-    if "error" in all_actors:
-        return all_actors
-
-    name_lower = name.lower()
-    matches = [
-        a for a in all_actors["actors"]
-        if name_lower in a["name"].lower()
-    ]
-
-    return {"actors": matches, "count": len(matches), "query": name}
+    result = list_actors(api, name_filter=name)
+    if "error" not in result:
+        result["query"] = name
+    return result
 
 
 def get_actor_components(api: UEEditorAPI, actor_path: str) -> dict:
@@ -186,14 +145,14 @@ def get_actor_components(api: UEEditorAPI, actor_path: str) -> dict:
     Returns:
         {"components": [...]}
     """
-    desc = describe_actor(api, actor_path)
-    if "error" in desc:
-        return desc
+    raw_data = api.describe_object(actor_path)
+    if "error" in raw_data:
+        return raw_data
 
     # Find component-type properties
     components = []
-    for prop in desc.get("Properties", []):
-        prop_type = prop.get("Type", "")
+    for prop in raw_data.get("Properties", []):
+        prop_type = prop.get("Type", "") if isinstance(prop, dict) else ""
         if "Component" in prop_type:
             components.append({
                 "name": prop.get("Name", ""),
@@ -318,3 +277,64 @@ else:
                 return {"error": f"Failed to parse transform data: {e}", "raw": line}
 
     return {"error": "Failed to get transform. Actor might not exist or script failed."}
+
+_LEVEL_EDITOR_SUBSYSTEM = "/Script/LevelEditor.Default__LevelEditorSubsystem"
+
+
+def new_level(api, path: str, template: str | None = None) -> dict:
+    """Create and open a new level via Remote Control.
+
+    Uses ``LevelEditorSubsystem.NewLevel`` via ``call_function`` on the
+    game thread.
+
+    **Known limitation:** If Python scripts that reference world objects
+    (scene list, api-discover with actor paths, run-script with actors, etc.)
+    were executed in this session, PythonScriptPlugin retains C++ references
+    that prevent the old world from being GC'd, causing a ``World Memory
+    Leaks`` assert crash in ``-unattended`` mode.  Workaround: relaunch
+    the editor with ``editor launch`` before creating a new level.
+    """
+    # Pre-check: if level asset already exists, refuse (avoids modal dialog)
+    if api.does_asset_exist(path):
+        return {
+            "error": f"Level already exists: {path}",
+            "hint": "Use a different path, or delete the existing level first with: asset delete " + path,
+        }
+
+    if template:
+        result = api.call_function(
+            _LEVEL_EDITOR_SUBSYSTEM,
+            "NewLevelFromTemplate",
+            {"AssetPath": path, "TemplateAssetPath": template},
+        )
+    else:
+        result = api.call_function(
+            _LEVEL_EDITOR_SUBSYSTEM,
+            "NewLevel",
+            {"AssetPath": path},
+        )
+
+    if "error" in result:
+        return result
+
+    success = result.get("ReturnValue", False)
+    return {"status": "ok" if success else "failed", "success": success, "path": path}
+
+
+def save_level(api) -> dict:
+    """Save the current level via Remote Control call_function.
+
+    Uses ``LevelEditorSubsystem.SaveCurrentLevel`` on the game thread.
+    Save does not cause world teardown, so direct call_function is safe.
+    """
+    result = api.call_function(
+        _LEVEL_EDITOR_SUBSYSTEM,
+        "SaveCurrentLevel",
+        {},
+    )
+
+    if "error" in result:
+        return result
+
+    success = result.get("ReturnValue", False)
+    return {"status": "ok" if success else "failed", "success": success}

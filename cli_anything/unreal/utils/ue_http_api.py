@@ -155,16 +155,29 @@ class UEEditorAPI:
             kwargs["timeout"] = timeout
         return self._put("/remote/object/call", data, **kwargs)
 
-    def get_property(self, object_path: str, property_name: str) -> dict:
+    def get_property(self, object_path: str, property_name: str,
+                     skip_private: bool = True) -> dict:
         """Get a property value on a UObject.
 
         Args:
             object_path: UObject path.
             property_name: Property name.
+            skip_private: If True, first check via describe whether the property
+                is accessible. Private properties (without AllowPrivateAccess)
+                will trigger "Property is not readable" errors in the UE editor
+                log if accessed directly. Default True to avoid log spam.
 
         Returns:
-            Property value dict.
+            Property value dict, or {"error": "..."} if inaccessible.
         """
+        if skip_private:
+            # Check if the property is listed by describe (private props are excluded)
+            desc = self.describe_object(object_path)
+            if "error" not in desc and "errorMessage" not in desc:
+                visible_props = {p.get("Name", "") for p in desc.get("Properties", [])}
+                if property_name not in visible_props:
+                    return {"error": f"Property '{property_name}' is not accessible via Remote Control (likely private)."}
+
         data = {
             "objectPath": object_path,
             "propertyName": property_name,

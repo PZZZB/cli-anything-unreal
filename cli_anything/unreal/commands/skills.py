@@ -10,12 +10,9 @@ from cli_anything.unreal.commands import AppState, handle_error, output
 
 # Skill installation targets (extracted from inline list for maintainability)
 SKILL_TARGETS = {
-    "cursor_local":  lambda: Path.cwd() / ".cursor" / "skills" / "cli-anything-unreal",
-    "claude_local":  lambda: Path.cwd() / ".claude" / "skills" / "cli-anything-unreal",
-    "codebuddy_local": lambda: Path.cwd() / ".codebuddy" / "agents" / "cli-anything-unreal",
-    "gemini_local":  lambda: Path.cwd() / ".gemini" / "skills" / "cli-anything-unreal",
-    "cursor_global": lambda: Path.home() / ".cursor" / "skills" / "cli-anything-unreal",
+    "claude_global": lambda: Path.home() / ".claude" / "skills" / "cli-anything-unreal",
     "codebuddy_global": lambda: Path.home() / ".codebuddy" / "agents" / "cli-anything-unreal",
+    "gemini_global": lambda: Path.home() / ".gemini" / "skills" / "cli-anything-unreal",
 }
 
 

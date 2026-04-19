@@ -1,4 +1,4 @@
-"""plugin_bridge.py — Auto-deploy and detect the CliAnythingBridge UE plugin.
+"""plugin_bridge.py — Auto-deploy, detect, and upgrade the CliAnythingBridge UE plugin.
 
 The bridge exposes C++ APIs that Unreal Python/Blueprint cannot call directly
 (e.g. ``FMaterialResource::GetCompileErrors()``). Screenshots are handled in
@@ -27,6 +27,12 @@ def _read_uplugin_version(uplugin_path: Path) -> str | None:
         return data.get("VersionName")
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def get_bundled_version() -> str | None:
+    """Get the version of the plugin bundled with this CLI package."""
+    bundled_uplugin = _BUNDLED_PLUGIN_DIR / f"{_PLUGIN_NAME}.uplugin"
+    return _read_uplugin_version(bundled_uplugin)
 
 
 def ensure_plugin_deployed(project_dir: str) -> dict:
@@ -97,3 +103,79 @@ def is_plugin_loaded(api) -> bool:
         return result.get("loaded", False)
     except Exception:
         return False
+
+
+def get_loaded_plugin_version(api) -> str | None:
+    """Get the version of the plugin currently loaded in the running editor.
+
+    Queries UCliAnythingBridgeLibrary::GetPluginVersion() via Python.
+    Returns the version string (e.g. "1.5") or None if the plugin is not loaded.
+    """
+    script = (
+        "import unreal\n"
+        "try:\n"
+        "    ver = unreal.CliAnythingBridgeLibrary.get_plugin_version()\n"
+        "    result = {'version': ver}\n"
+        "except AttributeError:\n"
+        "    result = {'version': None}\n"
+    )
+
+    try:
+        result = run_python_code(api, script, timeout=10.0, save=False)
+        return result.get("version")
+    except Exception:
+        return None
+
+
+def check_plugin_version(api, project_dir: str) -> dict:
+    """Check whether the running plugin matches the bundled version.
+
+    Returns:
+        {
+            "match": bool,
+            "bundled_version": str,
+            "loaded_version": str | None,
+            "plugin_loaded": bool,
+            "action_needed": "none" | "deploy_and_recompile" | "recompile",
+        }
+    """
+    bundled_ver = get_bundled_version()
+    loaded_ver = get_loaded_plugin_version(api)
+    plugin_loaded = loaded_ver is not None
+
+    if not plugin_loaded:
+        # Plugin not loaded — check if source is deployed
+        deploy = ensure_plugin_deployed(project_dir)
+        if deploy.get("action") == "already_up_to_date":
+            # Source is deployed but DLL not compiled/loaded
+            action = "recompile"
+        else:
+            # Source was just deployed or needs deployment
+            action = "deploy_and_recompile"
+        return {
+            "match": False,
+            "bundled_version": bundled_ver,
+            "loaded_version": None,
+            "plugin_loaded": False,
+            "action_needed": action,
+        }
+
+    if loaded_ver == bundled_ver:
+        return {
+            "match": True,
+            "bundled_version": bundled_ver,
+            "loaded_version": loaded_ver,
+            "plugin_loaded": True,
+            "action_needed": "none",
+        }
+
+    # Version mismatch: loaded is older than bundled
+    # Need to deploy new source, recompile, and restart
+    ensure_plugin_deployed(project_dir)
+    return {
+        "match": False,
+        "bundled_version": bundled_ver,
+        "loaded_version": loaded_ver,
+        "plugin_loaded": True,
+        "action_needed": "recompile",
+    }

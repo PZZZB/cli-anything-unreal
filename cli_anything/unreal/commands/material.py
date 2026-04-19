@@ -1,8 +1,50 @@
 """commands/material.py — Material viewing, editing & analysis commands."""
 
+import re
+
 import click
 
 from cli_anything.unreal.commands import AppState, handle_error, output, require_editor, require_project
+
+
+def _validate_custom_code(code: str) -> list[str]:
+    """Validate HLSL code for UE5 Custom node and return warning messages."""
+    warnings = []
+
+    # Detect #define macros — UE substitutes input param names inside macros
+    define_matches = re.findall(r'#define\s+\w+\([^)]*\)', code)
+    if define_matches:
+        warnings.append(
+            f"#define macros with parameters detected ({len(define_matches)} found). "
+            "UE5 Custom node substitutes input param names by text, which breaks macros. "
+            "Use inline code instead of macros."
+        )
+
+    # Detect GCC statement expressions ({ ... })
+    if re.search(r'\(\s*\{', code):
+        warnings.append(
+            "GCC statement expressions ({ ... }) detected. "
+            "These are NOT valid HLSL. Use inline statements only."
+        )
+
+    # Detect function definitions inside code
+    func_matches = re.findall(r'\b(?:float|void|int|bool|float[234]|int[234])\s+\w+\s*\(', code)
+    # Filter out UE built-in intrinsics and common HLSL functions
+    intrinsics = {'lerp', 'clamp', 'saturate', 'frac', 'sin', 'cos', 'tan', 'atan',
+                  'atan2', 'pow', 'sqrt', 'abs', 'min', 'max', 'dot', 'cross', 'normalize',
+                  'length', 'distance', 'reflect', 'refract', 'mul', 'transpose', 'determinant',
+                  'tex2D', 'tex2Dlod', 'tex2Dgrad', 'Sample', 'SampleLevel', 'Load', 'Gather'}
+    user_funcs = [f for f in func_matches
+                  if not any(f.startswith(t) for t in [f'{i}(' for i in intrinsics])]
+    if user_funcs:
+        warnings.append(
+            f"Function definitions detected ({len(user_funcs)} found). "
+            "UE5 Custom node code is already inside a function body — "
+            "nested function definitions are not allowed in HLSL. "
+            "Inline all logic as sequential statements."
+        )
+
+    return warnings
 
 
 @click.group("material")
@@ -76,35 +118,31 @@ def material_textures(state: AppState, material_path):
     output(result, state)
 
 
-@material_group.command("get-connections")
+@material_group.command("get-graph")
 @click.argument("material_path")
 @handle_error
 @click.pass_obj
-def material_connections(state: AppState, material_path):
-    """Show material node connection graph.
+def material_graph(state: AppState, material_path):
+    """Show material node topology as a Mermaid graph.
 
-    Lists which node feeds each material output pin (BaseColor, Normal,
-    WorldPositionOffset, etc.) and identifies orphan nodes not connected
-    to any output.  Custom nodes include HLSL code previews.
+    Produces a visually readable graph mapping which node feeds each
+    material output pin (BaseColor, Normal, WorldPositionOffset, etc.)
+    and standard internal node connections.
 
-    Example: material get-connections /Game/M_Water
+    Example: material get-graph /Game/M_Water
     """
     from cli_anything.unreal.core.materials import get_material_connections
+    from cli_anything.unreal.utils.mermaid import format_material_connections_mermaid
 
     api = require_editor(state)
     result = get_material_connections(api, material_path, state.session.project_dir)
 
     if not state.json_output and "error" not in result:
-        state.skin.section(f"Connections: {material_path}")
-
-        mat_outputs = result.get("material_outputs", {})
-        if mat_outputs:
-            state.skin.info("Material Output Pins:")
-            for pin, src in mat_outputs.items():
-                if isinstance(src, dict):
-                    state.skin.status(f"  {pin}", f"{src['node']} ({src['node_type']})")
-        else:
-            state.skin.warning("No material output connections found")
+        state.skin.section(f"Connections Graph: {material_path}")
+        
+        # Add the graph to the skin output
+        graph_text = format_material_connections_mermaid(result)
+        click.echo(graph_text)
 
         orphans = result.get("orphan_nodes", [])
         if orphans:
@@ -169,6 +207,8 @@ def material_analyze(state: AppState, material_path):
 
 @material_group.command("dump-hlsl")
 @click.argument("material_path")
+@click.option("--output", "output_path", required=True,
+              help="File path to write the HLSL code to. Required because output is massive.")
 @click.option("--platform", default="sm6",
               help="Shader platform: sm6 (default), sm5, vulkan, vulkan_es31, opengl_es31, metal")
 @click.option("--shader-type", default="pixel",
@@ -177,7 +217,7 @@ def material_analyze(state: AppState, material_path):
 @click.option("--full", is_flag=True, help="Return full .usf file (not just material code)")
 @handle_error
 @click.pass_obj
-def material_hlsl(state: AppState, material_path, platform, shader_type, full):
+def material_hlsl(state: AppState, material_path, output_path, platform, shader_type, full):
     """Get compiled HLSL/USF shader code for a material.
 
     Triggers shader recompile with debug dump, reads the generated code.
@@ -186,6 +226,7 @@ def material_hlsl(state: AppState, material_path, platform, shader_type, full):
     Platforms: sm6 (DirectX SM6), sm5 (DirectX SM5), vulkan, opengl_es31, metal
     """
     from cli_anything.unreal.core.materials import get_material_hlsl
+    import os
 
     api = require_editor(state)
     require_project(state)
@@ -201,27 +242,41 @@ def material_hlsl(state: AppState, material_path, platform, shader_type, full):
         shader_type=shader_type,
     )
 
+    if "error" not in result:
+        try:
+            out_path = os.path.abspath(output_path)
+            with open(out_path, "w", encoding="utf-8") as f:
+                if full and result.get("shaders"):
+                    first = result["shaders"][0]
+                    f.write(f"// Full shader: {first.get('pass', 'Unknown')}\n\n")
+                    f.write(first.get("code", "No code"))
+                else:
+                    mat_code = result.get("material_code", "")
+                    if mat_code:
+                        f.write(mat_code)
+                    elif result.get("shaders"):
+                        first = result["shaders"][0]
+                        f.write(first.get("code", "No code"))
+            
+            result["file"] = out_path
+            if "material_code" in result:
+                result["lines"] = len(result["material_code"].splitlines())
+                del result["material_code"]
+            if "shaders" in result:
+                for shader in result["shaders"]:
+                    if "code" in shader:
+                        del shader["code"]
+
+        except Exception as e:
+            result["error"] = f"Failed to write output file: {e}"
+
     if not state.json_output and "error" not in result:
         state.skin.success(f"Got {result.get('shader_count', 0)} shaders")
         state.skin.status("Platform", result.get("platform", ""))
         state.skin.status("Available", ", ".join(result.get("available_platforms", [])))
+        state.skin.success(f"Wrote HLSL to {result.get('file')}")
 
-        mat_code = result.get("material_code", "")
-        if mat_code:
-            state.skin.section("Material Code (CalcPixelMaterialInputs)")
-            print(mat_code)
-        elif full and result.get("shaders"):
-            first = result["shaders"][0]
-            state.skin.section(f"Full shader: {first['pass']}")
-            print(first.get("code", "No code"))
-
-    if state.json_output:
-        # For JSON output, don't include full code by default (too large for token)
-        if not full:
-            for s in result.get("shaders", []):
-                s.pop("code", None)
-        output(result, state)
-    elif "error" in result:
+    if state.json_output or "error" in result:
         output(result, state)
 
 
@@ -231,20 +286,73 @@ def material_hlsl(state: AppState, material_path, platform, shader_type, full):
               help="UE expression class (e.g., MaterialExpressionConstant3Vector)")
 @click.option("--pos-x", default=0, type=int, help="Node X position in graph")
 @click.option("--pos-y", default=0, type=int, help="Node Y position in graph")
+@click.option("--set", "set_props", multiple=True, metavar="KEY=VALUE",
+              help="Set a property on the node (e.g., --set code='return 1' --set output_type=CMOT_Float4)")
+@click.option("--add-input", "add_inputs", multiple=True, metavar="NAME",
+              help="Add an input to a Custom node (e.g., --add-input UV --add-input Time)")
+@click.option("--code-file", "code_file", default=None,
+              help="Read HLSL code from a file and set as 'code' property (for Custom nodes). "
+                   "Much easier than --set code='...' for multi-line shaders.")
 @handle_error
 @click.pass_obj
-def material_add_node(state: AppState, material_path, expression_class, pos_x, pos_y):
+def material_add_node(state: AppState, material_path, expression_class, pos_x, pos_y,
+                      set_props, add_inputs, code_file):
     """Add a new material expression node.
 
     Requires MaterialEditingLibrary (Python Editor Scripting plugin).
 
-    Example: material add-node /Game/M_Test --type MaterialExpressionConstant3Vector
+    Use --set KEY=VALUE to set properties on the node after creation.
+    Use --add-input NAME to add inputs to Custom nodes.
+    Use --code-file PATH to read HLSL code from a file (for Custom nodes,
+    much easier than --set code='...' for multi-line shaders).
+
+    Example: material add-node /Game/M_Test --type MaterialExpressionCustom \
+      --code-file F:/shaders/blackhole.hlsl --set output_type=CMOT_Float4 \
+      --add-input UV --add-input Time
     """
+    import os
+
     from cli_anything.unreal.core.materials import add_material_node
+
+    # Parse --set KEY=VALUE pairs
+    parsed_props = []
+    for kv in set_props:
+        if '=' not in kv:
+            click.echo(f"Error: --set requires KEY=VALUE format, got: {kv}", err=True)
+            return
+        key, _, value = kv.partition('=')
+        parsed_props.append((key.strip(), value.strip()))
+
+    # Read --code-file and inject as code property
+    if code_file:
+        if expression_class != "MaterialExpressionCustom":
+            click.echo("Error: --code-file is only for MaterialExpressionCustom nodes", err=True)
+            return
+        abs_path = os.path.abspath(code_file)
+        if not os.path.isfile(abs_path):
+            click.echo(f"Error: code file not found: {abs_path}", err=True)
+            return
+        with open(abs_path, "r", encoding="utf-8") as f:
+            code_content = f.read()
+        # Remove any existing code= from --set to avoid conflict
+        parsed_props = [(k, v) for k, v in parsed_props if k != "code"]
+        parsed_props.append(("code", code_content))
+
+    # Custom node code validation
+    if expression_class == "MaterialExpressionCustom":
+        for key, value in parsed_props:
+            if key == "code":
+                warnings = _validate_custom_code(value)
+                if warnings:
+                    click.echo("⚠ Custom node code validation warnings:", err=True)
+                    for w in warnings:
+                        click.echo(f"  • {w}", err=True)
 
     api = require_editor(state)
     result = add_material_node(api, material_path, expression_class,
                                pos_x=pos_x, pos_y=pos_y,
+                               set_props=parsed_props,
+                               add_input_names=list(add_inputs),
                                project_dir=state.session.project_dir)
     output(result, state)
 
@@ -376,4 +484,75 @@ def material_recompile(state: AppState, material_path):
     api = require_editor(state)
     result = recompile_material(api, material_path,
                                 project_dir=state.session.project_dir)
+    output(result, state)
+
+
+@material_group.command("hlsl-code")
+@click.argument("material_path")
+@handle_error
+@click.pass_obj
+def material_hlsl_code(state: AppState, material_path):
+    """Get material HLSL expression source code (Material.ush).
+
+    Returns the translated HLSL from FMaterialResource::GetMaterialExpressionSource().
+    Contains FMaterialPixelParameters struct and all Custom node code.
+    Does NOT contain cbuffer View or Primitive definitions (use shader-source for that).
+
+    Output: <project>/Saved/CliAnything/<MaterialName>.ush
+
+    Example: material hlsl-code /Game/M_Test
+    """
+    from cli_anything.unreal.core.materials import get_material_hlsl_code
+
+    api = require_editor(state)
+    require_project(state)
+
+    result = get_material_hlsl_code(api, material_path,
+                                     project_dir=state.session.project_dir)
+
+    if not state.json_output and "error" not in result:
+        state.skin.success(f"HLSL code: {result.get('lines', '?')} lines")
+        state.skin.status("File", result.get("file", ""))
+
+    output(result, state)
+
+
+@material_group.command("shader-source")
+@click.argument("material_path")
+@handle_error
+@click.pass_obj
+def material_shader_source(state: AppState, material_path):
+    """Get compiled shader source code (.usf files) for a material.
+
+    Forces a synchronous recompile with source extraction enabled, then writes
+    each compiled shader variant (BasePassPS, BasePassVS, LumenCardPS, etc.)
+    as a .usf file. These files contain the complete preprocessed shader
+    including cbuffer View, FPrimitiveConstants, FMaterialPixelParameters.
+
+    Use this to discover what HLSL resources are available when writing
+    Custom node code for this material's configuration.
+
+    Output: <project>/Saved/CliAnything/<MaterialName>_shaders/
+
+    Example: material shader-source /Game/M_Test
+    """
+    from cli_anything.unreal.core.materials import get_material_shader_source
+
+    api = require_editor(state)
+    require_project(state)
+
+    if not state.json_output:
+        state.skin.info(f"Compiling shaders for {material_path}...")
+        state.skin.hint("This triggers a synchronous recompile, may take a moment...")
+
+    result = get_material_shader_source(api, material_path,
+                                         project_dir=state.session.project_dir)
+
+    if not state.json_output and "error" not in result:
+        shaders = result.get("shaders", [])
+        state.skin.success(f"Got {result.get('shader_count', 0)} shaders")
+        state.skin.status("Output dir", result.get("output_dir", ""))
+        for s in shaders:
+            state.skin.hint(f"  {s.get('name', '?')} ({s.get('lines', '?')} lines)")
+
     output(result, state)

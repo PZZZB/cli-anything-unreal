@@ -17,6 +17,15 @@ build/
 .DS_Store
 Thumbs.db
 
-# Ad-hoc probe/test scripts (not part of the package)
-/_*.py
-/_*.txt
+# Ad-hoc scripts and test artifacts at root (not part of the package)
+/test_*.py
+/test_*.hlsl
+/test_*.txt
+/test_*.json
+/fix_*.py
+/get_*.py
+/agent_prompt*.txt
+
+# Experiment artifacts in scripts/
+scripts/round*_*
+scripts/run_round*.js
