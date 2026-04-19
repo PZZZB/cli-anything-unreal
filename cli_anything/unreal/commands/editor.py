@@ -76,6 +76,16 @@ def editor_status(state: AppState, port):
                         result["dialogs"] = [
                             {"title": d["title"]} for d in dialogs
                         ]
+
+                    project_dir = getattr(state.session, "project_dir", None)
+                    project_name = getattr(state.session, "project_name", None)
+                    log_error = None
+                    if project_dir and project_name:
+                        log_file = Path(project_dir) / "Saved" / "Logs" / f"{project_name}.log"
+                        log_error = _check_log_errors(log_file)
+                        if log_error:
+                            result["log_error"] = log_error
+
                     if not state.json_output:
                         state.skin.warning(
                             f"Editor process running but API not responding on port {check_port}"
@@ -84,6 +94,9 @@ def editor_status(state: AppState, port):
                             state.skin.warning("Modal dialog(s) detected:")
                             for d in dialogs:
                                 state.skin.warning(f'  "{d["title"]}"')
+                        if log_error:
+                            state.skin.warning("Recent startup error from log:")
+                            state.skin.warning(f"  {log_error[:500]}")
                         state.skin.hint("Editor may be blocked by a dialog. Check the editor window.")
                 else:
                     if not state.json_output:
@@ -94,6 +107,30 @@ def editor_status(state: AppState, port):
         else:
             if not state.json_output:
                 state.skin.error(f"Editor not reachable on port {check_port}")
+
+    # Always attach startup precheck when project context is available.
+    # This helps diagnose startup blockers even if the editor was launched externally.
+    if getattr(state.session, "project_path", None):
+        try:
+            from cli_anything.unreal.utils.ue_backend import preflight_check
+
+            preflight = preflight_check(state.session.project_path, state.session.engine_root)
+            precheck_errors = preflight.get("engine", {}).get("errors", []) + preflight.get("project", {}).get("errors", [])
+            precheck_warnings = preflight.get("engine", {}).get("warnings", []) + preflight.get("project", {}).get("warnings", [])
+
+            result["startup_precheck"] = {
+                "ready": preflight.get("ready", False),
+                "errors": precheck_errors,
+                "warnings": precheck_warnings,
+            }
+
+            if not preflight.get("ready", False) and not state.json_output:
+                state.skin.warning("Startup precheck found blockers:")
+                for e in precheck_errors:
+                    state.skin.warning(f"  {e}")
+                state.skin.hint("Fix precheck blockers before retrying startup.")
+        except Exception:
+            pass
 
     output(result, state)
 
@@ -223,37 +260,49 @@ def _determine_poll_port(session, state) -> int:
         return rc_port if rc_port is not None else session.port
 
 
-def _run_preflight(session, state) -> dict | None:
-    """Run preflight check. Returns result dict if check failed (caller should return), None if OK."""
+def _summarize_startup_precheck(check: dict) -> dict:
+    """Build a compact startup-precheck summary for command outputs."""
+    errors = check.get("engine", {}).get("errors", []) + check.get("project", {}).get("errors", [])
+    warnings = check.get("engine", {}).get("warnings", []) + check.get("project", {}).get("warnings", [])
+    return {
+        "ready": check.get("ready", False),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def _run_preflight(session, state) -> dict:
+    """Run preflight check and return the full check result."""
     from cli_anything.unreal.utils.ue_backend import preflight_check
 
     if not state.json_output:
         state.skin.info("Running preflight check...")
 
     check = preflight_check(session.project_path, session.engine_root)
+    precheck_summary = _summarize_startup_precheck(check)
 
     if not check["ready"]:
-        all_errors = check["engine"]["errors"] + check["project"]["errors"]
+        all_errors = precheck_summary["errors"]
         if state.json_output:
             output({
                 "status": "preflight_failed",
                 "errors": all_errors,
                 "preflight": check,
+                "startup_precheck": precheck_summary,
             }, state)
         else:
             state.skin.error("Preflight check FAILED — cannot launch editor")
             for e in all_errors:
                 state.skin.error(f"  {e}")
-            for w in check["engine"].get("warnings", []) + check["project"].get("warnings", []):
+            for w in precheck_summary["warnings"]:
                 state.skin.warning(f"  {w}")
             state.skin.hint("Fix the errors above, then try again.")
             state.skin.hint(f"To compile: cli-anything-unreal --project {session.project_path} build compile")
-        return check
 
-    if not state.json_output:
+    if check["ready"] and not state.json_output:
         state.skin.success("Preflight OK")
 
-    return None
+    return check
 
 
 def _check_already_running(session, state) -> dict | None:
@@ -358,30 +407,61 @@ def _build_launch_cmd(editor_exe, project_path, map_path) -> list:
     return cmd
 
 
+_FATAL_LOG_PATTERNS = [
+    "modules are missing or built with a different engine version",
+    "Still incompatible or missing module:",
+    "Engine modules cannot be compiled at runtime",
+    "Missing or incompatible modules",
+    "Plugin .* failed to load",
+    "Fatal Error:",
+    "Assertion failed:",
+]
+
+
+def _extract_log_error(text: str) -> tuple[str | None, str | None]:
+    """Extract first fatal startup error excerpt from text."""
+    for pattern in _FATAL_LOG_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            start = max(0, match.start() - 100)
+            end = min(len(text), match.end() + 300)
+            return text[start:end].strip(), pattern
+    return None, None
+
+
 def _check_log_errors(log_file: Path) -> str | None:
-    """Scan the editor log for fatal/modal-dialog errors."""
+    """Scan the full editor log for fatal/modal-dialog errors."""
     if not log_file.exists():
         return None
     try:
         text = log_file.read_text(encoding="utf-8", errors="replace")
-        fatal_patterns = [
-            "modules are missing or built with a different engine version",
-            "Still incompatible or missing module:",
-            "Engine modules cannot be compiled at runtime",
-            "Missing or incompatible modules",
-            "Plugin .* failed to load",
-            "Fatal Error:",
-            "Assertion failed:",
-        ]
-        for pattern in fatal_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                start = max(0, match.start() - 100)
-                end = min(len(text), match.end() + 300)
-                return text[start:end].strip()
+        excerpt, _pattern = _extract_log_error(text)
+        return excerpt
     except Exception:
-        pass
-    return None
+        return None
+
+
+def _check_log_errors_incremental(log_file: Path, offset: int) -> tuple[str | None, int]:
+    """Scan newly appended log content for fatal/modal-dialog errors."""
+    if not log_file.exists():
+        return None, offset
+    try:
+        size = log_file.stat().st_size
+        if offset < 0 or offset > size:
+            offset = 0  # log rotated/truncated
+
+        with log_file.open("r", encoding="utf-8", errors="replace") as f:
+            f.seek(offset)
+            text = f.read()
+            new_offset = f.tell()
+
+        if not text:
+            return None, new_offset
+
+        excerpt, _pattern = _extract_log_error(text)
+        return excerpt, new_offset
+    except Exception:
+        return None, offset
 
 
 def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
@@ -396,6 +476,14 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
     deadline = start_time + timeout
     poll_interval = 5.0
     result = {}
+
+    log_offset = 0
+    try:
+        if log_file.exists():
+            # Start from current EOF so we only inspect fresh startup logs.
+            log_offset = log_file.stat().st_size
+    except Exception:
+        log_offset = 0
 
     while time.time() < deadline:
         # Check if process died
@@ -412,7 +500,9 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
             )
             if stderr_out:
                 error_msg += f"\nStderr: {stderr_out}"
-            log_error = _check_log_errors(log_file)
+            log_error, log_offset = _check_log_errors_incremental(log_file, log_offset)
+            if not log_error:
+                log_error = _check_log_errors(log_file)
             if log_error:
                 error_msg += f"\nLog: {log_error}"
             result["error"] = error_msg
@@ -437,8 +527,8 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
         # Check log for fatal errors even while process is running
         # (catches modal dialog popups that keep the process alive)
         elapsed = time.time() - start_time
-        if elapsed > 30:  # Give editor 30s before checking
-            log_error = _check_log_errors(log_file)
+        if elapsed > 2:
+            log_error, log_offset = _check_log_errors_incremental(log_file, log_offset)
             if log_error:
                 result["status"] = "error_dialog"
                 result["error"] = (
@@ -488,7 +578,9 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
         "Editor may still be loading, or may be stuck on a dialog/popup. "
         "Check the editor window manually."
     )
-    log_error = _check_log_errors(log_file)
+    log_error, log_offset = _check_log_errors_incremental(log_file, log_offset)
+    if not log_error:
+        log_error = _check_log_errors(log_file)
     if log_error:
         result["error"] += f"\nLog hint: {log_error}"
     if not state.json_output:
@@ -521,8 +613,8 @@ def editor_launch(state: AppState, map_path, wait, timeout):
     poll_port = _determine_poll_port(state.session, state)
 
     # ── Preflight check (always runs) ─────────────────────────────────
-    failed_check = _run_preflight(state.session, state)
-    if failed_check is not None:
+    preflight = _run_preflight(state.session, state)
+    if not preflight["ready"]:
         return
 
     # ── Find editor exe ─────────────────────────────────────────────
@@ -572,6 +664,7 @@ def editor_launch(state: AppState, map_path, wait, timeout):
         "pid": proc.pid,
         "project": state.session.project_name,
         "editor_exe": editor_exe,
+        "startup_precheck": _summarize_startup_precheck(preflight),
     }
 
     if not state.json_output:
@@ -735,33 +828,41 @@ def editor_run_script(state: AppState, script_path, timeout, no_save):
 @editor_group.command("api-discover")
 @click.argument("target")
 @click.option("--method-filter", "-m", default=None,
-              help="Case-insensitive substring filter for method names.")
-@click.option("--max-methods", "-n", default=50, type=int,
-              help="Maximum number of methods to return (default: 50).")
+              help="Case-insensitive substring filter for property/function names.")
+@click.option("--detail", "-d", default=None, metavar="NAMES",
+              help="Comma-separated names to get full detail for (properties or functions).")
 @click.option("--timeout", default=30, type=int,
               help="Max seconds to wait for results.")
 @handle_error
 @click.pass_obj
-def editor_api_discover(state: AppState, target, method_filter, max_methods, timeout):
-    """Discover the API surface of an unreal Python class or module.
+def editor_api_discover(state: AppState, target, method_filter, detail, timeout):
+    """Discover the API surface of a UE class via C++ reflection.
 
-    Uses Python's ``inspect`` module inside the UE editor to enumerate
-    methods, extract function signatures from docstrings, and report
-    deprecation warnings — giving AI agents direct Python-level API
-    visibility.
+    Progressive disclosure — like the Details panel: glance, then hover.
+
+    \b
+    TARGET is auto-detected:
+      - Class name:     DirectionalLight, unreal.Actor
+      - Asset path:     /Game/Materials/M_Water  (auto-detects class)
+      - Actor path:     /Game/Maps/L.L:PersistentLevel.Light_0  (auto-detects class)
+
+    \b
+    Then drill into details with -d:
+      editor api-discover DirectionalLight -d bHidden,Intensity
 
     \b
     Examples:
-        editor api-discover unreal.EditorLevelLibrary
-        editor api-discover EditorLevelLibrary -m get_all_level_actors
-        editor api-discover unreal.Actor -n 10
+        editor api-discover unreal.MaterialEditingLibrary
+        editor api-discover MaterialEditingLibrary -m connect
+        editor api-discover /Game/Materials/M_Water
+        editor api-discover /Game/Maps/L.L:PersistentLevel.Light_0 -d bHidden
     """
     from cli_anything.unreal.core.script_runner import api_discover
     api = require_editor(state)
     result = api_discover(
         api, target,
         method_filter=method_filter,
-        max_methods=max_methods,
+        detail=detail,
         timeout=timeout,
     )
     output(result, state)
@@ -799,6 +900,215 @@ def editor_enable_remote(state: AppState):
             state.skin.warning("Restart the editor for changes to take effect")
 
     output(result, state)
+
+
+# ── editor plugin-version ────────────────────────────────────────────
+
+@editor_group.command("plugin-version")
+@handle_error
+@click.pass_obj
+def editor_plugin_version(state: AppState):
+    """Check CliAnythingBridge plugin version (bundled vs loaded).
+
+    Reports the version bundled with the CLI package and the version
+    currently loaded in the running editor (if any). Use this to detect
+    when a plugin upgrade is needed.
+
+    \b
+    Example:
+        editor plugin-version
+        # → {"bundled": "1.5", "loaded": "1.3", "match": false}
+    """
+    from cli_anything.unreal.core.plugin_bridge import get_bundled_version, get_loaded_plugin_version
+
+    bundled = get_bundled_version()
+    loaded = None
+
+    if state.session.project_dir:
+        api = require_editor(state)
+        loaded = get_loaded_plugin_version(api)
+
+    result = {
+        "bundled_version": bundled,
+        "loaded_version": loaded,
+        "match": loaded is not None and loaded == bundled,
+    }
+
+    if not state.json_output:
+        if loaded is None:
+            state.skin.info(f"Bundled: {bundled}, Loaded: not loaded")
+        elif loaded == bundled:
+            state.skin.success(f"Plugin version {bundled} (up to date)")
+        else:
+            state.skin.warning(f"Version mismatch: bundled={bundled}, loaded={loaded}")
+            state.skin.hint("Run 'editor plugin-upgrade' to upgrade")
+
+    output(result, state)
+
+
+# ── editor plugin-upgrade ────────────────────────────────────────────
+
+@editor_group.command("plugin-upgrade")
+@handle_error
+@click.pass_obj
+def editor_plugin_upgrade(state: AppState):
+    """Upgrade the CliAnythingBridge plugin if a newer version is available.
+
+    Workflow:
+    1. Deploy updated plugin source to the project
+    2. Compile the project (if editor is running, close it first)
+    3. Restart the editor
+    4. Verify the new version is loaded
+
+    \b
+    Example:
+        editor plugin-upgrade
+    """
+    from cli_anything.unreal.core.plugin_bridge import (
+        check_plugin_version,
+        ensure_plugin_deployed,
+        get_bundled_version,
+        get_loaded_plugin_version,
+    )
+
+    require_project(state)
+    project_dir = state.session.project_dir
+
+    import shutil
+    from pathlib import Path
+    plugin_dir = Path(project_dir) / "Plugins" / "CliAnythingBridge"
+
+    bundled = get_bundled_version()
+
+    # Check if editor is running — if so, compare versions before touching files
+    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+    api = UEEditorAPI(port=state.session.port)
+    editor_was_running = api.is_alive()
+
+    if editor_was_running:
+        # Check loaded version vs bundled
+        loaded = get_loaded_plugin_version(api)
+        if loaded == bundled:
+            if not state.json_output:
+                state.skin.success(f"Plugin already at version {bundled} — no upgrade needed")
+            output({"status": "up_to_date", "version": bundled}, state)
+            return
+
+        if not state.json_output:
+            state.skin.info(f"Upgrading plugin: {loaded} → {bundled}")
+            state.skin.info("Closing editor to recompile...")
+
+        # Close editor
+        api.exec_console("exit")
+        time.sleep(5)
+
+        # Wait for editor to close
+        for _ in range(15):
+            if not api.is_alive():
+                break
+            time.sleep(2)
+        else:
+            if api.is_alive():
+                output({"error": "Editor did not shut down within timeout — aborting upgrade"}, state)
+                return
+
+    # Step 1: Force-deploy plugin source.
+    # Delete existing plugin directory to ensure fresh copy,
+    # since VersionName alone doesn't detect source file changes.
+    if plugin_dir.exists():
+        shutil.rmtree(str(plugin_dir))
+
+    deploy = ensure_plugin_deployed(project_dir)
+    if not deploy["deployed"]:
+        output({"error": deploy.get("error", "Deployment failed")}, state)
+        return
+
+    if not state.json_output:
+        state.skin.info(f"Deployed plugin v{deploy.get('version', bundled)} to {deploy.get('plugin_dir', '')}")
+
+    # Clean plugin Intermediate/Binaries to force full recompile
+    plugin_intermediate = plugin_dir / "Intermediate"
+    plugin_binaries = plugin_dir / "Binaries"
+    if plugin_intermediate.exists():
+        shutil.rmtree(str(plugin_intermediate))
+    if plugin_binaries.exists():
+        shutil.rmtree(str(plugin_binaries))
+
+    if not state.json_output:
+        state.skin.info("Compiling project...")
+
+    # Step 2: Compile
+    from cli_anything.unreal.core.build import compile_project
+    build_result = compile_project(
+        state.session.project_path,
+        engine_root=state.session.engine_root,
+        timeout=600,
+    )
+    if build_result.get("status") == "error":
+        output({
+            "status": "compile_failed",
+            "error": build_result.get("error", "Build failed"),
+            "details": (build_result.get("stderr", "") or "")[-500:],
+        }, state)
+        return
+
+    if not state.json_output:
+        state.skin.success("Compilation succeeded")
+
+    # Step 3: Relaunch editor if it was running before
+    if editor_was_running:
+        if not state.json_output:
+            state.skin.info("Relaunching editor...")
+
+        from cli_anything.unreal.utils.ue_backend import find_editor_exe
+        engine_root = state.session.engine_root
+        editor_exe = find_editor_exe(engine_root) if engine_root else None
+        if editor_exe:
+            cmd = [str(editor_exe), state.session.project_path]
+            sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+
+            if not state.json_output:
+                state.skin.info("Waiting for editor to come online...")
+
+            # Wait for API
+            for _ in range(60):
+                time.sleep(2)
+                if api.is_alive():
+                    break
+
+            # Verify new version
+            new_loaded = get_loaded_plugin_version(api)
+            if new_loaded == bundled:
+                if not state.json_output:
+                    state.skin.success(f"Plugin upgraded to v{bundled}")
+                output({
+                    "status": "upgraded",
+                    "version": bundled,
+                    "previous_version": loaded if editor_was_running else None,
+                }, state)
+            else:
+                if not state.json_output:
+                    state.skin.warning(f"Plugin loaded but version is {new_loaded} (expected {bundled})")
+                output({
+                    "status": "version_mismatch",
+                    "expected": bundled,
+                    "loaded": new_loaded,
+                }, state)
+            return
+
+    # Editor wasn't running — just report deploy result
+    if not state.json_output:
+        state.skin.success(f"Plugin source deployed v{deploy.get('version', bundled)}")
+        if deploy.get("action") != "already_up_to_date":
+            state.skin.hint("Run 'editor launch' to start the editor with the new plugin")
+
+    output({
+        "status": "deployed",
+        "action": deploy.get("action"),
+        "version": deploy.get("version", bundled),
+        "plugin_dir": deploy.get("plugin_dir"),
+        "needs_restart": editor_was_running,
+    }, state)
 
 
 # ── CVar sub-group ────────────────────────────────────────────────────
@@ -840,3 +1150,39 @@ def cvar_set(state: AppState, name, value):
         }, state)
     else:
         output({"name": name, "value": value, "status": "ok", **result}, state)
+
+
+# ── editor new-level / save-level ────────────────────────────────────
+
+@editor_group.command("new-level")
+@click.argument("level_path")
+@click.option("--template", default=None, help="Optional path to a template level to clone")
+@handle_error
+@click.pass_obj
+def editor_new_level(state: AppState, level_path, template):
+    """Create and open a new level.
+
+    Uses safe legacy API to prevent HTTP connection crashes.
+
+    \b
+    Examples:
+        editor new-level /Game/Maps/NewLevel
+        editor new-level /Game/Maps/NewLevel --template /Game/Maps/Template
+    """
+    from cli_anything.unreal.core.scene import new_level
+
+    api = require_editor(state)
+    result = new_level(api, level_path, template)
+    output(result, state)
+
+
+@editor_group.command("save-level")
+@handle_error
+@click.pass_obj
+def editor_save_level(state: AppState):
+    """Save the current level."""
+    from cli_anything.unreal.core.scene import save_level
+
+    api = require_editor(state)
+    result = save_level(api)
+    output(result, state)
