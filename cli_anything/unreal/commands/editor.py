@@ -830,7 +830,11 @@ def editor_run_script(state: AppState, script_path, timeout, no_save):
 @editor_group.command("api-discover")
 @click.argument("target")
 @click.option("--method-filter", "-m", default=None,
-              help="Case-insensitive substring filter for property/function names.")
+              help=(
+                  "Case-insensitive regex filter for property/function names "
+                  "(via re.search). Examples: -m intensity | -m 'create|connect' | "
+                  "-m '^Set' | -m 'Color$'."
+              ))
 @click.option("--detail", "-d", default=None, metavar="NAMES",
               help="Comma-separated names to get full detail for (properties or functions).")
 @click.option("--timeout", default=30, type=int,

@@ -2395,6 +2395,135 @@ class TestScriptRunner:
             else:
                 sys.modules.pop("unreal", None)
 
+    def test_api_discover_method_filter_regex_alternation(self):
+        """method_filter is a regex — alternation picks up multiple prefixes."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        mock_api = MagicMock()
+        import types, sys
+
+        bridge_data = {
+            "FakeLib": {
+                "class": "FakeLib", "properties": [],
+                "functions": [
+                    {"name": "create_material_expression", "owner": "FakeLib",
+                     "tooltip": "", "return_type": "", "params": []},
+                    {"name": "connect_material_property", "owner": "FakeLib",
+                     "tooltip": "", "return_type": "", "params": []},
+                    {"name": "recompile_material", "owner": "FakeLib",
+                     "tooltip": "", "return_type": "", "params": []},
+                ],
+            }
+        }
+
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(
+                mock_api, "unreal.FakeLib",
+                method_filter="create|connect",
+                timeout=5,
+            )
+            assert set(result["functions"]) == {
+                "create_material_expression", "connect_material_property",
+            }
+            # recompile_material must NOT be matched — it's the negative control
+            assert "recompile_material" not in result["functions"]
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+    def test_api_discover_method_filter_regex_anchor(self):
+        """method_filter supports anchors (^ for prefix)."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        mock_api = MagicMock()
+        import types, sys
+
+        bridge_data = {
+            "FakeLib": {
+                "class": "FakeLib", "properties": [],
+                "functions": [
+                    {"name": "SetIntensity", "owner": "FakeLib",
+                     "tooltip": "", "return_type": "", "params": []},
+                    {"name": "SetColor", "owner": "FakeLib",
+                     "tooltip": "", "return_type": "", "params": []},
+                    {"name": "GetIntensity", "owner": "FakeLib",
+                     "tooltip": "", "return_type": "", "params": []},
+                ],
+            }
+        }
+
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(
+                mock_api, "unreal.FakeLib",
+                method_filter="^Set",
+                timeout=5,
+            )
+            assert set(result["functions"]) == {"SetIntensity", "SetColor"}
+            # GetIntensity is NOT ^Set — even though it contains "Set" as a
+            # substring, the regex anchor rules it out
+            assert "GetIntensity" not in result["functions"]
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+    def test_api_discover_method_filter_invalid_regex(self):
+        """An invalid regex returns a structured error, not a raw traceback."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        mock_api = MagicMock()
+        import types, sys
+
+        bridge_data = {
+            "FakeLib": {
+                "class": "FakeLib", "properties": [],
+                "functions": [
+                    {"name": "anything", "owner": "FakeLib",
+                     "tooltip": "", "return_type": "", "params": []},
+                ],
+            }
+        }
+
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(
+                mock_api, "unreal.FakeLib",
+                method_filter="[unclosed",
+                timeout=5,
+            )
+            assert "error" in result
+            assert "Invalid regex" in result["error"]
+            # Raw filter is echoed back so agents can see what they sent
+            assert result.get("method_filter") == "[unclosed"
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
     def test_api_discover_detail_single(self):
         """api_discover detail for a single property/function name."""
         from cli_anything.unreal.core.script_runner import api_discover

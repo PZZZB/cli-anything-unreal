@@ -244,7 +244,7 @@ def _execute(
 # Shared reflection logic used by both class-name and instance templates.
 # Injected as a function definition at the top of the generated script.
 _DISCOVER_FUNC = '''\
-import json as _cli_json, unreal as _cli_unreal
+import json as _cli_json, re as _cli_re, unreal as _cli_unreal
 
 def _cli_discover_class(_class_name, _method_filter=None, _detail=None):
     _raw = _cli_unreal.CliAnythingBridgeLibrary.get_class_info(_class_name, True)
@@ -275,9 +275,16 @@ def _cli_discover_class(_class_name, _method_filter=None, _detail=None):
     _funcs = _data.get("functions", [])
     _props = _data.get("properties", [])
     if _method_filter:
-        _fl = _method_filter.lower()
-        _funcs = [f for f in _funcs if _fl in f["name"].lower()]
-        _props = [p for p in _props if _fl in p["name"].lower()]
+        # Case-insensitive regex match (re.search — partial match by default).
+        try:
+            _pat = _cli_re.compile(_method_filter, _cli_re.IGNORECASE)
+        except _cli_re.error as _e:
+            return {
+                "error": "Invalid regex for --method-filter: " + str(_e),
+                "method_filter": _method_filter,
+            }
+        _funcs = [f for f in _funcs if _pat.search(f["name"])]
+        _props = [p for p in _props if _pat.search(p["name"])]
 
     return {
         "class": _class_name,
