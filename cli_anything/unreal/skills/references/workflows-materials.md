@@ -37,9 +37,8 @@ cli-anything-unreal --json material add-node /Game/M_Water \
 cli-anything-unreal --json material connect /Game/M_Water \
     --from MaterialExpressionCustom_0 --to __material_output__ --to-input BaseColor
 
-# Recompile and check errors
+# Recompile → {"status":"ok"} or {"status":"error","compile_errors":[...]}
 cli-anything-unreal --json material recompile /Game/M_Water
-cli-anything-unreal --json material get-errors /Game/M_Water
 ```
 
 To update HLSL code on an existing Custom node, use `editor run-script`:
@@ -51,7 +50,11 @@ node = unreal.MaterialEditingLibrary.get_material_property_input_node(
 if node:
     with open("my_shader.hlsl") as f:
         node.set_editor_property("code", f.read())
-    unreal.MaterialEditingLibrary.recompile_material(mat)
+```
+
+Then recompile and verify via CLI (do NOT use `MEL.recompile_material()` — it's void and cannot detect failures):
+```bash
+cli-anything-unreal --json material recompile /Game/M_Water
 ```
 
 ### 4. Alternative: Standard Nodes
@@ -71,7 +74,7 @@ cli-anything-unreal --json material connect /Game/M_Water \
 cli-anything-unreal --json material set-param /Game/MI_Water \
     --name Roughness --value 0.5 --type scalar
 
-# Recompile after editing
+# Recompile → check status field
 cli-anything-unreal --json material recompile /Game/M_Water
 ```
 
@@ -115,11 +118,6 @@ expr.set_editor_property("constant", unreal.LinearColor(0.2, 0.5, 0.8, 1.0))
 unreal.MaterialEditingLibrary.connect_material_property(
     expr, "", unreal.MaterialProperty.MP_BASE_COLOR)
 ```
-
-**Available MaterialProperty enums for `get_material_property_input_node`:**
-`MP_BASE_COLOR`, `MP_METALLIC`, `MP_SPECULAR`, `MP_ROUGHNESS`, `MP_NORMAL`,
-`MP_EMISSIVE_COLOR`, `MP_OPACITY`, `MP_WORLD_POSITION_OFFSET`, `MP_AMBIENT_OCCLUSION`,
-`MP_REFRACTION`, `MP_TANGENT`, `MP_SUBSURFACE_COLOR`, `MP_CUSTOM_DATA_0`–`MP_CUSTOM_DATA_3`
 
 **Progressive Node Discovery:** There are 400+ `MaterialExpression` classes — do not try to list them all. Use a targeted Python search:
 ```python
@@ -166,7 +164,6 @@ cli-anything-unreal --json material shader-source /Game/M_Custom
 
 # 5. Recompile and verify
 cli-anything-unreal --json material recompile /Game/M_Custom
-cli-anything-unreal --json material get-errors /Game/M_Custom
 ```
 
 ## Actor → Material → Shader Investigation
@@ -180,8 +177,19 @@ cli-anything-unreal --json material info /Game/SomeMaterial
 cli-anything-unreal --json material hlsl-code /Game/SomeMaterial
 ```
 
+## Diagnostics
+
+To check an existing material for compile errors or common issues:
+```bash
+cli-anything-unreal --json material get-errors /Game/M_Water
+cli-anything-unreal --json material analyze /Game/M_Water
+```
+
+Full command reference: see `commands.md` → `material` section.
+
 ## Material-Specific Notes
 
+- **`MEL.recompile_material()` is void** — cannot detect compile failures. Always verify with CLI `material recompile` (`{"status":"ok"}` or `{"status":"error","compile_errors":[...]}`) or `material get-errors` (checks without recompiling). Never assume success just because no exception was raised.
 - `Material.expressions` is protected in UE5.7+ — use `material info` to read nodes, and CLI commands (`add-node`, `connect`, `delete-node`) to edit them. Do not access `expressions` directly in Python.
 - To find existing nodes for property modification, use `MaterialEditingLibrary.get_material_property_input_node()` — do not try `find_object` (unreliable) or access `expressions` (protected).
 - `material shader-source` always recompiles synchronously to guarantee the latest source. It may take a moment for complex materials.
