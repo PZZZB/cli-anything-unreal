@@ -9,9 +9,11 @@ build/
 # pytest
 .pytest_cache/
 
-# IDE
+# IDE / AI assistants
 .vscode/
 .idea/
+.claude/
+.codebuddy/
 
 # OS
 .DS_Store
@@ -26,6 +28,5 @@ Thumbs.db
 /get_*.py
 /agent_prompt*.txt
 
-# Experiment artifacts in scripts/
-scripts/round*_*
-scripts/run_round*.js
+# Experiment / temp scripts
+scripts/
