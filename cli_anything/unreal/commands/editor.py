@@ -475,6 +475,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
     start_time = time.time()
     deadline = start_time + timeout
     poll_interval = 5.0
+    last_hint_time = time.time()
     result = {}
 
     log_offset = 0
@@ -566,9 +567,10 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
                 except Exception:
                     pass
 
-        remaining = int(deadline - time.time())
-        if not state.json_output and int(time.time()) % 15 == 0:
+        remaining = max(0, int(deadline - time.time()))
+        if not state.json_output and time.time() - last_hint_time >= 15:
             state.skin.hint(f"  Still waiting... ({remaining}s remaining)")
+            last_hint_time = time.time()
         time.sleep(poll_interval)
 
     # Timed out
@@ -595,7 +597,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 @editor_group.command("launch")
 @click.option("--map", "map_path", default=None, help="Level/map to open (.umap path)")
 @click.option("--wait/--no-wait", default=True, help="Wait for API to come online")
-@click.option("--timeout", default=300, help="Max seconds to wait for editor startup")
+@click.option("--timeout", default=600, help="Max seconds to wait for editor startup")
 @handle_error
 @click.pass_obj
 def editor_launch(state: AppState, map_path, wait, timeout):

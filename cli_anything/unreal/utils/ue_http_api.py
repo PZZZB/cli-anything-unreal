@@ -503,7 +503,7 @@ class UEEditorAPI:
 
             hwnd = wintypes.HWND(found_hwnd)
 
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE — ensures full-size window even when launched with -unattended
             user32.BringWindowToTop(hwnd)
             ok = user32.SetForegroundWindow(hwnd)
             if ok:
