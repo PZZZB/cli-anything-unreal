@@ -1168,7 +1168,7 @@ class TestSceneE2E:
         # Step 2: api-discover that component
         r2 = cli_runner.invoke(cli, [
             "--json", "--port", str(api_port),
-            "editor", "api-discover", light_comp["path"], "-m", "intensity",
+            "editor", "api-discover", light_comp["path"], "-q", "intensity",
         ])
         assert r2.exit_code == 0, f"CLI failed: {r2.output}"
         d2 = json.loads(r2.output)
