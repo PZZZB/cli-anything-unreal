@@ -1,0 +1,23 @@
+{
+  "skill_name": "unreal-engine-cli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我有一个 Blueprint /Game/Blueprints/BP_Player，需要给它加一个 CameraComponent 和一个 SpringArmComponent，Camera 挂在 SpringArm 下面。编辑器已经在运行了。",
+      "expected_output": "Agent should recognize that 'blueprint add-component' does not exist in commands.md, and immediately write a Python script using editor run-script to add the components via UE Python API. Should NOT spend turns searching CLI source code or trying command variations.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "帮我在当前关卡里生成 5 个 PointLight，均匀排成一排，间距 300 单位，从 (0,0,200) 开始。编辑器已开。",
+      "expected_output": "Agent should use editor run-script with a Python loop to spawn 5 PointLight actors. There is no 'scene spawn' or 'scene add-actor' subcommand — agent should not look for one.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我的 /Game/Blueprints/BP_Weapon 蓝图需要添加一个 SkeletalMeshComponent 叫 WeaponMesh，然后把 /Game/Meshes/SK_Rifle 设为它的 mesh。项目路径是 F:\\MyGame\\MyGame.uproject，编辑器没开。",
+      "expected_output": "Agent should first follow editor lifecycle (status → preflight → launch --wait), then use editor run-script to add the component and set its mesh. Should not try to find a 'blueprint add-component' or 'blueprint set-mesh' subcommand.",
+      "files": []
+    }
+  ]
+}
