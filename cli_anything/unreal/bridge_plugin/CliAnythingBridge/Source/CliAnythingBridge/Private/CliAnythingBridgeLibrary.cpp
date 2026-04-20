@@ -86,7 +86,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.9");
+	return TEXT("1.12");
 }
 
 TArray<FString> UCliAnythingBridgeLibrary::GetMaterialHLSLCode(UMaterialInterface* Material, const FString& OutputPath)
@@ -232,10 +232,10 @@ FString UCliAnythingBridgeLibrary::GetClassInfo(const FString& ClassName, bool b
 		const FProperty* Prop = *It;
 		if (!Prop) continue;
 
-		// Only show properties visible in Details panel
+		// Expose all reflected properties (no filter) — some types like
+		// FExpressionInput have bare UPROPERTY() without Edit/Visible flags
+		// but are still essential for understanding material expression inputs.
 		const EPropertyFlags Flags = Prop->PropertyFlags;
-		const bool bEditable = (Flags & CPF_Edit) != 0 || (Flags & CPF_EditConst) != 0;
-		if (!bEditable) continue;
 
 		if (!bFirst) Json += TEXT(",");
 		bFirst = false;
@@ -273,6 +273,7 @@ FString UCliAnythingBridgeLibrary::GetClassInfo(const FString& ClassName, bool b
 	{
 		const UFunction* Func = *It;
 		if (!Func) continue;
+		// Skip deprecated and Blueprint-internal functions
 		if (Func->HasMetaData(TEXT("DeprecatedFunction")) ||
 			Func->HasMetaData(TEXT("BlueprintInternalUseOnly"))) continue;
 
