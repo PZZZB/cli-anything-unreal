@@ -101,7 +101,7 @@ def _print_repl_help(state: AppState):
         "asset refs <path>": "List all assets that reference this asset",
         "asset duplicate <src> <dst>": "Duplicate an asset to a new path",
         "asset rename <src> <dst>": "Rename/move an asset",
-        "asset property <path> Prop": "Get or set a property (Prop or Prop=Val)"
+        "asset property <path> Prop": "Get or set a property (Prop or Prop=Val)",
         " ": "",
         # ── build ──────────────────────────────────────────────────────
         "build compile": "Compile the project's C++ code",
