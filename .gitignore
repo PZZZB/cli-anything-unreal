@@ -27,6 +27,14 @@ Thumbs.db
 /fix_*.py
 /get_*.py
 /agent_prompt*.txt
+/_tmp_*.py
+/create_*_temp.py
 
 # Experiment / temp scripts
 scripts/
+
+# Personal artifacts — share docs, screenshots, etc.
+/SHARE.md
+/SHARE.assets/
+/*.jpg
+/*.png
