@@ -474,13 +474,13 @@ class UEEditorAPI:
             return None
 
     def bring_to_foreground(self) -> bool:
-        """Bring the UE editor window to the foreground.
+        """Expand the UE editor window to full screen for screenshot capture.
 
-        The viewport only renders when the editor window is visible/focused.
-        This is required before taking screenshots.
-
-        Uses Windows API via ctypes (no subprocess) to find the UE editor
-        main window by process PID and bring it to front.
+        Screenshot uses PrintWindow/GetWindowDC which can capture occluded
+        windows, so we don't need foreground focus. We use SetWindowPos with
+        SWP_NOZORDER | SWP_NOACTIVATE to resize without changing Z-order
+        or stealing keyboard focus. The caller should save/restore the
+        original window rect via ``get_window_rect`` / ``set_window_rect``.
 
         Returns:
             True if successful, False otherwise.
@@ -492,45 +492,73 @@ class UEEditorAPI:
 
         try:
             import ctypes
-            from ctypes import wintypes
 
             user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
 
             found_hwnd = self.find_editor_window_hwnd()
             if not found_hwnd:
                 return False
 
-            hwnd = wintypes.HWND(found_hwnd)
+            hwnd = ctypes.wintypes.HWND(found_hwnd)
+            # Get monitor rect for the window
+            monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+            import ctypes.wintypes
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.wintypes.DWORD),
+                    ("rcMonitor", ctypes.wintypes.RECT),
+                    ("rcWork", ctypes.wintypes.RECT),
+                    ("dwFlags", ctypes.wintypes.DWORD),
+                ]
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
+            mr = mi.rcMonitor
+            # SWP_NOZORDER=0x0004, SWP_NOACTIVATE=0x0010
+            user32.SetWindowPos(
+                hwnd, 0,
+                mr.left, mr.top, mr.right - mr.left, mr.bottom - mr.top,
+                0x0004 | 0x0010,
+            )
+            return True
+        except Exception:
+            return False
 
-            user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE — ensures full-size window even when launched with -unattended
-            user32.BringWindowToTop(hwnd)
-            ok = user32.SetForegroundWindow(hwnd)
-            if ok:
-                return True
+    def get_window_rect(self) -> tuple | None:
+        """Return the UE editor window rect (left, top, right, bottom) or None."""
+        import sys
+        if sys.platform != "win32":
+            return None
+        try:
+            import ctypes, ctypes.wintypes
+            user32 = ctypes.windll.user32
+            hwnd = self.find_editor_window_hwnd()
+            if not hwnd:
+                return None
+            rect = ctypes.wintypes.RECT()
+            user32.GetWindowRect(ctypes.wintypes.HWND(hwnd), ctypes.byref(rect))
+            return (rect.left, rect.top, rect.right, rect.bottom)
+        except Exception:
+            return None
 
-            fg_hwnd = user32.GetForegroundWindow()
-            current_tid = kernel32.GetCurrentThreadId()
-            target_tid = user32.GetWindowThreadProcessId(hwnd, None)
-            fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
-
-            attached = []
-            try:
-                if fg_tid and fg_tid != current_tid:
-                    if user32.AttachThreadInput(fg_tid, current_tid, True):
-                        attached.append((fg_tid, current_tid))
-                if target_tid and target_tid != current_tid:
-                    if user32.AttachThreadInput(target_tid, current_tid, True):
-                        attached.append((target_tid, current_tid))
-
-                user32.BringWindowToTop(hwnd)
-                ok = user32.SetForegroundWindow(hwnd)
-                user32.SetActiveWindow(hwnd)
-            finally:
-                for src_tid, dst_tid in attached:
-                    user32.AttachThreadInput(src_tid, dst_tid, False)
-
-            return bool(ok)
+    def set_window_rect(self, left: int, top: int, right: int, bottom: int) -> bool:
+        """Set the UE editor window rect without changing Z-order or focus."""
+        import sys
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes, ctypes.wintypes
+            user32 = ctypes.windll.user32
+            hwnd = self.find_editor_window_hwnd()
+            if not hwnd:
+                return False
+            # SWP_NOZORDER=0x0004, SWP_NOACTIVATE=0x0010
+            user32.SetWindowPos(
+                ctypes.wintypes.HWND(hwnd), 0,
+                left, top, right - left, bottom - top,
+                0x0004 | 0x0010,
+            )
+            return True
         except Exception:
             return False
 

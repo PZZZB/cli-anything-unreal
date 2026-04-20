@@ -134,16 +134,8 @@ def _capture_viewport_png_raw(
             "refresh": {},
         }
 
-    # Check window state before bring_to_foreground (which may maximize it)
-    _was_already_maximized = True
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            hwnd_pre = api.find_editor_window_hwnd()
-            if hwnd_pre:
-                _was_already_maximized = bool(ctypes.windll.user32.IsZoomed(hwnd_pre))
-        except Exception:
-            pass
+    # Save original window rect so we can restore after capture
+    _orig_rect = api.get_window_rect()
 
     foreground_ok = api.bring_to_foreground()
     refresh_result = _refresh_editor_viewports(api)
@@ -202,13 +194,10 @@ def _capture_viewport_png_raw(
             "refresh": refresh_result,
         }
 
-    # Restore window if we maximized it
-    if not _was_already_maximized and sys.platform == "win32":
+    # Restore original window rect (position + size) without changing Z-order
+    if _orig_rect and sys.platform == "win32":
         try:
-            import ctypes
-            hwnd_post = api.find_editor_window_hwnd()
-            if hwnd_post:
-                ctypes.windll.user32.ShowWindow(hwnd_post, 9)  # SW_RESTORE
+            api.set_window_rect(*_orig_rect)
         except Exception:
             pass
 
