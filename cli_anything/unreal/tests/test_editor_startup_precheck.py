@@ -95,3 +95,66 @@ def test_editor_launch_success_includes_startup_precheck(mini_project):
     assert data["startup_precheck"]["ready"] is True
     assert data["startup_precheck"]["errors"] == []
     assert data["startup_precheck"]["warnings"] == ["engine warning", "project warning"]
+
+
+# ── _build_launch_cmd unit tests ────────────────────────────────────
+
+
+def test_build_launch_cmd_without_map():
+    from cli_anything.unreal.commands.editor import _build_launch_cmd
+
+    cmd = _build_launch_cmd("UnrealEditor.exe", "MyProject.uproject", None)
+    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-unattended"]
+
+
+def test_build_launch_cmd_with_map():
+    from cli_anything.unreal.commands.editor import _build_launch_cmd
+
+    cmd = _build_launch_cmd("UnrealEditor.exe", "MyProject.uproject", "/Game/Maps/Main")
+    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-unattended", "/Game/Maps/Main"]
+
+
+# ── plugin-upgrade relaunch uses _build_launch_cmd ──────────────────
+
+
+def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
+    """Verify plugin-upgrade relaunch passes -nosplash -unattended (regression test)."""
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    mock_proc = MagicMock()
+    mock_proc.pid = 9999
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return mock_proc
+
+    mock_api = MagicMock()
+    # 1st call: editor_was_running check → True
+    # 2nd call: wait-for-close loop → False (editor closed)
+    # 3rd call: wait-for-api loop → True (editor back online)
+    mock_api.is_alive.side_effect = [True, False, True]
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=["1.0", "2.0"]), \
+         patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
+             "deployed": True, "action": "updated", "version": "2.0", "plugin_dir": "/tmp/plugin"
+         }), \
+         patch("cli_anything.unreal.core.build.compile_project", return_value={"status": "ok"}), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/Engine/Binaries/Win64/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", side_effect=fake_popen), \
+         patch("cli_anything.unreal.commands.editor.time.sleep"):
+        result = runner.invoke(cli, [
+            "--json", "--project", mini_project,
+            "editor", "plugin-upgrade",
+        ])
+
+    assert result.exit_code == 0
+    # The relaunch Popen call must include -nosplash and -unattended
+    assert len(popen_calls) == 1
+    relaunch_cmd = popen_calls[0]
+    assert "-nosplash" in relaunch_cmd
+    assert "-unattended" in relaunch_cmd

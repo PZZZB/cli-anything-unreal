@@ -1066,7 +1066,7 @@ def editor_plugin_upgrade(state: AppState):
         engine_root = state.session.engine_root
         editor_exe = find_editor_exe(engine_root) if engine_root else None
         if editor_exe:
-            cmd = [str(editor_exe), state.session.project_path]
+            cmd = _build_launch_cmd(editor_exe, state.session.project_path, None)
             sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
 
             if not state.json_output:
