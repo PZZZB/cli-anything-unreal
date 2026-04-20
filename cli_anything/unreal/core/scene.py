@@ -46,12 +46,26 @@ def list_actors(
     name_repr = repr(name_filter) if name_filter else "None"
 
     script = f'''\
+import re as _re
 import unreal as _u
 
 _actor_class = {class_repr}
 _name_filter = {name_repr}
 
-if _actor_class:
+# Case-insensitive regex for the name filter (re.search — partial match OK).
+# Plain strings remain valid (they're degenerate regexes).
+_name_pat = None
+if _name_filter:
+    try:
+        _name_pat = _re.compile(_name_filter, _re.IGNORECASE)
+    except _re.error as _e:
+        result = {{"error": "Invalid regex for --query: " + str(_e),
+                   "query": _name_filter}}
+        _name_pat = False  # sentinel — skip the rest
+
+if _name_pat is False:
+    pass
+elif _actor_class:
     _cls = getattr(_u, _actor_class, None)
     if _cls is None:
         result = {{"error": "Class not found: " + _actor_class}}
@@ -61,7 +75,7 @@ if _actor_class:
         _actors = []
         for _a in _raw:
             _name = _a.get_name()
-            if _name_filter and _name_filter.lower() not in _name.lower():
+            if _name_pat is not None and not _name_pat.search(_name):
                 continue
             _actors.append({{
                 "path": _a.get_path_name(),
@@ -74,7 +88,7 @@ else:
     _actors = []
     for _a in _sub.get_all_level_actors():
         _name = _a.get_name()
-        if _name_filter and _name_filter.lower() not in _name.lower():
+        if _name_pat is not None and not _name_pat.search(_name):
             continue
         _actors.append({{
             "path": _a.get_path_name(),

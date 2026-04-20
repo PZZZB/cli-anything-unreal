@@ -131,6 +131,7 @@ def search_assets(
     limit_val = limit or 0
 
     script = f'''\
+import re as _re
 import unreal as _u
 
 _ar = _u.AssetRegistryHelpers.get_asset_registry()
@@ -140,25 +141,38 @@ _class_filter = {class_repr}
 _name_query = {query_repr}
 _limit = {limit_val}
 
-_results = []
-for _ad in _assets:
-    _cls = str(_ad.asset_class_path.asset_name)
-    _name = str(_ad.asset_name)
+# Case-insensitive regex for name query (re.search — partial match OK).
+_name_pat = None
+if _name_query:
+    try:
+        _name_pat = _re.compile(_name_query, _re.IGNORECASE)
+    except _re.error as _e:
+        result = {{"error": "Invalid regex for --query: " + str(_e),
+                   "query": _name_query}}
+        _name_pat = False  # sentinel
 
-    if _class_filter and _cls != _class_filter:
-        continue
-    if _name_query and _name_query.lower() not in _name.lower():
-        continue
+if _name_pat is False:
+    pass
+else:
+    _results = []
+    for _ad in _assets:
+        _cls = str(_ad.asset_class_path.asset_name)
+        _name = str(_ad.asset_name)
 
-    _results.append({{
-        "name": _name,
-        "class": _cls,
-        "path": str(_ad.package_name),
-    }})
-    if _limit and len(_results) >= _limit:
-        break
+        if _class_filter and _cls != _class_filter:
+            continue
+        if _name_pat is not None and not _name_pat.search(_name):
+            continue
 
-result = {{"assets": _results, "count": len(_results)}}
+        _results.append({{
+            "name": _name,
+            "class": _cls,
+            "path": str(_ad.package_name),
+        }})
+        if _limit and len(_results) >= _limit:
+            break
+
+    result = {{"assets": _results, "count": len(_results)}}
 '''
     return run_python_code(api, script, save=False)
 

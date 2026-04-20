@@ -829,11 +829,11 @@ def editor_run_script(state: AppState, script_path, timeout, no_save):
 
 @editor_group.command("api-discover")
 @click.argument("target")
-@click.option("--method-filter", "-m", default=None,
+@click.option("--query", "-q", default=None,
               help=(
                   "Case-insensitive regex filter for property/function names "
-                  "(via re.search). Examples: -m intensity | -m 'create|connect' | "
-                  "-m '^Set' | -m 'Color$'."
+                  "(via re.search). Examples: -q intensity | -q 'create|connect' | "
+                  "-q '^Set' | -q 'Color$'."
               ))
 @click.option("--detail", "-d", default=None, metavar="NAMES",
               help="Comma-separated names to get full detail for (properties or functions).")
@@ -841,7 +841,7 @@ def editor_run_script(state: AppState, script_path, timeout, no_save):
               help="Max seconds to wait for results.")
 @handle_error
 @click.pass_obj
-def editor_api_discover(state: AppState, target, method_filter, detail, timeout):
+def editor_api_discover(state: AppState, target, query, detail, timeout):
     """Discover the API surface of a UE class via C++ reflection.
 
     Progressive disclosure — like the Details panel: glance, then hover.
@@ -859,7 +859,7 @@ def editor_api_discover(state: AppState, target, method_filter, detail, timeout)
     \b
     Examples:
         editor api-discover unreal.MaterialEditingLibrary
-        editor api-discover MaterialEditingLibrary -m connect
+        editor api-discover MaterialEditingLibrary -q connect
         editor api-discover /Game/Materials/M_Water
         editor api-discover /Game/Maps/L.L:PersistentLevel.Light_0 -d bHidden
     """
@@ -867,7 +867,7 @@ def editor_api_discover(state: AppState, target, method_filter, detail, timeout)
     api = require_editor(state)
     result = api_discover(
         api, target,
-        method_filter=method_filter,
+        query=query,
         detail=detail,
         timeout=timeout,
     )

@@ -246,7 +246,7 @@ def _execute(
 _DISCOVER_FUNC = '''\
 import json as _cli_json, re as _cli_re, unreal as _cli_unreal
 
-def _cli_discover_class(_class_name, _method_filter=None, _detail=None):
+def _cli_discover_class(_class_name, _query=None, _detail=None):
     _raw = _cli_unreal.CliAnythingBridgeLibrary.get_class_info(_class_name, True)
     if not _raw or _raw == "{}":
         return {"error": "Class not found: " + _class_name}
@@ -274,14 +274,14 @@ def _cli_discover_class(_class_name, _method_filter=None, _detail=None):
 
     _funcs = _data.get("functions", [])
     _props = _data.get("properties", [])
-    if _method_filter:
+    if _query:
         # Case-insensitive regex match (re.search — partial match by default).
         try:
-            _pat = _cli_re.compile(_method_filter, _cli_re.IGNORECASE)
+            _pat = _cli_re.compile(_query, _cli_re.IGNORECASE)
         except _cli_re.error as _e:
             return {
-                "error": "Invalid regex for --method-filter: " + str(_e),
-                "method_filter": _method_filter,
+                "error": "Invalid regex for --query: " + str(_e),
+                "query": _query,
             }
         _funcs = [f for f in _funcs if _pat.search(f["name"])]
         _props = [p for p in _props if _pat.search(p["name"])]
@@ -301,7 +301,7 @@ if _parts[0] != "unreal":
     _parts = ["unreal"] + _parts
 _class_name = _parts[-1]
 
-result = _cli_discover_class(_class_name, _method_filter={method_filter!r}, _detail={detail!r})
+result = _cli_discover_class(_class_name, _query={query!r}, _detail={detail!r})
 if "error" not in result and "full_path" not in result:
     result["target_name"] = _class_name
     result["full_path"] = ".".join(_parts)
@@ -311,7 +311,7 @@ _API_DISCOVER_INSTANCE_CALL = '''\
 {resolve_block}
 
 if _cli_resolve_ok:
-    _discover_result = _cli_discover_class(_resolved_class, _method_filter={method_filter!r}, _detail={detail!r})
+    _discover_result = _cli_discover_class(_resolved_class, _query={query!r}, _detail={detail!r})
     _discover_result.update(_instance_context)
     result = _discover_result
 '''
@@ -412,7 +412,7 @@ def api_discover(
     api: "UEEditorAPI",
     target: str,
     *,
-    method_filter: str | None = None,
+    query: str | None = None,
     detail: str | None = None,
     timeout: float = 30.0,
 ) -> dict:
@@ -442,9 +442,9 @@ def api_discover(
     target:
         UE class name, asset path (``/Game/...``), or actor path
         (containing ``PersistentLevel``).
-    method_filter:
-        Optional case-insensitive substring filter for property/function names.
-        Only used in overview mode.
+    query:
+        Optional case-insensitive regex (via ``re.search``) for property/function
+        names. Plain strings work as substrings. Only used in overview mode.
     detail:
         Comma-separated names of properties/functions to get full detail for.
     timeout:
@@ -471,20 +471,20 @@ def api_discover(
             resolve_block = _RESOLVE_ACTOR.format(actor_path=target)
         call = _API_DISCOVER_INSTANCE_CALL.format(
             resolve_block=resolve_block,
-            method_filter=method_filter,
+            query=query,
             detail=detail,
         )
     elif target.startswith("/Game/") or target.startswith("/Engine/"):
         resolve_block = _RESOLVE_ASSET.format(asset_path=target)
         call = _API_DISCOVER_INSTANCE_CALL.format(
             resolve_block=resolve_block,
-            method_filter=method_filter,
+            query=query,
             detail=detail,
         )
     else:
         call = _API_DISCOVER_CLASS_CALL.format(
             target=target,
-            method_filter=method_filter,
+            query=query,
             detail=detail,
         )
 

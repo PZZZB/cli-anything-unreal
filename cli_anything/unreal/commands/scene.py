@@ -14,7 +14,9 @@ def scene_group():
 
 @scene_group.command("list")
 @click.option("--class", "actor_class", default=None, help="Filter by class (e.g., StaticMeshActor)")
-@click.option("--query", "-q", default=None, help="Filter by name (substring match)")
+@click.option("--query", "-q", default=None,
+              help="Case-insensitive regex for actor names (via re.search). "
+                   "Plain strings behave as substrings; anchors/alternation also work.")
 @handle_error
 @click.pass_obj
 def scene_list_actors(state: AppState, actor_class, query):

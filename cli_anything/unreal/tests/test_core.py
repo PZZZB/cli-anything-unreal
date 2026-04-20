@@ -2349,8 +2349,8 @@ class TestScriptRunner:
             else:
                 sys.modules.pop("unreal", None)
 
-    def test_api_discover_method_filter(self):
-        """api_discover with method_filter should only return matching names."""
+    def test_api_discover_query(self):
+        """api_discover with query should only return matching names."""
         from cli_anything.unreal.core.script_runner import api_discover
 
         mock_api = MagicMock()
@@ -2382,7 +2382,7 @@ class TestScriptRunner:
             self._make_discover_mock(mock_api, fake_unreal)
             result = api_discover(
                 mock_api, "unreal.FakeLib",
-                method_filter="get",
+                query="get",
                 timeout=5,
             )
             # Overview returns plain name lists, filtered
@@ -2395,8 +2395,8 @@ class TestScriptRunner:
             else:
                 sys.modules.pop("unreal", None)
 
-    def test_api_discover_method_filter_regex_alternation(self):
-        """method_filter is a regex — alternation picks up multiple prefixes."""
+    def test_api_discover_query_regex_alternation(self):
+        """query is a regex — alternation picks up multiple prefixes."""
         from cli_anything.unreal.core.script_runner import api_discover
 
         mock_api = MagicMock()
@@ -2426,7 +2426,7 @@ class TestScriptRunner:
             self._make_discover_mock(mock_api, fake_unreal)
             result = api_discover(
                 mock_api, "unreal.FakeLib",
-                method_filter="create|connect",
+                query="create|connect",
                 timeout=5,
             )
             assert set(result["functions"]) == {
@@ -2440,8 +2440,8 @@ class TestScriptRunner:
             else:
                 sys.modules.pop("unreal", None)
 
-    def test_api_discover_method_filter_regex_anchor(self):
-        """method_filter supports anchors (^ for prefix)."""
+    def test_api_discover_query_regex_anchor(self):
+        """query supports anchors (^ for prefix)."""
         from cli_anything.unreal.core.script_runner import api_discover
 
         mock_api = MagicMock()
@@ -2471,7 +2471,7 @@ class TestScriptRunner:
             self._make_discover_mock(mock_api, fake_unreal)
             result = api_discover(
                 mock_api, "unreal.FakeLib",
-                method_filter="^Set",
+                query="^Set",
                 timeout=5,
             )
             assert set(result["functions"]) == {"SetIntensity", "SetColor"}
@@ -2484,7 +2484,7 @@ class TestScriptRunner:
             else:
                 sys.modules.pop("unreal", None)
 
-    def test_api_discover_method_filter_invalid_regex(self):
+    def test_api_discover_query_invalid_regex(self):
         """An invalid regex returns a structured error, not a raw traceback."""
         from cli_anything.unreal.core.script_runner import api_discover
 
@@ -2511,13 +2511,13 @@ class TestScriptRunner:
             self._make_discover_mock(mock_api, fake_unreal)
             result = api_discover(
                 mock_api, "unreal.FakeLib",
-                method_filter="[unclosed",
+                query="[unclosed",
                 timeout=5,
             )
             assert "error" in result
             assert "Invalid regex" in result["error"]
             # Raw filter is echoed back so agents can see what they sent
-            assert result.get("method_filter") == "[unclosed"
+            assert result.get("query") == "[unclosed"
         finally:
             if old_unreal is not None:
                 sys.modules["unreal"] = old_unreal
@@ -2688,12 +2688,12 @@ class TestScriptRunner:
 
             result = runner.invoke(cli, [
                 "--json", "editor", "api-discover",
-                "unreal.Actor", "-m", "spawn", "-d", "GetOwner",
+                "unreal.Actor", "-q", "spawn", "-d", "GetOwner",
             ])
             assert result.exit_code == 0
             mock_discover.assert_called_once()
             call_kw = mock_discover.call_args[1]
-            assert call_kw["method_filter"] == "spawn"
+            assert call_kw["query"] == "spawn"
             assert call_kw["detail"] == "GetOwner"
 
     # -- Instance path tests (actor / asset) ----------------------------------
@@ -2793,7 +2793,7 @@ class TestScriptRunner:
             cleanup()
 
     def test_inspect_instance_actor_with_filter(self):
-        """api_discover actor path + method_filter should filter results."""
+        """api_discover actor path + query should filter results."""
         from cli_anything.unreal.core.script_runner import api_discover
 
         bridge_data = {
@@ -2825,7 +2825,7 @@ class TestScriptRunner:
             result = api_discover(
                 mock_api,
                 "/Game/Maps/L.L:PersistentLevel.Cube_0",
-                method_filter="mesh",
+                query="mesh",
                 timeout=5,
             )
             assert "error" not in result
