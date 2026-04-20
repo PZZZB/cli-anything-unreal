@@ -44,21 +44,29 @@ def scene_list_actors(state: AppState, actor_class, query):
 
 
 @scene_group.command("property")
-@click.argument("actor_path")
+@click.argument("object_path")
 @click.argument("expression")
 @handle_error
 @click.pass_obj
-def scene_property(state: AppState, actor_path, expression):
-    """Get or set a property on an actor.
+def scene_property(state: AppState, object_path, expression):
+    """Get or set a property on any UObject (actor or component).
 
     Read:  scene property <path> PropertyName
     Write: scene property <path> PropertyName=NewValue
 
+    The <path> can be:
+      - an actor path:     .../Map.Map:PersistentLevel.ActorName
+      - a component path:  .../Map.Map:PersistentLevel.ActorName.CompName
+        (as returned by `editor api-discover <actor>` in components[].path)
+
     \b
     Examples:
-        scene property <actor_path> Intensity           # read
-        scene property <actor_path> Intensity=5.0       # write
-        scene property <actor_path> bHidden=true        # write bool
+        # Read Tags on actor
+        scene property <actor_path> Tags
+        # Write Intensity on the DirectionalLightComponent subobject
+        scene property <actor_path>.LightComponent0 Intensity=5.0
+        # Toggle bHidden on actor
+        scene property <actor_path> bHidden=true
     """
     from cli_anything.unreal.core.scene import get_actor_property, set_actor_property
 
@@ -66,9 +74,9 @@ def scene_property(state: AppState, actor_path, expression):
 
     if "=" in expression:
         prop_name, raw_value = expression.split("=", 1)
-        result = set_actor_property(api, actor_path, prop_name, parse_property_value(raw_value))
+        result = set_actor_property(api, object_path, prop_name, parse_property_value(raw_value))
     else:
-        result = get_actor_property(api, actor_path, expression)
+        result = get_actor_property(api, object_path, expression)
 
     output(result, state)
 

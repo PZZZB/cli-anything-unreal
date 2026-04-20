@@ -1103,6 +1103,134 @@ class TestSceneE2E:
         data = json.loads(result.output)
         assert "location" in data
 
+    # ─── api-discover: the actor → component → property workflow ─────────
+    # These protect the "human's Details-panel path" contract added in plugin v1.9:
+    #   1) api-discover <actor>      → returns `components` tree (matches Details)
+    #   2) api-discover <component>  → returns component's own props/functions
+    #   3) scene property <component> Prop=Value → writes the subobject
+
+    def _find_light_actor(self, api):
+        """Pick any light actor from the level — they all have a LightComponent."""
+        from cli_anything.unreal.core.scene import list_actors
+        for class_name in ("DirectionalLight", "PointLight", "SpotLight", "RectLight"):
+            result = list_actors(api, actor_class=class_name)
+            if result.get("actors"):
+                return result["actors"][0]["path"], class_name
+        return None, None
+
+    def test_api_discover_actor_returns_components(self, cli_runner, api_port, api):
+        """api-discover <actor> must return a `components` tree."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        actor_path, class_name = self._find_light_actor(api)
+        if actor_path is None:
+            pytest.skip("No light actor in level to test components tree")
+
+        result = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port),
+            "editor", "api-discover", actor_path,
+        ])
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        data = json.loads(result.output)
+
+        assert data.get("class") == class_name
+        assert "components" in data, "actor api-discover must include components tree"
+        comps = data["components"]
+        assert isinstance(comps, list) and len(comps) >= 1
+        # Every component entry should carry a usable path + class
+        for c in comps:
+            assert c.get("path")
+            assert c.get("class")
+            assert "is_root" in c and "is_native" in c
+
+    def test_api_discover_component_drills_in(self, cli_runner, api_port, api):
+        """api-discover <component.path> must resolve to the component class."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        actor_path, _ = self._find_light_actor(api)
+        if actor_path is None:
+            pytest.skip("No light actor in level")
+
+        # Step 1: discover the light component path
+        r1 = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port),
+            "editor", "api-discover", actor_path,
+        ])
+        assert r1.exit_code == 0
+        d1 = json.loads(r1.output)
+        light_comp = next(
+            (c for c in d1["components"] if "Light" in c["class"]),
+            None,
+        )
+        if light_comp is None:
+            pytest.skip("No LightComponent found on this actor")
+
+        # Step 2: api-discover that component
+        r2 = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port),
+            "editor", "api-discover", light_comp["path"], "-m", "intensity",
+        ])
+        assert r2.exit_code == 0, f"CLI failed: {r2.output}"
+        d2 = json.loads(r2.output)
+
+        assert d2.get("component") == light_comp["path"]
+        assert d2.get("owning_actor") == actor_path
+        # LightComponent should have Intensity in the filter result
+        assert "Intensity" in d2.get("properties", [])
+
+    def test_scene_property_accepts_component_path(self, cli_runner, api_port, api):
+        """scene property get/set works on a component subobject path, not just actor."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        actor_path, _ = self._find_light_actor(api)
+        if actor_path is None:
+            pytest.skip("No light actor in level")
+
+        r1 = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port),
+            "editor", "api-discover", actor_path,
+        ])
+        d1 = json.loads(r1.output)
+        light_comp = next(
+            (c for c in d1["components"] if "Light" in c["class"]),
+            None,
+        )
+        if light_comp is None:
+            pytest.skip("No LightComponent")
+
+        comp_path = light_comp["path"]
+
+        # Read current intensity
+        rg = cli_runner.invoke(cli, [
+            "--json", "--port", str(api_port),
+            "scene", "property", comp_path, "Intensity",
+        ])
+        assert rg.exit_code == 0, f"Read failed: {rg.output}"
+        original = json.loads(rg.output).get("Intensity")
+        assert original is not None
+
+        # Write a new value, then restore
+        probe_value = float(original) + 1.0
+        try:
+            rs = cli_runner.invoke(cli, [
+                "--json", "--port", str(api_port),
+                "scene", "property", comp_path, f"Intensity={probe_value}",
+            ])
+            assert rs.exit_code == 0, f"Write failed: {rs.output}"
+
+            rv = cli_runner.invoke(cli, [
+                "--json", "--port", str(api_port),
+                "scene", "property", comp_path, "Intensity",
+            ])
+            assert rv.exit_code == 0
+            assert abs(float(json.loads(rv.output)["Intensity"]) - probe_value) < 1e-3
+        finally:
+            # Always restore the pre-test value
+            cli_runner.invoke(cli, [
+                "--json", "--port", str(api_port),
+                "scene", "property", comp_path, f"Intensity={original}",
+            ])
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  E2E: Asset Management

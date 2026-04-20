@@ -91,34 +91,34 @@ def list_actors_of_class(api: UEEditorAPI, actor_class: str) -> dict:
     return list_actors(api, actor_class=actor_class)
 
 
-def get_actor_property(api: UEEditorAPI, actor_path: str, property_name: str) -> dict:
-    """Get a property value on an actor.
+def get_actor_property(api: UEEditorAPI, object_path: str, property_name: str) -> dict:
+    """Get a property value on any UObject (actor or component subobject).
 
     Args:
         api: Connected UEEditorAPI instance.
-        actor_path: Full object path of the actor.
+        object_path: Full object path — actor path or component subobject path.
         property_name: Property name to read.
 
     Returns:
         Property value dict.
     """
-    return api.get_property(actor_path, property_name)
+    return api.get_property(object_path, property_name)
 
 
-def set_actor_property(api: UEEditorAPI, actor_path: str,
+def set_actor_property(api: UEEditorAPI, object_path: str,
                        property_name: str, value) -> dict:
-    """Set a property value on an actor.
+    """Set a property value on any UObject (actor or component subobject).
 
     Args:
         api: Connected UEEditorAPI instance.
-        actor_path: Full object path of the actor.
+        object_path: Full object path — actor path or component subobject path.
         property_name: Property name.
         value: New value.
 
     Returns:
         API response.
     """
-    return api.set_property(actor_path, property_name, value)
+    return api.set_property(object_path, property_name, value)
 
 
 def find_actor_by_name(api: UEEditorAPI, name: str) -> dict:

@@ -72,4 +72,28 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString GetClassInfo(const FString& ClassName, bool bIncludeInherited = true);
+
+	/**
+	 * Returns the component tree of an Actor, mirroring what a user sees in the Details
+	 * panel's Components section after selecting the Actor in World Outliner.
+	 *
+	 * By default, editor-only visualization components (arrow gizmos, billboard icons,
+	 * text renderers for debug display) are filtered out — same as the SCS Components
+	 * tree does. Pass bIncludeVisualization=true to see every UActorComponent returned
+	 * by AActor::GetComponents().
+	 *
+	 * For each component returns:
+	 *   name, class, path (full object path), is_root, is_native, parent (attach parent name)
+	 *
+	 * The returned "path" can be passed directly to Remote Control /object/property or to
+	 * CLI commands (api-discover, scene property) without any path massaging.
+	 *
+	 * @param Actor                   The Actor to inspect.
+	 * @param bIncludeVisualization   If true, include UActorComponent::IsVisualizationComponent()
+	 *                                components (default false to match Details panel).
+	 * @return JSON array string: [{name,class,path,is_root,is_native,parent}, ...]
+	 *         Empty array "[]" if Actor is null or has no components.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString GetActorComponentTree(AActor* Actor, bool bIncludeVisualization = false);
 };

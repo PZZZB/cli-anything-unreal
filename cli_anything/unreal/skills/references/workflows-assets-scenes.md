@@ -2,31 +2,44 @@
 
 ## Universal Workflow: Query First, Then Set
 
-All UE object operations follow the same progressive disclosure pattern:
+All UE object operations follow the same progressive disclosure pattern — the
+same path a human takes in the editor:
 
 ```
-1. Find the object      → scene list / asset list / material list (returns paths + class names)
-2. Discover its API     → editor api-discover <path-or-class> (property/function names)
-3. Drill into details   → editor api-discover <path-or-class> -d Prop1,Func2 (types, tooltips)
-4. Read runtime values  → scene property / asset property
-5. Modify values        → scene property Prop=Value / asset property Prop=Value
+1. Find the object     → scene list / asset list / material list (returns paths + class names)
+2. Discover its API    → editor api-discover <path-or-class> (property/function names)
+3. Drill into details  → editor api-discover <path-or-class> -d Prop1,Func2 (types, tooltips)
+4. Read runtime values → scene property / asset property
+5. Modify values       → scene property Prop=Value / asset property Prop=Value
 ```
 
-`api-discover` accepts a class name, asset path, or actor path — it auto-detects the type:
+`api-discover` accepts a class name, an asset path, an actor path, or a
+**component subobject path** — it auto-detects the type.
+
+## Scene Workflow: Actor → Component → Property
+
+The three commands map 1:1 to clicking Actor → Component → field in the editor.
+**Lights / cameras / most built-in actors hold their functional properties on a
+native component, not on the actor** — always check the components tree first.
 
 ```bash
-# Example: working with a DirectionalLight actor
-cli-anything-unreal --json scene list                                            # 1. Find it (get actor path + class)
-cli-anything-unreal --json editor api-discover /Temp/L.L:PersistentLevel.Light_0 # 2. Overview from actor path
-cli-anything-unreal --json editor api-discover DirectionalLight -d bHidden       # 3. Detail (class name also works)
-cli-anything-unreal --json scene property <actor_path> Intensity                 # 4. Read value
-cli-anything-unreal --json scene property <actor_path> Intensity=5.0             # 5. Modify
+# 1. Find actor
+cli-anything-unreal --json scene list --class DirectionalLight
 
-# Example: working with a material asset
-cli-anything-unreal --json asset list --class Material                           # 1. Find it
-cli-anything-unreal --json editor api-discover /Game/Materials/M_Water           # 2. Overview from asset path
-cli-anything-unreal --json editor api-discover /Game/Materials/M_Water -d BlendMode  # 3. Detail
+# 2. api-discover <actor> — returns components tree (matches Details panel)
+cli-anything-unreal --json editor api-discover ".../DirectionalLight_0"
+# → components: [{ path: ".../DirectionalLight_0.LightComponent0",
+#                  class: "DirectionalLightComponent", is_root: true }]
+
+# 3. api-discover <component.path> — drill into it
+cli-anything-unreal --json editor api-discover ".../DirectionalLight_0.LightComponent0" -d Intensity
+
+# 4. scene property — accepts actor OR component path
+cli-anything-unreal --json scene property ".../DirectionalLight_0.LightComponent0" Intensity=50.0
 ```
+
+Editor-only visualizers (arrow gizmos, billboard icons) are filtered from the
+components tree by default to match the Details panel.
 
 ## Asset Manipulation
 
@@ -115,6 +128,50 @@ cli-anything-unreal --json blueprint delete-unused-variables /Game/BP_Enemy
 
 # 6. Compile and verify
 cli-anything-unreal --json blueprint compile /Game/BP_Enemy
+```
+
+## Operations Without Dedicated Subcommands
+
+Some common operations (adding components to blueprints, spawning actors, setting default values on components) don't have dedicated CLI subcommands. Use `editor run-script` for these — don't spend time searching for a subcommand that doesn't exist.
+
+**Add a component to a Blueprint:**
+```python
+import unreal
+
+bp_path = "/Game/Blueprints/BP_Enemy"
+bp = unreal.load_asset(bp_path)
+subsystem = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+
+# Gather existing subobject handles — first one is the root
+handles = subsystem.k2_gather_subobject_data_for_blueprint(bp)
+
+# Add a StaticMeshComponent under the root
+params = unreal.AddNewSubobjectParams()
+params.parent_handle = handles[0]
+params.new_class = unreal.StaticMeshComponent
+params.blueprint_context = bp
+new_handle, fail_reason = subsystem.add_new_subobject(params)
+
+# Compile so the CDO picks up the new component
+unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+unreal.EditorAssetLibrary.save_asset(bp_path)
+result = {"status": "ok", "component": "StaticMeshComponent"}
+```
+
+**Spawn an actor in the current level:**
+```python
+import unreal
+
+actor_class = unreal.StaticMeshActor
+location = unreal.Vector(0, 0, 100)
+rotation = unreal.Rotator(0, 0, 0)
+
+actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
+    actor_class, location, rotation
+)
+actor.set_actor_label("MyNewActor")
+
+result = {"status": "ok", "actor": actor.get_path_name()}
 ```
 
 ## Level Management

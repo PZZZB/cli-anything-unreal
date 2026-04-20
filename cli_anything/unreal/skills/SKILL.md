@@ -20,31 +20,26 @@ Before running any commands, verify the CLI is installed: `cli-anything-unreal -
 
 ## Core Principles
 
-**Query First, Then Set.** Before modifying any UE object property, always query its reflection info with `editor api-discover` to discover the correct property names and types. Never guess property names or types — UE's Python API requires exact types (e.g., `unreal.LinearColor`, not a tuple string). This applies to all operations: material nodes, actor properties, blueprint variables, etc.
+**Query First, Then Set.** Before modifying any UE object property, always query its reflection info with `editor api-discover` to discover the correct property names and types. Never guess property names or types — UE's Python API requires exact types (e.g., `unreal.LinearColor`, not a tuple string). This applies to all operations: material nodes, actor properties, blueprint variables, etc. Use two-step discovery — glance first, then hover for details:
+1. **Overview** (default): `editor api-discover ClassName` — returns property/function **names** only.
+2. **Detail** (on demand): `editor api-discover ClassName -d Prop1,Func2` — returns full info (tooltips, categories, parameter types, return types, read/write) for the items you name.
 
-**Two-step discovery.** `editor api-discover` mirrors how people use the Details panel — glance first, then hover for details:
-1. **Overview** (default): `editor api-discover ClassName` — returns property/function **names** only. Quick scan of what's available.
-2. **Detail** (on demand): `editor api-discover ClassName -d Prop1,Func2` — returns full info (tooltips, categories, parameter types, return types, read/write) for the **specific** items you care about. Comma-separated names let you get multiple details in one call.
+**CLI is the interface to UE5.** All engine operations go through the `cli-anything-unreal` tool (dedicated subcommands *or* `editor run-script`) — direct file manipulation bypasses engine locks and reference tracking, causing corruption. Read `references/safety.md` before any destructive operation.
 
-**CLI is the interface to UE5.** All engine operations go through CLI commands — direct file manipulation bypasses engine locks and reference tracking, causing corruption. Read `references/safety.md` before any destructive operation.
-
-**Prefer `cli-anything-unreal ... editor launch --wait` for normal startup.** `editor launch` and `editor status` both return `startup_precheck` in JSON for startup blockers (BuildId/module mismatch). If a workflow must launch the editor externally (e.g., RenderDoc/frame-capture injection), that is allowed; when startup appears stuck, use `cli-anything-unreal ... editor status` (with the intended `--port`) plus `editor list` to diagnose runtime API/dialog blocking.
-
-**Always pass `--json`.** Parse the structured JSON block in output. UE warning logs may appear before the JSON — extract the JSON block, not the raw stdout.
-
-**Specify `--project` on the first command.** Subsequent commands in the same shell session inherit it automatically.
-
-**Prefer CLI commands over Python scripts.** Most operations already have dedicated commands. Check `references/commands.md` first. Only fall back to `editor run-script` when no CLI command covers the operation.
+**Prefer CLI subcommands; fall back to `editor run-script` immediately.** `references/commands.md` is the complete subcommand list — if the operation you need is not there, don't spend turns verifying the command's absence (e.g., searching the CLI source code or trying name variations). Write a Python script and run it with `editor run-script` instead; this is the designed escape hatch and the fastest path forward.
 
 **UE asset boundary — two hard rules:**
 1. `.uasset` is a proprietary binary format. Writing text to a `.uasset` file with generic file-write tools will corrupt it instantly. Create assets via `editor run-script` + UE Python API.
 2. Scripts with `import unreal` require the engine runtime. Run them via `editor run-script`, not OS `python` (which lacks the `unreal` module).
 
-**Use UE virtual paths** (`/Game/MyAsset`) when interacting with engine assets, not OS filesystem paths with `.uasset` extensions.
+## Usage Conventions
 
-**Clean up temp files.** After executing a temporary Python script or writing output to a temp file, delete it to keep the workspace clean.
-
-**Protect your context window.** Commands like `blueprint info` or `editor api-discover` can return large outputs. If you only need a single field, either redirect to a temp JSON file and parse it, or use targeted commands like `scene property`.
+- **Always pass `--json`.** Parse the structured JSON block in output. UE warning logs may appear before the JSON — extract the JSON block, not the raw stdout.
+- **Specify `--project` on the first command.** Subsequent commands in the same shell session inherit it automatically.
+- **Use UE virtual paths** (`/Game/MyAsset`) when interacting with engine assets, not OS filesystem paths with `.uasset` extensions.
+- **Use `editor launch --wait` for normal startup.** `editor launch` and `editor status` both return `startup_precheck` in JSON for startup blockers (BuildId/module mismatch). If a workflow must launch the editor externally (e.g., RenderDoc/frame-capture injection), that is allowed; when startup appears stuck, use `editor status` (with the intended `--port`) plus `editor list` to diagnose.
+- **Clean up temp files.** After executing a temporary Python script or writing output to a temp file, delete it to keep the workspace clean.
+- **Protect your context window.** Commands like `blueprint info` or `editor api-discover` can return large outputs. If you only need a single field, either redirect to a temp JSON file and parse it, or use targeted commands like `scene property`.
 
 ## Decision Flow
 
@@ -52,9 +47,9 @@ When the user asks you to do something in Unreal:
 
 1. **Is the editor running?** Run `editor status`. If not reachable, read `references/workflows-editor.md` and follow the Editor Lifecycle flow.
 2. **Do you know the asset path?** If not, discover it with `material list`, `blueprint list`, `scene list`, or `asset list`. These return class names too.
-3. **Do you know what properties/functions this object has?** Use `editor api-discover <path-or-class>` for an overview (names only), then `-d Name1,Name2` for details (types, tooltips, params). You can pass a class name, an asset path (`/Game/...`), or an actor path — it auto-detects the type.
-4. **Does a CLI command exist for this?** Read `references/commands.md` to find the right command.
-5. **No CLI command covers it?** Write and run a Python script with `editor run-script`, using the reflection data from step 3 to get correct property names and types. Delete the script afterwards.
+3. **Do you know what properties/functions this object has?** Use `editor api-discover <target>` for an overview, then `-d Name1,Name2` for details. TARGET can be a class name, asset path, actor path, or component subobject path. For actors, the response includes a `components` tree; drill into `components[].path` when the functional property lives on a component (e.g. `DirectionalLight.Intensity` is on `LightComponent0`).
+4. **Does a CLI subcommand exist for this?** Check `references/commands.md`. If not listed, go to step 5.
+5. **No subcommand?** Write a Python script and run it with `editor run-script`. Use the reflection data from step 3 for correct property names and types. See `references/workflows-editor.md` for scripting patterns. Delete the script afterwards.
 6. **Need visual verification?** Use `screenshot capture` and review the image.
 
 If a command fails, check the JSON `error` field. Common causes: connection refused (editor not running), timeout (editor busy — retry after 10-15s), asset not found (wrong path — use list commands to discover).

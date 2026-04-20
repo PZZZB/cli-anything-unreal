@@ -3760,7 +3760,7 @@ class TestPluginBridge:
 
         assert result["deployed"] is True
         assert result["action"] == "fresh_install"
-        assert result["version"] == "1.8"
+        assert result["version"] == "1.9"
 
         plugin_dir = tmp_path / "Plugins" / "CliAnythingBridge"
         assert (plugin_dir / "CliAnythingBridge.uplugin").exists()
@@ -3796,7 +3796,7 @@ class TestPluginBridge:
         result = ensure_plugin_deployed(project_dir)
         assert result["deployed"] is True
         assert "updated" in result["action"]
-        assert result["version"] == "1.8"
+        assert result["version"] == "1.9"
 
     def test_is_plugin_loaded_true(self):
         """is_plugin_loaded returns True when probe script succeeds."""
@@ -3831,7 +3831,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.8"
+        assert version == "1.9"
 
     def test_get_loaded_plugin_version(self):
         """get_loaded_plugin_version queries the running editor."""
@@ -3858,7 +3858,7 @@ class TestPluginBridge:
         mock_api = MagicMock()
         with patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version") as mock_loaded, \
              patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed") as mock_deploy:
-            mock_loaded.return_value = "1.8"
+            mock_loaded.return_value = "1.9"
             mock_deploy.return_value = {"deployed": True, "action": "already_up_to_date"}
             result = check_plugin_version(mock_api, "/tmp/project")
             assert result["match"] is True
@@ -3872,12 +3872,12 @@ class TestPluginBridge:
         with patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version") as mock_loaded, \
              patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed") as mock_deploy:
             mock_loaded.return_value = "1.3"
-            mock_deploy.return_value = {"deployed": True, "action": "updated_1.3_to_1.8", "version": "1.8"}
+            mock_deploy.return_value = {"deployed": True, "action": "updated_1.3_to_1.9", "version": "1.9"}
             result = check_plugin_version(mock_api, "/tmp/project")
             assert result["match"] is False
             assert result["action_needed"] == "recompile"
             assert result["loaded_version"] == "1.3"
-            assert result["bundled_version"] == "1.8"
+            assert result["bundled_version"] == "1.9"
 
 
 # ═══════════════════════════════════════════════════════════════════════

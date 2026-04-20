@@ -327,6 +327,20 @@ else:
         "actor_name": _target.get_name(),
         "actor_label": _target.get_actor_label(),
     }}
+    # Components tree — mirrors the Details panel's Components section.
+    # Use the Bridge plugin's C++ helper so the output matches AActor::GetComponents()
+    # exactly (including attach parents and native/BP flags).
+    try:
+        _comp_raw = _cli_unreal.CliAnythingBridgeLibrary.get_actor_component_tree(_target)
+        _instance_context["components"] = _cli_json.loads(_comp_raw)
+    except Exception as _e:
+        _instance_context["components"] = []
+        _instance_context["components_error"] = str(_e)
+    if _instance_context["components"]:
+        _instance_context["hint"] = (
+            "This actor has components. To inspect a component's properties, "
+            "run: api-discover <component.path> (paths are in components[].path)."
+        )
     _cli_resolve_ok = True
 '''
 
@@ -345,6 +359,45 @@ else:
             "object_path": _asset.get_path_name(),
         }}
         _cli_resolve_ok = True
+'''
+
+
+# Resolve a component subobject path of the form
+#   /Game/.../Map.Map:PersistentLevel.ActorName.ComponentName
+# by locating the owning actor, then matching a child UActorComponent by name.
+_RESOLVE_COMPONENT = '''\
+_cli_resolve_ok = False
+_cli_comp_path = {component_path!r}
+_cli_split = _cli_comp_path.rsplit(".", 1)
+if len(_cli_split) != 2:
+    result = {{"error": "Invalid component path: " + _cli_comp_path}}
+else:
+    _cli_actor_path, _cli_comp_name = _cli_split
+    _sub = _cli_unreal.get_editor_subsystem(_cli_unreal.EditorActorSubsystem)
+    _cli_actor = None
+    for _a in _sub.get_all_level_actors():
+        if _a.get_path_name() == _cli_actor_path:
+            _cli_actor = _a
+            break
+    if _cli_actor is None:
+        result = {{"error": "Owning actor not found: " + _cli_actor_path}}
+    else:
+        _cli_comp = None
+        for _c in _cli_actor.get_components_by_class(_cli_unreal.ActorComponent):
+            if _c.get_name() == _cli_comp_name:
+                _cli_comp = _c
+                break
+        if _cli_comp is None:
+            result = {{"error": "Component not found: " + _cli_comp_name + " on " + _cli_actor_path}}
+        else:
+            _resolved_class = _cli_comp.__class__.__name__
+            _instance_context = {{
+                "component": _cli_comp.get_path_name(),
+                "component_name": _cli_comp.get_name(),
+                "component_class": _resolved_class,
+                "owning_actor": _cli_actor.get_path_name(),
+            }}
+            _cli_resolve_ok = True
 '''
 
 
@@ -400,7 +453,15 @@ def api_discover(
     """
     # Auto-detect target type from string format
     if "PersistentLevel" in target:
-        resolve_block = _RESOLVE_ACTOR.format(actor_path=target)
+        # Distinguish actor vs component subobject path:
+        #   actor:     .../Map.Map:PersistentLevel.ActorName            (one "." after ":")
+        #   component: .../Map.Map:PersistentLevel.ActorName.CompName   (two "." after ":")
+        _after_colon = target.rsplit(":", 1)[-1] if ":" in target else target
+        _is_component = _after_colon.count(".") >= 2
+        if _is_component:
+            resolve_block = _RESOLVE_COMPONENT.format(component_path=target)
+        else:
+            resolve_block = _RESOLVE_ACTOR.format(actor_path=target)
         call = _API_DISCOVER_INSTANCE_CALL.format(
             resolve_block=resolve_block,
             method_filter=method_filter,

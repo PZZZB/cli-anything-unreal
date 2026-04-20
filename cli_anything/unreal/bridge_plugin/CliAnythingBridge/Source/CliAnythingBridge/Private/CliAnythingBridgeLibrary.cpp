@@ -15,6 +15,10 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
+#include "GameFramework/Actor.h"
+#include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
+
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/TextProperty.h"
@@ -82,7 +86,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.8");
+	return TEXT("1.9");
 }
 
 TArray<FString> UCliAnythingBridgeLibrary::GetMaterialHLSLCode(UMaterialInterface* Material, const FString& OutputPath)
@@ -311,5 +315,60 @@ FString UCliAnythingBridgeLibrary::GetClassInfo(const FString& ClassName, bool b
 	Json += TEXT("]");
 
 	Json += TEXT("}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::GetActorComponentTree(AActor* Actor, bool bIncludeVisualization)
+{
+	if (!Actor) return TEXT("[]");
+
+	TArray<UActorComponent*> Components;
+	Actor->GetComponents(Components);
+
+	USceneComponent* RootComp = Actor->GetRootComponent();
+
+	FString Json = TEXT("[");
+	bool bFirst = true;
+	for (UActorComponent* Comp : Components)
+	{
+		if (!Comp) continue;
+
+		// Match the SCS Components tree in the Details panel: skip editor-only
+		// visualization components (arrow gizmos, billboard icons, debug text, ...).
+		if (!bIncludeVisualization && Comp->IsVisualizationComponent()) continue;
+
+		if (!bFirst) Json += TEXT(",");
+		bFirst = false;
+
+		// Attach parent (scene components only); empty string for non-scene components
+		FString ParentName;
+		if (USceneComponent* SceneComp = Cast<USceneComponent>(Comp))
+		{
+			if (USceneComponent* Parent = SceneComp->GetAttachParent())
+			{
+				ParentName = Parent->GetName();
+			}
+		}
+
+		const bool bIsRoot   = (Comp == RootComp);
+		// RF_DefaultSubObject is set for components created via CreateDefaultSubobject
+		// in the C++ constructor — i.e., "native" components. BP-added and instance
+		// components lack this flag.
+		const bool bIsNative = Comp->HasAnyFlags(RF_DefaultSubObject);
+
+		Json += TEXT("{\"name\":\"") + JsonEscape(Comp->GetName()) + TEXT("\"");
+		Json += TEXT(",\"class\":\"") + JsonEscape(Comp->GetClass()->GetName()) + TEXT("\"");
+		Json += TEXT(",\"path\":\"") + JsonEscape(Comp->GetPathName()) + TEXT("\"");
+		Json += TEXT(",\"is_root\":");
+		Json += bIsRoot ? TEXT("true") : TEXT("false");
+		Json += TEXT(",\"is_native\":");
+		Json += bIsNative ? TEXT("true") : TEXT("false");
+		if (!ParentName.IsEmpty())
+		{
+			Json += TEXT(",\"parent\":\"") + JsonEscape(ParentName) + TEXT("\"");
+		}
+		Json += TEXT("}");
+	}
+	Json += TEXT("]");
 	return Json;
 }
