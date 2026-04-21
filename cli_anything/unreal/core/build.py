@@ -17,7 +17,30 @@ from cli_anything.unreal.utils.ue_backend import (
     run_uat,
     run_build,
     get_engine_version,
+    find_running_build_processes,
+    kill_build_processes,
 )
+
+
+def _check_already_building(uproject_path: str) -> dict | None:
+    """Check if a build is already running for this project.
+
+    Returns an error dict if a build is in progress, None otherwise.
+    """
+    processes = find_running_build_processes(uproject_path)
+    if processes:
+        pids = [p["pid"] for p in processes]
+        names = [p["name"] for p in processes]
+        return {
+            "status": "error",
+            "error": (
+                f"Build already in progress for this project "
+                f"(PIDs: {pids}, processes: {names}). "
+                f"Use 'build stop' to cancel the running build first."
+            ),
+            "running_processes": processes,
+        }
+    return None
 
 
 def compile_project(
@@ -25,7 +48,6 @@ def compile_project(
     config: str = "Development",
     platform: str = "Win64",
     engine_root: str | None = None,
-    timeout: int = 3600,
 ) -> dict:
     """Compile the project's C++ code.
 
@@ -34,11 +56,15 @@ def compile_project(
         config: Build configuration (Development, Shipping, DebugGame, etc.).
         platform: Target platform (Win64, Linux, etc.).
         engine_root: Engine root (auto-detected if None).
-        timeout: Build timeout in seconds.
 
     Returns:
         {"status": "ok"|"error", "returncode": int, "stdout": str, "stderr": str}
     """
+    # Check if a build is already running
+    already = _check_already_building(uproject_path)
+    if already:
+        return already
+
     if engine_root is None:
         engine_root = find_engine_root(uproject_path)
     if not engine_root:
@@ -57,7 +83,7 @@ def compile_project(
         "-utf8output",
     ]
 
-    result = run_uat(engine_root, "BuildCookRun", args, timeout=timeout)
+    result = run_uat(engine_root, "BuildCookRun", args)
 
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
@@ -71,7 +97,6 @@ def cook_content(
     uproject_path: str,
     platform: str = "Win64",
     engine_root: str | None = None,
-    timeout: int = 3600,
 ) -> dict:
     """Cook content assets for the target platform.
 
@@ -79,11 +104,15 @@ def cook_content(
         uproject_path: Path to .uproject file.
         platform: Target platform.
         engine_root: Engine root (auto-detected if None).
-        timeout: Timeout in seconds.
 
     Returns:
         Build result dict.
     """
+    # Check if a build is already running
+    already = _check_already_building(uproject_path)
+    if already:
+        return already
+
     if engine_root is None:
         engine_root = find_engine_root(uproject_path)
     if not engine_root:
@@ -98,7 +127,7 @@ def cook_content(
         "-allmaps",
     ]
 
-    result = run_uat(engine_root, "BuildCookRun", args, timeout=timeout)
+    result = run_uat(engine_root, "BuildCookRun", args)
 
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
@@ -114,7 +143,6 @@ def package_project(
     config: str = "Development",
     output_dir: str | None = None,
     engine_root: str | None = None,
-    timeout: int = 7200,
 ) -> dict:
     """Full package pipeline: build + cook + stage + package + archive.
 
@@ -124,11 +152,15 @@ def package_project(
         config: Build configuration.
         output_dir: Archive output directory.
         engine_root: Engine root (auto-detected if None).
-        timeout: Timeout in seconds.
 
     Returns:
         Build result dict.
     """
+    # Check if a build is already running
+    already = _check_already_building(uproject_path)
+    if already:
+        return already
+
     if engine_root is None:
         engine_root = find_engine_root(uproject_path)
     if not engine_root:
@@ -152,7 +184,7 @@ def package_project(
         "-utf8output",
     ]
 
-    result = run_uat(engine_root, "BuildCookRun", args, timeout=timeout)
+    result = run_uat(engine_root, "BuildCookRun", args)
 
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
@@ -219,14 +251,12 @@ def build_status(uproject_path: str) -> dict:
 def generate_project_files(
     uproject_path: str,
     engine_root: str | None = None,
-    timeout: int = 600,
 ) -> dict:
     """Generate Visual Studio project files.
 
     Args:
         uproject_path: Path to .uproject file.
         engine_root: Engine root (auto-detected if None).
-        timeout: Timeout in seconds.
 
     Returns:
         Result dict.
@@ -244,14 +274,14 @@ def generate_project_files(
             "-game",
             "-engine",
         ]
-        result = run_uat(engine_root, "GenerateProjectFiles", args, timeout=timeout)
+        result = run_uat(engine_root, "GenerateProjectFiles", args)
     else:
         import subprocess
         import sys
         try:
             proc = subprocess.run(
                 [gen_bat, f"-project={uproject_path}", "-game", "-engine"],
-                capture_output=True, text=True, timeout=timeout,
+                capture_output=True, text=True,
                 shell=(sys.platform == "win32"),
             )
             result = {
@@ -267,4 +297,37 @@ def generate_project_files(
         "returncode": result["returncode"],
         "stdout": result["stdout"],
         "stderr": result["stderr"],
+    }
+
+
+def stop_build(uproject_path: str) -> dict:
+    """Stop a running build by killing the process tree.
+
+    Args:
+        uproject_path: Path to .uproject file.
+
+    Returns:
+        {"status": "ok"|"partial"|"none", "killed": [pid, ...], "remaining": [pid, ...]}
+    """
+    result = kill_build_processes(uproject_path)
+    return {
+        "status": result["status"],
+        "killed": result["killed"],
+        "remaining": result["remaining"],
+    }
+
+
+def is_building(uproject_path: str) -> dict:
+    """Check if the project is currently being compiled.
+
+    Args:
+        uproject_path: Path to .uproject file.
+
+    Returns:
+        {"building": bool, "processes": [{"pid": int, "name": str, ...}, ...]}
+    """
+    processes = find_running_build_processes(uproject_path)
+    return {
+        "building": len(processes) > 0,
+        "processes": processes,
     }

@@ -165,7 +165,6 @@ def run_uat(
     engine_root: str,
     command: str,
     args: list[str] | None = None,
-    timeout: int = 3600,
     capture: bool = True,
 ) -> dict:
     """Execute a UAT command.
@@ -174,7 +173,6 @@ def run_uat(
         engine_root: Path to engine root.
         command: UAT command name (e.g., "BuildCookRun").
         args: Additional arguments.
-        timeout: Timeout in seconds.
         capture: If True, capture stdout/stderr; else stream to console.
 
     Returns:
@@ -185,7 +183,7 @@ def run_uat(
         return {"returncode": -1, "stdout": "", "stderr": "RunUAT.bat not found"}
 
     cmd = [uat, command] + (args or [])
-    return _run_subprocess(cmd, timeout=timeout, capture=capture)
+    return _run_subprocess(cmd, capture=capture)
 
 
 def run_build(
@@ -194,7 +192,6 @@ def run_build(
     platform: str = "Win64",
     config: str = "Development",
     extra_args: list[str] | None = None,
-    timeout: int = 3600,
 ) -> dict:
     """Execute Build.bat.
 
@@ -204,7 +201,6 @@ def run_build(
         platform: Target platform.
         config: Build configuration.
         extra_args: Additional arguments.
-        timeout: Timeout in seconds.
 
     Returns:
         {"returncode": int, "stdout": str, "stderr": str}
@@ -214,55 +210,70 @@ def run_build(
         return {"returncode": -1, "stdout": "", "stderr": "Build.bat not found"}
 
     cmd = [build_bat, target, platform, config] + (extra_args or [])
-    return _run_subprocess(cmd, timeout=timeout)
+    return _run_subprocess(cmd)
+
+
+# Safety timeout: 24 hours. Not user-configurable.
+# The AI should use `build stop` to cancel long-running builds.
+_SAFETY_TIMEOUT = 86400
+
+
+def _kill_process_tree(pid: int) -> bool:
+    """Kill a process and all its descendants using taskkill /F /T.
+
+    Uses the /T flag to terminate the entire process tree,
+    which is critical for killing UAT→UBT→MSBuild→cl.exe chains.
+
+    Args:
+        pid: Process ID to kill.
+
+    Returns:
+        True if the kill command succeeded.
+    """
+    if sys.platform != "win32":
+        try:
+            import signal
+            os.kill(pid, signal.SIGKILL)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
+    try:
+        result = subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 def _run_subprocess(
     cmd: list[str],
-    timeout: int = 3600,
     capture: bool = True,
     cwd: str | None = None,
 ) -> dict:
     """Run a subprocess and return results.
 
+    Uses Popen so we can track the PID and kill the entire process tree
+    on timeout (fixes the orphan MSBuild/UBT process bug).
+
     Returns:
         {"returncode": int, "stdout": str, "stderr": str}
     """
+    use_shell = sys.platform == "win32"
+    stdout_pipe = subprocess.PIPE if capture else subprocess.DEVNULL
+    stderr_pipe = subprocess.PIPE if capture else subprocess.DEVNULL
+
     try:
-        if capture:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                cwd=cwd,
-                shell=(sys.platform == "win32"),
-            )
-            return {
-                "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            }
-        else:
-            result = subprocess.run(
-                cmd,
-                timeout=timeout,
-                cwd=cwd,
-                shell=(sys.platform == "win32"),
-            )
-            return {
-                "returncode": result.returncode,
-                "stdout": "",
-                "stderr": "",
-            }
-    except subprocess.TimeoutExpired:
-        return {
-            "returncode": -2,
-            "stdout": "",
-            "stderr": f"Command timed out after {timeout}s",
-        }
+        proc = subprocess.Popen(
+            cmd,
+            stdout=stdout_pipe,
+            stderr=stderr_pipe,
+            cwd=cwd,
+            shell=use_shell,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if use_shell else 0,
+        )
     except FileNotFoundError as e:
         return {
             "returncode": -1,
@@ -275,6 +286,35 @@ def _run_subprocess(
             "stdout": "",
             "stderr": str(e),
         }
+
+    try:
+        stdout_bytes, stderr_bytes = proc.communicate(timeout=_SAFETY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # Kill the entire process tree to prevent orphan MSBuild/UBT
+        _kill_process_tree(proc.pid)
+        try:
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout_bytes, stderr_bytes = proc.communicate()
+        return {
+            "returncode": -2,
+            "stdout": (stdout_bytes or b"").decode("utf-8", errors="replace") if capture else "",
+            "stderr": f"Command timed out after {_SAFETY_TIMEOUT}s",
+        }
+
+    stdout_text = ""
+    stderr_text = ""
+    if capture and stdout_bytes is not None:
+        stdout_text = stdout_bytes.decode("utf-8", errors="replace")
+    if capture and stderr_bytes is not None:
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+
+    return {
+        "returncode": proc.returncode,
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+    }
 
 
 def get_engine_version(engine_root: str) -> Optional[str]:
@@ -899,3 +939,135 @@ def detect_ue_dialogs() -> list[dict]:
         user32.EnumChildWindows(main_hwnd, WNDENUMPROC(_enum_children), 0)
 
     return results
+
+
+# ── Build process detection & management ────────────────────────────────
+
+_BUILD_PROCESS_NAMES = [
+    "MSBuild.exe",
+    "UnrealBuildTool.exe",
+    "bk-ubt-tool.exe",
+    "cl.exe",
+    "link.exe",
+]
+
+
+def find_running_build_processes(uproject_path: str | None = None) -> list[dict]:
+    """Find running build processes (MSBuild, UBT, cl.exe, etc.).
+
+    If uproject_path is given, only returns processes whose command line
+    references that .uproject file.
+
+    Returns a list of dicts: [{"pid": int, "name": str, "cmdline": str, "project": str}, ...]
+    """
+    if sys.platform != "win32":
+        return []
+
+    processes = []
+
+    # Build PowerShell filter for process names
+    name_filters = " or ".join(f"Name = '{n}'" for n in _BUILD_PROCESS_NAMES)
+
+    try:
+        ps_cmd = (
+            f'Get-CimInstance Win32_Process -Filter "{name_filters}" '
+            '| Select-Object ProcessId, Name, CommandLine '
+            '| ConvertTo-Json -Compress'
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout)
+            if isinstance(data, dict):
+                data = [data]
+            for proc in data:
+                pid = proc.get("ProcessId", 0)
+                name = proc.get("Name", "")
+                cmdline = proc.get("CommandLine", "") or ""
+
+                # Extract .uproject path from command line
+                project = ""
+                for token in cmdline.split():
+                    if token.endswith(".uproject") or token.endswith('.uproject"'):
+                        project = token.strip('"')
+                        break
+
+                # Filter by project if requested
+                if uproject_path:
+                    # Normalize both paths for comparison
+                    norm_project = project.replace("/", "\\").lower()
+                    norm_uproject = uproject_path.replace("/", "\\").lower()
+                    if norm_project != norm_uproject and norm_uproject not in cmdline.lower():
+                        continue
+
+                processes.append({
+                    "pid": int(pid),
+                    "name": name,
+                    "cmdline": cmdline,
+                    "project": project,
+                })
+            return processes
+    except Exception:
+        pass
+
+    return processes
+
+
+def kill_build_processes(uproject_path: str | None = None) -> dict:
+    """Kill all build processes for a project (or all build processes).
+
+    Finds running build processes via find_running_build_processes(),
+    kills each with _kill_process_tree(), waits, and re-checks.
+
+    Args:
+        uproject_path: If given, only kill processes for this project.
+            If None, kill all build processes.
+
+    Returns:
+        {"killed": [pid, ...], "remaining": [pid, ...], "status": "ok"|"partial"|"none"}
+    """
+    processes = find_running_build_processes(uproject_path)
+
+    if not processes:
+        return {"killed": [], "remaining": [], "status": "none"}
+
+    killed = []
+    failed = []
+
+    for proc in processes:
+        if _kill_process_tree(proc["pid"]):
+            killed.append(proc["pid"])
+        else:
+            failed.append(proc["pid"])
+
+    # Wait for processes to actually terminate
+    import time
+    time.sleep(3)
+
+    # Re-check: some processes may have spawned new children
+    remaining_procs = find_running_build_processes(uproject_path)
+    remaining_pids = [p["pid"] for p in remaining_procs if p["pid"] not in killed]
+
+    # Second pass: kill any remaining
+    if remaining_pids:
+        time.sleep(5)
+        for pid in remaining_pids:
+            _kill_process_tree(pid)
+        time.sleep(3)
+        # Final check
+        final_procs = find_running_build_processes(uproject_path)
+        remaining_pids = [p["pid"] for p in final_procs]
+
+    status = "ok"
+    if remaining_pids:
+        status = "partial"
+    elif not killed:
+        status = "none"
+
+    return {
+        "killed": killed,
+        "remaining": remaining_pids,
+        "status": status,
+    }

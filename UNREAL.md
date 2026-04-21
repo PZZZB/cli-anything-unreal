@@ -82,6 +82,8 @@ Invoked via `RunUAT.bat` and `Build.bat` in the engine install directory.
 | Compile C++ | UAT `BuildCookRun -build` | `build compile --config Development` |
 | Cook content | UAT `BuildCookRun -cook` | `build cook --platform Win64` |
 | Package | UAT `BuildCookRun -build -cook -stage -package -archive` | `build package` |
+| Stop build | `taskkill /F /T` process tree | `build stop` |
+| Check if building | Process scan (MSBuild/UBT) | `build is-building` |
 | Generate VS files | `GenerateProjectFiles.bat` | `project generate` |
 | Build status | Filesystem scan of Binaries/ and Intermediate/ | `build status` |
 
@@ -197,7 +199,7 @@ via the HTTP API + Python script injection.
 |--------|-------|-----------------|---------|
 | `unreal_cli.py` | 1,822 | — | Click CLI entry point, all commands |
 | `core/project.py` | 320 | No | .uproject parsing, config I/O, content listing |
-| `core/build.py` | 270 | No | Compile, cook, package via UAT/UBT |
+| `core/build.py` | 310 | No | Compile, cook, package, stop, is-building via UAT/UBT |
 | `core/session.py` | 204 | No | Session state, undo/redo (50 entries max) |
 | `core/scene.py` | 252 | Yes | Actor queries, property get/set, transforms |
 | `core/materials.py` | 1,293 | Yes | Material inspection, node editing, HLSL dump |
@@ -220,6 +222,8 @@ via the HTTP API + Python script injection.
 | Build (Development) | `build compile --config Development` |
 | Cook for Windows | `build cook --platform Win64` |
 | Package project | `build package --platform Win64 --config Shipping` |
+| Stop running build | `build stop` |
+| Check if building | `build is-building` |
 | Check build artifacts | `build status` |
 | Check editor status | `editor status` |
 | Discover editors | `editor list` |

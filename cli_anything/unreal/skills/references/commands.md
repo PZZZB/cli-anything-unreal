@@ -106,6 +106,8 @@ None of the build commands require the editor.
 | `build compile` | Compile C++ code |
 | `build cook [--platform P]` | Cook content assets |
 | `build package [--platform P] [--config C]` | Full package pipeline |
+| `build stop` | Stop a running build (kills MSBuild/UBT process tree) |
+| `build is-building` | Check if the project is currently being compiled |
 | `build status` | Check build status (binaries, logs) |
 
 ## scene — Scene/Level Queries
