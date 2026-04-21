@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -57,7 +58,8 @@ def _run_build_with_heartbeat(cmd: list[str]) -> dict:
     (e.g. "[build] still running … 300s elapsed") so the AI / user
     knows the build is alive.
 
-    This mirrors the editor-launch heartbeat pattern in editor.py.
+    Background threads drain stdout/stderr into buffers so the pipe
+    never fills up and blocks the child process.
 
     Returns:
         {"returncode": int, "stdout": str, "stderr": str}
@@ -66,6 +68,29 @@ def _run_build_with_heartbeat(cmd: list[str]) -> dict:
     if isinstance(proc, dict):
         # Error dict from start_build_subprocess
         return proc
+
+    # Drain stdout/stderr in background threads to avoid pipe deadlock.
+    # If the OS pipe buffer (~64 KB) fills up, the child process blocks
+    # on write() and appears to hang — this was causing the real build
+    # to stall silently.
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+
+    def _drain(pipe, chunks):
+        try:
+            for data in iter(lambda: pipe.read(65536), b""):
+                chunks.append(data)
+        except Exception:
+            pass
+
+    stdout_thread = threading.Thread(
+        target=_drain, args=(proc.stdout, stdout_chunks), daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_drain, args=(proc.stderr, stderr_chunks), daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
 
     start_time = time.monotonic()
     last_heartbeat = start_time
@@ -78,7 +103,18 @@ def _run_build_with_heartbeat(cmd: list[str]) -> dict:
             last_heartbeat = now
         time.sleep(1)
 
-    return collect_subprocess_result(proc)
+    # Wait for drain threads to finish
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+
+    stdout_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+    stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+
+    return {
+        "returncode": proc.returncode,
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+    }
 
 
 def compile_project(

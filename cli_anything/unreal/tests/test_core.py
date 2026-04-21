@@ -4548,11 +4548,27 @@ class TestBuildStopAndDetect:
 class TestBuildHeartbeat:
     """Tests for the build heartbeat feature.
 
-    The heartbeat pattern mirrors the editor-launch heartbeat:
-    start_build_subprocess() returns a Popen, the caller polls and
-    prints heartbeat messages, then collect_subprocess_result() waits
-    for the final output.
+    The heartbeat pattern: start_build_subprocess() returns a Popen,
+    background threads drain stdout/stderr while the main thread polls
+    and prints heartbeat messages every BUILD_HEARTBEAT_INTERVAL seconds.
     """
+
+    def _make_mock_proc(self, poll_sequence=None):
+        """Create a mock Popen with configurable poll results."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 1234
+        mock_proc.returncode = 0
+        mock_proc.stdout = MagicMock()
+        mock_proc.stderr = MagicMock()
+        # stdout/stderr read returns empty (drain threads exit immediately)
+        mock_proc.stdout.read = MagicMock(return_value=b"")
+        mock_proc.stderr.read = MagicMock(return_value=b"")
+
+        if poll_sequence is not None:
+            mock_proc.poll.side_effect = poll_sequence
+        else:
+            mock_proc.poll.return_value = 0  # finished
+        return mock_proc
 
     def test_build_heartbeat_interval_constant(self):
         """BUILD_HEARTBEAT_INTERVAL is 300 (5 minutes)."""
@@ -4568,7 +4584,6 @@ class TestBuildHeartbeat:
 
         with patch("subprocess.Popen", return_value=mock_proc):
             result = start_build_subprocess(["echo", "test"])
-            # start_build_subprocess returns Popen on success (not a dict)
             assert not isinstance(result, dict)
             assert hasattr(result, "pid")
 
@@ -4615,19 +4630,12 @@ class TestBuildHeartbeat:
         """_run_build_with_heartbeat works when process finishes quickly (no heartbeat)."""
         from cli_anything.unreal.core.build import _run_build_with_heartbeat
 
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = 0  # already finished
-        mock_proc.communicate.return_value = (b"output", b"")
-        mock_proc.returncode = 0
+        mock_proc = self._make_mock_proc()
 
         with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=mock_proc), \
-             patch("cli_anything.unreal.core.build.collect_subprocess_result", return_value={
-                 "returncode": 0, "stdout": "output", "stderr": "",
-             }), \
              patch("builtins.print") as mock_print:
             result = _run_build_with_heartbeat(["test"])
 
-        # No heartbeat for a fast process
         heartbeat_calls = [
             c for c in mock_print.call_args_list
             if "[build] still running" in str(c)
@@ -4639,22 +4647,10 @@ class TestBuildHeartbeat:
         """_run_build_with_heartbeat prints heartbeat when build runs long."""
         from cli_anything.unreal.core.build import _run_build_with_heartbeat
 
-        mock_proc = MagicMock()
         # poll returns None 3 times (still running), then 0 (finished)
-        poll_count = 0
-        def poll_side_effect():
-            nonlocal poll_count
-            poll_count += 1
-            if poll_count >= 3:
-                return 0
-            return None
-        mock_proc.poll.side_effect = poll_side_effect
-        mock_proc.returncode = 0
+        mock_proc = self._make_mock_proc(poll_sequence=[None, None, 0])
 
         with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=mock_proc), \
-             patch("cli_anything.unreal.core.build.collect_subprocess_result", return_value={
-                 "returncode": 0, "stdout": "output", "stderr": "",
-             }), \
              patch("cli_anything.unreal.core.build.time") as mock_time, \
              patch("builtins.print") as mock_print:
             # Simulate: start=0, 1s, 301s (heartbeat!), 302s
@@ -4674,14 +4670,9 @@ class TestBuildHeartbeat:
         """No heartbeat printed when process finishes before interval."""
         from cli_anything.unreal.core.build import _run_build_with_heartbeat
 
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = 0  # finished immediately
-        mock_proc.returncode = 0
+        mock_proc = self._make_mock_proc()  # poll returns 0 immediately
 
         with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=mock_proc), \
-             patch("cli_anything.unreal.core.build.collect_subprocess_result", return_value={
-                 "returncode": 0, "stdout": "output", "stderr": "",
-             }), \
              patch("cli_anything.unreal.core.build.time") as mock_time, \
              patch("builtins.print") as mock_print:
             mock_time.monotonic.side_effect = [0, 0.1]
@@ -4706,6 +4697,36 @@ class TestBuildHeartbeat:
 
         assert result["returncode"] == -1
         assert "not found" in result["stderr"]
+
+    def test_run_build_with_heartbeat_drains_pipes(self):
+        """_run_build_with_heartbeat uses background threads to drain stdout/stderr."""
+        from cli_anything.unreal.core.build import _run_build_with_heartbeat
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 1234
+        mock_proc.returncode = 0
+        mock_proc.poll.return_value = 0
+
+        # Simulate stdout/stderr with data
+        mock_stdout = MagicMock()
+        mock_stderr = MagicMock()
+
+        def stdout_read(n):
+            mock_stdout.read_called = True
+            return b""  # EOF
+        def stderr_read(n):
+            mock_stderr.read_called = True
+            return b""  # EOF
+
+        mock_stdout.read = stdout_read
+        mock_stderr.read = stderr_read
+        mock_proc.stdout = mock_stdout
+        mock_proc.stderr = mock_stderr
+
+        with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=mock_proc):
+            result = _run_build_with_heartbeat(["test"])
+
+        assert result["returncode"] == 0
 
     def test_compile_uses_heartbeat(self, temp_project):
         """compile_project uses _run_build_with_heartbeat (not run_uat)."""
@@ -4753,21 +4774,9 @@ class TestBuildHeartbeat:
         """Multiple heartbeats emitted when build runs long enough."""
         from cli_anything.unreal.core.build import _run_build_with_heartbeat
 
-        mock_proc = MagicMock()
-        poll_count = 0
-        def poll_side_effect():
-            nonlocal poll_count
-            poll_count += 1
-            if poll_count >= 5:
-                return 0
-            return None
-        mock_proc.poll.side_effect = poll_side_effect
-        mock_proc.returncode = 0
+        mock_proc = self._make_mock_proc(poll_sequence=[None, None, None, None, 0])
 
         with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=mock_proc), \
-             patch("cli_anything.unreal.core.build.collect_subprocess_result", return_value={
-                 "returncode": 0, "stdout": "", "stderr": "",
-             }), \
              patch("cli_anything.unreal.core.build.time") as mock_time, \
              patch("builtins.print") as mock_print:
             # Start=0, advance past 300 (1st), past 600 (2nd), then finish
