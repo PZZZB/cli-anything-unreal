@@ -3255,6 +3255,19 @@ class TestScriptRunner:
         assert "error" in result
         assert result["error_type"] == "AttributeError"
 
+    def test_run_python_code_isolates_user_globals_between_calls(self):
+        """Separate invocations should not leak user globals into later runs."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        mock_api = MagicMock()
+        self._make_exec_python_ex_mock(mock_api)
+
+        first = run_python_code(mock_api, "sticky = 123\nresult = {'ok': True}", timeout=5, save=False)
+        second = run_python_code(mock_api, "result = {'sticky_present': 'sticky' in globals()}", timeout=5, save=False)
+
+        assert first["ok"] is True
+        assert second["sticky_present"] is False
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Test scene.py (mocked API)

@@ -44,6 +44,11 @@ if TYPE_CHECKING:
 # other unreal.log() calls the user script may make.
 _RESULT_MARKER = "__cli_result__:"
 
+# Keep user execution isolated so temporary names like ``mat`` or ``custom`` do
+# not persist across separate Remote Control Python calls and accidentally keep
+# UObjects alive in the editor process.
+_USER_NS_NAME = "_cli_user_ns"
+
 # ── Wrapper template ────────────────────────────────────────────────
 # The user code is inserted at {user_code}.  The wrapper:
 #   1. Runs user code inside try/except.
@@ -62,7 +67,8 @@ _cli_string_io = _cli_io.StringIO()
 _cli_sys.stdout = _cli_string_io
 
 try:
-{indented_user_code}
+    {user_ns_name} = {{"__builtins__": __builtins__}}
+    exec(compile({user_code_literal}, "<cli_anything_user_code>", "exec"), {user_ns_name}, {user_ns_name})
 {save_block}
 except Exception as _cli_exc:
     _cli_error = _cli_exc
@@ -79,12 +85,12 @@ if _cli_error is not None:
     }})
 else:
     try:
-        _cli_user_result = result  # noqa: F821
+        _cli_user_result = {user_ns_name}["result"]
         if isinstance(_cli_user_result, dict):
             _cli_result.update(_cli_user_result)
         else:
             _cli_result["value"] = str(_cli_user_result)
-    except NameError:
+    except KeyError:
         _cli_result["status"] = "ok"
 
 _cli_unreal.log("{marker}" + _cli_json.dumps(_cli_result, default=str))
@@ -187,12 +193,9 @@ def _execute(
     ``PythonScriptLibrary.ExecutePythonCommandEx``), and extracts the
     JSON result from the captured ``LogOutput``.
     """
-    indented = "\n".join(
-        ("    " + line) if line.strip() else line
-        for line in code.splitlines()
-    )
     wrapper = _WRAPPER_TEMPLATE.format(
-        indented_user_code=indented,
+        user_code_literal=json.dumps(code),
+        user_ns_name=_USER_NS_NAME,
         save_block=_SAVE_BLOCK if save else "",
         marker=_RESULT_MARKER,
     )
