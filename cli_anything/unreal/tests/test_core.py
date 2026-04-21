@@ -4730,21 +4730,30 @@ class TestBuildStopAndDetect:
             assert result["killed"] == []
 
     def test_run_subprocess_kills_tree_on_timeout(self, tmp_path):
-        """_run_subprocess kills the process tree on timeout (no orphans)."""
+        """_run_subprocess kills the process tree when the safety timeout is hit."""
         from cli_anything.unreal.utils.ue_backend import _run_subprocess
 
         mock_proc = MagicMock()
         mock_proc.pid = 9999
+        # The inner poll-wait loop now catches TimeoutExpired repeatedly
+        # until the safety deadline is reached — exactly one expiry is
+        # enough when we force the safety timeout down to 0.
         mock_proc.wait.side_effect = [
-            subprocess.TimeoutExpired(cmd="test", timeout=86400),
-            None,  # second wait() after kill succeeds
+            subprocess.TimeoutExpired(cmd="test", timeout=1),
+            None,  # post-kill wait() succeeds
         ]
         mock_proc.returncode = -2
 
         log_path = tmp_path / "t.log"
         with patch("subprocess.Popen", return_value=mock_proc), \
+             patch("cli_anything.unreal.utils.ue_backend._SAFETY_TIMEOUT", 0), \
              patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True) as mock_kill:
-            result = _run_subprocess(["echo", "test"], log_file=str(log_path))
+            # Disable heartbeats so the poll loop doesn't spin waiting for
+            # a beat boundary.
+            result = _run_subprocess(
+                ["echo", "test"], log_file=str(log_path),
+                heartbeat_seconds=0,
+            )
             assert result["returncode"] == -2
             assert result["log_file"] == str(log_path)
             assert "timed out" in result["error"].lower()

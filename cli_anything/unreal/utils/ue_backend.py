@@ -289,12 +289,24 @@ def run_uat(
     log_file: str | None = None,
     log_label: str = "uat",
     project_dir: str | None = None,
+    heartbeat_seconds: float = 60.0,
 ) -> dict:
-    """Execute a UAT command.
+    """Execute a UAT command synchronously.
 
     stdout/stderr are redirected directly to ``log_file`` (allocated under
     the project's ``Saved/Logs/`` if not provided) — never buffered in the
     caller's memory. This prevents huge build logs from polluting AI context.
+
+    While the child runs, a heartbeat line is written to the calling
+    process's stderr every ``heartbeat_seconds`` seconds (see
+    ``_run_subprocess``) so AI callers tailing the stream can tell the
+    build is still alive.
+
+    This function blocks until UAT exits. For long-running builds (5-15 min
+    compile, 15-30 min package), the caller is expected to wrap this in
+    its own background mechanism rather than fork a detached child here —
+    AI harnesses routinely use kill-on-job-close Job Objects that would
+    kill any "detached" descendant when the CLI returns anyway.
 
     Args:
         engine_root: Path to engine root.
@@ -304,8 +316,11 @@ def run_uat(
             a timestamped file is allocated under ``<project_dir>/Saved/Logs``
             (or the system temp dir if ``project_dir`` is None).
         log_label: Short tag used in the auto-allocated log filename
-            (e.g. "compile", "cook", "package").
+            (e.g. "compile", "cook", "package"). Also used as the
+            heartbeat label.
         project_dir: Project root for default log location.
+        heartbeat_seconds: Period between stderr "still alive" lines.
+            Default 60s. Pass 0 to disable.
 
     Returns:
         ``{"returncode": int, "log_file": str, "duration_seconds": float}``.
@@ -324,7 +339,12 @@ def run_uat(
     cmd = [uat, command] + (args or [])
     if log_file is None:
         log_file = _allocate_log_path(project_dir, log_label)
-    return _run_subprocess(cmd, log_file=log_file)
+    return _run_subprocess(
+        cmd,
+        log_file=log_file,
+        heartbeat_seconds=heartbeat_seconds,
+        heartbeat_label=log_label,
+    )
 
 
 def run_build(
@@ -336,10 +356,12 @@ def run_build(
     log_file: str | None = None,
     log_label: str = "build",
     project_dir: str | None = None,
+    heartbeat_seconds: float = 60.0,
 ) -> dict:
     """Execute Build.bat.
 
-    stdout/stderr are redirected to ``log_file`` (see ``run_uat``).
+    stdout/stderr are redirected to ``log_file`` (see ``run_uat``). A
+    heartbeat is written to stderr every ``heartbeat_seconds`` seconds.
 
     Args:
         engine_root: Path to engine root.
@@ -349,8 +371,11 @@ def run_build(
         extra_args: Additional arguments.
         log_file: Absolute path to write combined output. Auto-allocated
             under ``<project_dir>/Saved/Logs`` if None.
-        log_label: Short tag for the auto-allocated filename.
+        log_label: Short tag for the auto-allocated filename; also used
+            as the heartbeat label.
         project_dir: Project root for default log location.
+        heartbeat_seconds: Period between stderr heartbeats. Pass 0 to
+            disable.
 
     Returns:
         Same shape as ``run_uat``.
@@ -367,7 +392,12 @@ def run_build(
     cmd = [build_bat, target, platform, config] + (extra_args or [])
     if log_file is None:
         log_file = _allocate_log_path(project_dir, log_label)
-    return _run_subprocess(cmd, log_file=log_file)
+    return _run_subprocess(
+        cmd,
+        log_file=log_file,
+        heartbeat_seconds=heartbeat_seconds,
+        heartbeat_label=log_label,
+    )
 
 
 # Safety timeout: 24 hours. Not user-configurable.
@@ -426,6 +456,8 @@ def _run_subprocess(
     cmd: list[str],
     log_file: str,
     cwd: str | None = None,
+    heartbeat_seconds: float = 60.0,
+    heartbeat_label: str = "build",
 ) -> dict:
     """Run a subprocess with stdout+stderr redirected to ``log_file``.
 
@@ -435,6 +467,18 @@ def _run_subprocess(
     impossible by construction. This is the key property for UE build
     commands, whose combined output can reach tens of MB.
 
+    While the child runs, a heartbeat line is written to stderr every
+    ``heartbeat_seconds`` seconds so AI callers watching the subprocess
+    can tell the build is still alive:
+
+        [build] elapsed 2m00s  log 1.23 MB
+
+    ``log`` is the current size of the build log file — it grows while
+    UAT is producing output, so a stalled log is a strong hint that the
+    build is genuinely stuck (vs. just slow). The log path itself is
+    printed once up front by the caller, not repeated in every beat.
+    Setting ``heartbeat_seconds <= 0`` disables heartbeats.
+
     Uses Popen so we can track the PID and kill the entire process tree on
     timeout (fixes the orphan MSBuild/UBT bug).
 
@@ -443,6 +487,9 @@ def _run_subprocess(
         log_file: Absolute path to the log file. Parent dir will be created.
             Overwritten if it already exists.
         cwd: Working directory for the child.
+        heartbeat_seconds: Period between "still alive" stderr prints.
+            Default 60s. Pass 0 or a negative value to disable.
+        heartbeat_label: Tag used in the heartbeat line (e.g. "compile").
 
     Returns:
         ``{"returncode": int, "log_file": str, "duration_seconds": float}``.
@@ -492,22 +539,43 @@ def _run_subprocess(
                 "error": str(e),
             }
 
-        try:
-            proc.wait(timeout=_SAFETY_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            # Kill the entire process tree to prevent orphan MSBuild/UBT.
-            _kill_process_tree(proc.pid)
+        # Poll-wait with heartbeats. We can't use proc.wait(timeout=...) in
+        # a tight loop without paying context-switch cost, but polling once
+        # per heartbeat_seconds is essentially free.
+        do_heartbeat = heartbeat_seconds and heartbeat_seconds > 0
+        poll_interval = (
+            min(heartbeat_seconds, 5.0) if do_heartbeat else 5.0
+        )
+        next_beat = started + heartbeat_seconds if do_heartbeat else float("inf")
+        deadline = started + _SAFETY_TIMEOUT
+
+        while True:
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=poll_interval)
+                break
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-            return {
-                "returncode": -2,
-                "log_file": str(log_path),
-                "duration_seconds": round(time.monotonic() - started, 2),
-                "error": f"Command timed out after {_SAFETY_TIMEOUT}s",
-            }
+                now = time.monotonic()
+                if now >= deadline:
+                    # Safety timeout tripped — kill the whole tree.
+                    _kill_process_tree(proc.pid)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    return {
+                        "returncode": -2,
+                        "log_file": str(log_path),
+                        "duration_seconds": round(now - started, 2),
+                        "error": f"Command timed out after {_SAFETY_TIMEOUT}s",
+                    }
+                if do_heartbeat and now >= next_beat:
+                    _emit_heartbeat(
+                        heartbeat_label, now - started, log_path,
+                    )
+                    # Schedule the next beat relative to the last one, so
+                    # drift doesn't accumulate if a poll is slow.
+                    next_beat += heartbeat_seconds
 
         return {
             "returncode": proc.returncode,
@@ -519,6 +587,56 @@ def _run_subprocess(
             log_fh.close()
         except Exception:
             pass
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format a duration as ``1h02m`` / ``12m34s`` / ``45s``."""
+    s = int(seconds)
+    if s >= 3600:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+    if s >= 60:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s}s"
+
+
+def _format_size(nbytes: int) -> str:
+    """Format a byte count as KB/MB/GB."""
+    if nbytes >= 1024 ** 3:
+        return f"{nbytes / 1024 ** 3:.2f} GB"
+    if nbytes >= 1024 ** 2:
+        return f"{nbytes / 1024 ** 2:.2f} MB"
+    if nbytes >= 1024:
+        return f"{nbytes / 1024:.1f} KB"
+    return f"{nbytes} B"
+
+
+def _emit_heartbeat(label: str, elapsed: float, log_path: Path) -> None:
+    """Write ``[label] elapsed <t>  log <size>`` to stderr.
+
+    Semantics:
+      - elapsed — wall-clock time since the child was spawned. Lets the
+        AI see "still running" without inferring it from stream silence.
+      - log — current size of the build log file. Grows while UAT is
+        producing output; a stalled value is a strong signal that the
+        build is genuinely stuck. Naming it ``log`` (not ``size``) makes
+        this unambiguous on a single line of output.
+
+    The log *path* is deliberately omitted: callers are expected to
+    print it once before the build starts, and repeating it every
+    heartbeat wastes AI tokens without adding signal.
+
+    Swallows all exceptions — a heartbeat failure must never disturb the
+    actual build.
+    """
+    try:
+        size = log_path.stat().st_size if log_path.exists() else 0
+        sys.stderr.write(
+            f"[{label}] elapsed {_format_elapsed(elapsed)}  "
+            f"log {_format_size(size)}\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 def get_engine_version(engine_root: str) -> Optional[str]:
@@ -1156,13 +1274,26 @@ _BUILD_PROCESS_NAMES = [
 ]
 
 
-def find_running_build_processes(uproject_path: str | None = None) -> list[dict]:
+def find_running_build_processes(
+    uproject_path: str | None = None,
+    include_cmdline: bool = True,
+) -> list[dict]:
     """Find running build processes (MSBuild, UBT, cl.exe, etc.).
 
     If uproject_path is given, only returns processes whose command line
     references that .uproject file.
 
-    Returns a list of dicts: [{"pid": int, "name": str, "cmdline": str, "project": str}, ...]
+    Args:
+        uproject_path: Filter by this project's .uproject path.
+        include_cmdline: If True (default), each returned dict includes the
+            full ``cmdline`` string from Win32_Process. If False, ``cmdline``
+            is omitted entirely — useful for AI callers who only need
+            {pid, name, project} and would otherwise pay a large token
+            cost for every cl.exe's multi-KB compile command line.
+
+    Returns a list of dicts:
+        include_cmdline=True:  [{"pid", "name", "cmdline", "project"}, ...]
+        include_cmdline=False: [{"pid", "name", "project"}, ...]
     """
     if sys.platform != "win32":
         return []
@@ -1238,12 +1369,17 @@ def find_running_build_processes(uproject_path: str | None = None) -> list[dict]
                 )
                 if has_matching_project:
                     # Keep all — project-specific + associated processes
-                    return processes
+                    pass
                 else:
                     # No process explicitly references this project.
                     # Only include processes that have no .uproject at all
                     # and might be related (ambiguous, safer to exclude).
-                    return [p for p in processes if not p["project"]]
+                    processes = [p for p in processes if not p["project"]]
+            if not include_cmdline:
+                processes = [
+                    {k: v for k, v in p.items() if k != "cmdline"}
+                    for p in processes
+                ]
             return processes
     except Exception:
         pass

@@ -48,19 +48,31 @@ def compile_project(
     config: str = "Development",
     platform: str = "Win64",
     engine_root: str | None = None,
+    log_file: str | None = None,
 ) -> dict:
     """Compile the project's C++ code.
 
-    Output is redirected directly to a log file under
+    Synchronous. Output is redirected directly to a log file under
     ``<project>/Saved/Logs/``. The returned dict contains the log path, not
     the log body — callers should open the file if they need to inspect
     errors. This keeps multi-MB UE build logs out of AI context.
+
+    A full rebuild takes 5-15 minutes. If your caller has a short shell
+    timeout, run this function under the harness's own background
+    mechanism (e.g. Bash ``run_in_background=true``) — do not try to
+    "detach" it ourselves: AI harnesses typically wrap commands in a
+    kill-on-job-close Job Object, so any spawned child dies with the CLI.
 
     Args:
         uproject_path: Path to .uproject file.
         config: Build configuration (Development, Shipping, DebugGame, etc.).
         platform: Target platform (Win64, Linux, etc.).
         engine_root: Engine root (auto-detected if None).
+        log_file: Optional absolute path for the build log. When None
+            (default) a timestamped file is allocated under
+            ``<project>/Saved/Logs/``. Callers that want to announce the
+            log path to the user before blocking can pre-allocate it via
+            ``utils.ue_backend._allocate_log_path`` and pass it here.
 
     Returns:
         ``{"status": "ok"|"error", "returncode": int,
@@ -93,6 +105,7 @@ def compile_project(
         engine_root,
         "BuildCookRun",
         args,
+        log_file=log_file,
         log_label="compile",
         project_dir=str(path.parent),
     )
@@ -115,13 +128,18 @@ def cook_content(
     uproject_path: str,
     platform: str = "Win64",
     engine_root: str | None = None,
+    log_file: str | None = None,
 ) -> dict:
     """Cook content assets for the target platform.
+
+    Synchronous. See ``compile_project`` for output-logging and
+    long-running-task handling.
 
     Args:
         uproject_path: Path to .uproject file.
         platform: Target platform.
         engine_root: Engine root (auto-detected if None).
+        log_file: Optional pre-allocated log path (see ``compile_project``).
 
     Returns:
         Same shape as ``compile_project``.
@@ -150,6 +168,7 @@ def cook_content(
         engine_root,
         "BuildCookRun",
         args,
+        log_file=log_file,
         log_label="cook",
         project_dir=str(path.parent),
     )
@@ -174,8 +193,12 @@ def package_project(
     config: str = "Development",
     output_dir: str | None = None,
     engine_root: str | None = None,
+    log_file: str | None = None,
 ) -> dict:
     """Full package pipeline: build + cook + stage + package + archive.
+
+    Synchronous. See ``compile_project`` for output-logging and
+    long-running-task handling.
 
     Args:
         uproject_path: Path to .uproject file.
@@ -183,6 +206,7 @@ def package_project(
         config: Build configuration.
         output_dir: Archive output directory.
         engine_root: Engine root (auto-detected if None).
+        log_file: Optional pre-allocated log path (see ``compile_project``).
 
     Returns:
         ``{"status", "returncode", "duration_seconds", "log_file",
@@ -220,6 +244,7 @@ def package_project(
         engine_root,
         "BuildCookRun",
         args,
+        log_file=log_file,
         log_label="package",
         project_dir=str(path.parent),
     )
@@ -372,14 +397,57 @@ def stop_build(uproject_path: str) -> dict:
 def is_building(uproject_path: str) -> dict:
     """Check if the project is currently being compiled.
 
+    Designed for AI callers: the per-process ``cmdline`` field is stripped
+    (a single ``cl.exe`` can have multi-KB command lines — 10 concurrent
+    compiles can easily push tens of KB of tokens). Each returned process
+    keeps ``pid``, ``name``, ``project`` only. If the caller genuinely
+    needs full cmdlines, use
+    ``utils.ue_backend.find_running_build_processes(..., include_cmdline=True)``
+    directly.
+
+    On top of the per-process list, this function also returns:
+      - ``count``: total number of matched processes
+      - ``kinds``: ``{process_name: count}`` summary (stable across calls)
+      - ``latest_log``: path to the newest ``cli_*.log`` under
+        ``<project>/Saved/Logs/`` — the file the AI should tail for
+        progress. Omitted when no log is present.
+
     Args:
         uproject_path: Path to .uproject file.
 
     Returns:
-        {"building": bool, "processes": [{"pid": int, "name": str, ...}, ...]}
+        ``{"building": bool, "count": int, "kinds": {str: int},
+           "processes": [{"pid","name","project"}, ...],
+           "latest_log"?: str}``.
     """
-    processes = find_running_build_processes(uproject_path)
-    return {
+    processes = find_running_build_processes(
+        uproject_path, include_cmdline=False
+    )
+
+    kinds: dict[str, int] = {}
+    for p in processes:
+        name = p.get("name", "")
+        kinds[name] = kinds.get(name, 0) + 1
+
+    result = {
         "building": len(processes) > 0,
+        "count": len(processes),
+        "kinds": kinds,
         "processes": processes,
     }
+
+    # Attach the newest CLI build log so the AI has a concrete file to tail.
+    try:
+        saved_logs = Path(uproject_path).parent / "Saved" / "Logs"
+        if saved_logs.is_dir():
+            cli_logs = sorted(
+                saved_logs.glob("cli_*.log"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            if cli_logs:
+                result["latest_log"] = str(cli_logs[0])
+    except OSError:
+        pass
+
+    return result

@@ -123,11 +123,12 @@ class TestProjectE2E:
         data = json.loads(result.output)
         assert len(data) > 0
 
-    def test_project_content(self, cli_runner, project_path):
+    def test_project_content(self, cli_runner, project_path, api_port):
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path,
+            "--json", "--port", str(api_port),
+            "--project", project_path,
             "asset", "list",
         ])
         assert result.exit_code == 0

@@ -465,17 +465,40 @@ def _check_log_errors_incremental(log_file: Path, offset: int) -> tuple[str | No
 
 
 def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
-    """Wait for editor API to come online. Returns result dict with status."""
-    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+    """Wait for editor API to come online. Returns result dict with status.
 
-    if not state.json_output:
-        state.skin.info(f"Waiting for Remote Control API on port {poll_port} (timeout {timeout}s)...")
+    Emits a heartbeat line to stderr every 60 seconds so AI callers
+    watching the subprocess can tell the editor is still coming up:
+
+        [editor] elapsed 1m30s  log 4.56 MB  port 30010 (not responding)
+
+    Heartbeats go to stderr regardless of ``--json`` so they never
+    pollute the JSON result on stdout.
+    """
+    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+    from cli_anything.unreal.utils.ue_backend import (
+        _emit_heartbeat, _format_elapsed,
+    )
+
+    # One-shot announcement so the AI knows which log to tail before the
+    # long wait begins. Goes to stderr so it's independent of --json.
+    try:
+        sys.stderr.write(
+            f"[editor] waiting for Remote Control API on port {poll_port} "
+            f"(timeout {timeout}s), log {log_file}\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
 
     api = UEEditorAPI(port=poll_port)
     start_time = time.time()
     deadline = start_time + timeout
-    poll_interval = 30.0
-    last_hint_time = time.time()
+    # Poll the API every 5s (snappy online-detection) but throttle the
+    # heartbeat to 60s to match build heartbeats.
+    poll_interval = 5.0
+    heartbeat_interval = 60.0
+    next_beat = start_time + heartbeat_interval
     result = {}
 
     log_offset = 0
@@ -553,10 +576,13 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
                 except Exception:
                     pass
 
-        remaining = max(0, int(deadline - time.time()))
-        if not state.json_output and time.time() - last_hint_time >= 15:
-            state.skin.hint(f"  Still waiting... ({remaining}s remaining)")
-            last_hint_time = time.time()
+        # Heartbeat — same [label] elapsed/log/size format as the build
+        # commands, plus a "port not responding" suffix so the AI knows
+        # what we're actually waiting for.
+        now = time.time()
+        if now >= next_beat:
+            _emit_heartbeat("editor", now - start_time, Path(log_file))
+            next_beat += heartbeat_interval
         time.sleep(poll_interval)
 
     # Timed out
@@ -583,16 +609,29 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 
 @editor_group.command("launch")
 @click.option("--map", "map_path", default=None, help="Level/map to open (.umap path)")
-@click.option("--wait/--no-wait", default=True, help="Wait for API to come online")
+@click.option(
+    "--wait/--no-wait", default=True,
+    help=(
+        "Wait for the Remote Control API to come online (--wait, default) "
+        "or return right after spawning the editor process (--no-wait). "
+        "Unlike 'build compile', --no-wait here is real: the editor is "
+        "a standalone GUI process that survives this CLI returning."
+    ),
+)
 @click.option("--timeout", default=600, help="Max seconds to wait for editor startup")
 @handle_error
 @click.pass_obj
 def editor_launch(state: AppState, map_path, wait, timeout):
-    """Launch UE editor with preflight build check.
+    """Launch UE editor and (by default) wait for Remote Control API.
 
     Always runs preflight check first (BuildId match, DLL existence, etc.).
     If the check fails, returns an error with instructions to compile.
-    Optionally waits for the Remote Control API to come online.
+
+    In the default ``--wait`` mode this command blocks until the Remote
+    Control API responds or ``--timeout`` expires. A heartbeat is written
+    to stderr every 60 seconds so AI callers tailing the process know
+    the editor is still coming up. Initial startup for a large project
+    can easily take 1-3 minutes.
     """
     from cli_anything.unreal.utils.ue_backend import find_editor_exe
 
