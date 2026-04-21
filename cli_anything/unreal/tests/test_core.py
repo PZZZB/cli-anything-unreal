@@ -4386,12 +4386,17 @@ class TestBuildSuccessPaths:
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
              patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "BUILD SUCCESSFUL", "stderr": "",
+                 "returncode": 0, "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
+                 "duration_seconds": 12.3,
              }):
             result = compile_project(temp_project["uproject"])
             assert result["status"] == "ok"
             assert result["returncode"] == 0
-            assert "BUILD SUCCESSFUL" in result["stdout"]
+            assert result["log_file"].endswith("cli_compile.log")
+            assert result["duration_seconds"] == 12.3
+            # stdout/stderr must not leak back into the result
+            assert "stdout" not in result
+            assert "stderr" not in result
 
     def test_compile_error_returncode(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
@@ -4399,11 +4404,13 @@ class TestBuildSuccessPaths:
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
              patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 1, "stdout": "", "stderr": "error LNK2001",
+                 "returncode": 1, "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
+                 "duration_seconds": 5.0,
              }):
             result = compile_project(temp_project["uproject"])
             assert result["status"] == "error"
             assert result["returncode"] == 1
+            assert "log_file" in result["error"]
 
     def test_cook_success(self, temp_project):
         from cli_anything.unreal.core.build import cook_content
@@ -4411,11 +4418,13 @@ class TestBuildSuccessPaths:
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
              patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "Cook complete", "stderr": "",
+                 "returncode": 0, "log_file": r"F:\Test\Saved\Logs\cli_cook.log",
+                 "duration_seconds": 30.0,
              }):
             result = cook_content(temp_project["uproject"])
             assert result["status"] == "ok"
             assert result["returncode"] == 0
+            assert result["log_file"].endswith("cli_cook.log")
 
     def test_package_success(self, temp_project):
         from cli_anything.unreal.core.build import package_project
@@ -4423,11 +4432,13 @@ class TestBuildSuccessPaths:
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
              patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "Archive successful", "stderr": "",
+                 "returncode": 0, "log_file": r"F:\Test\Saved\Logs\cli_package.log",
+                 "duration_seconds": 60.0,
              }):
             result = package_project(temp_project["uproject"])
             assert result["status"] == "ok"
             assert "output_dir" in result
+            assert result["log_file"].endswith("cli_package.log")
 
     def test_package_default_output_dir(self, temp_project):
         from cli_anything.unreal.core.build import package_project
@@ -4435,7 +4446,7 @@ class TestBuildSuccessPaths:
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
              patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "", "stderr": "",
+                 "returncode": 0, "log_file": "", "duration_seconds": 0.0,
              }):
             result = package_project(temp_project["uproject"])
             assert result["output_dir"].endswith("Packaged")
@@ -4446,7 +4457,7 @@ class TestBuildSuccessPaths:
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
              patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "", "stderr": "",
+                 "returncode": 0, "log_file": "", "duration_seconds": 0.0,
              }):
             result = package_project(temp_project["uproject"], output_dir="D:/Out")
             assert result["output_dir"] == "D:/Out"
@@ -4477,10 +4488,12 @@ class TestBuildSuccessPaths:
         with patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
              patch("cli_anything.unreal.core.build.find_generate_project_files", return_value=None), \
              patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "Project files generated", "stderr": "",
+                 "returncode": 0, "log_file": r"F:\Test\Saved\Logs\cli_genproj.log",
+                 "duration_seconds": 4.0,
              }):
             result = generate_project_files(temp_project["uproject"])
             assert result["status"] == "ok"
+            assert result["log_file"].endswith("cli_genproj.log")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -4716,47 +4729,56 @@ class TestBuildStopAndDetect:
             assert result["status"] == "none"
             assert result["killed"] == []
 
-    def test_run_subprocess_kills_tree_on_timeout(self):
+    def test_run_subprocess_kills_tree_on_timeout(self, tmp_path):
         """_run_subprocess kills the process tree on timeout (no orphans)."""
         from cli_anything.unreal.utils.ue_backend import _run_subprocess
 
         mock_proc = MagicMock()
         mock_proc.pid = 9999
-        mock_proc.communicate.side_effect = [
+        mock_proc.wait.side_effect = [
             subprocess.TimeoutExpired(cmd="test", timeout=86400),
-            (b"partial stdout", b"partial stderr"),
+            None,  # second wait() after kill succeeds
         ]
         mock_proc.returncode = -2
 
+        log_path = tmp_path / "t.log"
         with patch("subprocess.Popen", return_value=mock_proc), \
              patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True) as mock_kill:
-            result = _run_subprocess(["echo", "test"])
+            result = _run_subprocess(["echo", "test"], log_file=str(log_path))
             assert result["returncode"] == -2
+            assert result["log_file"] == str(log_path)
+            assert "timed out" in result["error"].lower()
             # Verify _kill_process_tree was called with the PID
             mock_kill.assert_called_once_with(9999)
 
-    def test_run_subprocess_success(self):
+    def test_run_subprocess_success(self, tmp_path):
         """_run_subprocess returns result dict on success."""
         from cli_anything.unreal.utils.ue_backend import _run_subprocess
 
         mock_proc = MagicMock()
         mock_proc.pid = 1234
-        mock_proc.communicate.return_value = (b"output", b"")
+        mock_proc.wait.return_value = None
         mock_proc.returncode = 0
 
+        log_path = tmp_path / "t.log"
         with patch("subprocess.Popen", return_value=mock_proc):
-            result = _run_subprocess(["echo", "hello"], capture=True)
+            result = _run_subprocess(["echo", "hello"], log_file=str(log_path))
             assert result["returncode"] == 0
-            assert result["stdout"] == "output"
+            assert result["log_file"] == str(log_path)
+            assert "duration_seconds" in result
+            # Output must not leak back
+            assert "stdout" not in result
+            assert "stderr" not in result
 
-    def test_run_subprocess_file_not_found(self):
+    def test_run_subprocess_file_not_found(self, tmp_path):
         """_run_subprocess handles FileNotFoundError gracefully."""
         from cli_anything.unreal.utils.ue_backend import _run_subprocess
 
+        log_path = tmp_path / "t.log"
         with patch("subprocess.Popen", side_effect=FileNotFoundError("not found")):
-            result = _run_subprocess(["nonexistent_command"])
+            result = _run_subprocess(["nonexistent_command"], log_file=str(log_path))
             assert result["returncode"] == -1
-            assert "not found" in result["stderr"]
+            assert "not found" in result["error"]
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -51,6 +51,11 @@ def compile_project(
 ) -> dict:
     """Compile the project's C++ code.
 
+    Output is redirected directly to a log file under
+    ``<project>/Saved/Logs/``. The returned dict contains the log path, not
+    the log body — callers should open the file if they need to inspect
+    errors. This keeps multi-MB UE build logs out of AI context.
+
     Args:
         uproject_path: Path to .uproject file.
         config: Build configuration (Development, Shipping, DebugGame, etc.).
@@ -58,7 +63,8 @@ def compile_project(
         engine_root: Engine root (auto-detected if None).
 
     Returns:
-        {"status": "ok"|"error", "returncode": int, "stdout": str, "stderr": str}
+        ``{"status": "ok"|"error", "returncode": int,
+           "duration_seconds": float, "log_file": str, "error"?: str}``.
     """
     # Check if a build is already running
     already = _check_already_building(uproject_path)
@@ -83,14 +89,26 @@ def compile_project(
         "-utf8output",
     ]
 
-    result = run_uat(engine_root, "BuildCookRun", args)
+    result = run_uat(
+        engine_root,
+        "BuildCookRun",
+        args,
+        log_label="compile",
+        project_dir=str(path.parent),
+    )
 
-    return {
+    out = {
         "status": "ok" if result["returncode"] == 0 else "error",
         "returncode": result["returncode"],
-        "stdout": result["stdout"],
-        "stderr": result["stderr"],
+        "duration_seconds": result.get("duration_seconds", 0.0),
+        "log_file": result.get("log_file", ""),
     }
+    if result["returncode"] != 0:
+        out["error"] = result.get(
+            "error",
+            f"Compile failed (exit {result['returncode']}). See log_file for details.",
+        )
+    return out
 
 
 def cook_content(
@@ -106,7 +124,7 @@ def cook_content(
         engine_root: Engine root (auto-detected if None).
 
     Returns:
-        Build result dict.
+        Same shape as ``compile_project``.
     """
     # Check if a build is already running
     already = _check_already_building(uproject_path)
@@ -118,6 +136,7 @@ def cook_content(
     if not engine_root:
         return {"status": "error", "error": "Could not find engine root"}
 
+    path = Path(uproject_path)
     args = [
         f"-project={uproject_path}",
         f"-platform={platform}",
@@ -127,14 +146,26 @@ def cook_content(
         "-allmaps",
     ]
 
-    result = run_uat(engine_root, "BuildCookRun", args)
+    result = run_uat(
+        engine_root,
+        "BuildCookRun",
+        args,
+        log_label="cook",
+        project_dir=str(path.parent),
+    )
 
-    return {
+    out = {
         "status": "ok" if result["returncode"] == 0 else "error",
         "returncode": result["returncode"],
-        "stdout": result["stdout"],
-        "stderr": result["stderr"],
+        "duration_seconds": result.get("duration_seconds", 0.0),
+        "log_file": result.get("log_file", ""),
     }
+    if result["returncode"] != 0:
+        out["error"] = result.get(
+            "error",
+            f"Cook failed (exit {result['returncode']}). See log_file for details.",
+        )
+    return out
 
 
 def package_project(
@@ -154,7 +185,8 @@ def package_project(
         engine_root: Engine root (auto-detected if None).
 
     Returns:
-        Build result dict.
+        ``{"status", "returncode", "duration_seconds", "log_file",
+           "output_dir", "error"?}``.
     """
     # Check if a build is already running
     already = _check_already_building(uproject_path)
@@ -184,15 +216,27 @@ def package_project(
         "-utf8output",
     ]
 
-    result = run_uat(engine_root, "BuildCookRun", args)
+    result = run_uat(
+        engine_root,
+        "BuildCookRun",
+        args,
+        log_label="package",
+        project_dir=str(path.parent),
+    )
 
-    return {
+    out = {
         "status": "ok" if result["returncode"] == 0 else "error",
         "returncode": result["returncode"],
+        "duration_seconds": result.get("duration_seconds", 0.0),
+        "log_file": result.get("log_file", ""),
         "output_dir": output_dir,
-        "stdout": result["stdout"],
-        "stderr": result["stderr"],
     }
+    if result["returncode"] != 0:
+        out["error"] = result.get(
+            "error",
+            f"Package failed (exit {result['returncode']}). See log_file for details.",
+        )
+    return out
 
 
 def build_status(uproject_path: str) -> dict:
@@ -254,18 +298,21 @@ def generate_project_files(
 ) -> dict:
     """Generate Visual Studio project files.
 
+    Output is redirected to a log file under ``<project>/Saved/Logs/``.
+
     Args:
         uproject_path: Path to .uproject file.
         engine_root: Engine root (auto-detected if None).
 
     Returns:
-        Result dict.
+        ``{"status", "returncode", "duration_seconds", "log_file", "error"?}``.
     """
     if engine_root is None:
         engine_root = find_engine_root(uproject_path)
     if not engine_root:
         return {"status": "error", "error": "Could not find engine root"}
 
+    project_dir = str(Path(uproject_path).parent)
     gen_bat = find_generate_project_files(engine_root)
     if not gen_bat:
         # Fallback to UAT
@@ -274,30 +321,35 @@ def generate_project_files(
             "-game",
             "-engine",
         ]
-        result = run_uat(engine_root, "GenerateProjectFiles", args)
+        result = run_uat(
+            engine_root,
+            "GenerateProjectFiles",
+            args,
+            log_label="genproj",
+            project_dir=project_dir,
+        )
     else:
-        import subprocess
-        import sys
-        try:
-            proc = subprocess.run(
-                [gen_bat, f"-project={uproject_path}", "-game", "-engine"],
-                capture_output=True, text=True,
-                shell=(sys.platform == "win32"),
-            )
-            result = {
-                "returncode": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-            }
-        except Exception as e:
-            result = {"returncode": -1, "stdout": "", "stderr": str(e)}
+        from cli_anything.unreal.utils.ue_backend import (
+            _allocate_log_path,
+            _run_subprocess,
+        )
+        log_file = _allocate_log_path(project_dir, "genproj")
+        cmd = [gen_bat, f"-project={uproject_path}", "-game", "-engine"]
+        result = _run_subprocess(cmd, log_file=log_file)
 
-    return {
+    out = {
         "status": "ok" if result["returncode"] == 0 else "error",
         "returncode": result["returncode"],
-        "stdout": result["stdout"],
-        "stderr": result["stderr"],
+        "duration_seconds": result.get("duration_seconds", 0.0),
+        "log_file": result.get("log_file", ""),
     }
+    if result["returncode"] != 0:
+        out["error"] = result.get(
+            "error",
+            f"Generate project files failed (exit {result['returncode']}). "
+            "See log_file for details.",
+        )
+    return out
 
 
 def stop_build(uproject_path: str) -> dict:

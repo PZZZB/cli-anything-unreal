@@ -489,31 +489,16 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
     while time.time() < deadline:
         # Check if process died
         if proc.poll() is not None:
-            stderr_out = ""
-            try:
-                stderr_out = proc.stderr.read().decode("utf-8", errors="replace").strip()
-            except Exception:
-                pass
             result["status"] = "crashed"
             result["returncode"] = proc.returncode
-            error_msg = (
-                f"Editor process exited with code {proc.returncode} before API came online."
+            result["log_file"] = str(log_file)
+            result["error"] = (
+                f"Editor process exited with code {proc.returncode} before "
+                f"API came online. See log_file for details."
             )
-            if stderr_out:
-                error_msg += f"\nStderr: {stderr_out}"
-            log_error, log_offset = _check_log_errors_incremental(log_file, log_offset)
-            if not log_error:
-                log_error = _check_log_errors(log_file)
-            if log_error:
-                error_msg += f"\nLog: {log_error}"
-            result["error"] = error_msg
             if not state.json_output:
                 state.skin.error(f"Editor exited unexpectedly (code {proc.returncode})")
-                if stderr_out:
-                    state.skin.error(f"  {stderr_out[:500]}")
-                if log_error:
-                    state.skin.error(f"  {log_error[:500]}")
-                state.skin.hint("Check Saved/Logs/ for full details")
+                state.skin.hint(f"Log: {log_file}")
             return result
 
         if api.is_alive():
@@ -532,6 +517,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
             log_error, log_offset = _check_log_errors_incremental(log_file, log_offset)
             if log_error:
                 result["status"] = "error_dialog"
+                result["log_file"] = str(log_file)
                 result["error"] = (
                     "Editor appears stuck on an error dialog:\n"
                     f"{log_error}\n\n"
@@ -575,10 +561,11 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 
     # Timed out
     result["status"] = "timeout"
+    result["log_file"] = str(log_file)
     result["error"] = (
         f"Editor API did not respond within {timeout}s on port {poll_port}. "
         "Editor may still be loading, or may be stuck on a dialog/popup. "
-        "Check the editor window manually."
+        "Check the editor window manually, or inspect log_file."
     )
     log_error, log_offset = _check_log_errors_incremental(log_file, log_offset)
     if not log_error:
@@ -587,7 +574,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
         result["error"] += f"\nLog hint: {log_error}"
     if not state.json_output:
         state.skin.warning(f"Timed out after {timeout}s")
-        state.skin.hint("Editor may still be loading. Check the editor window.")
+        state.skin.hint(f"Log: {log_file}")
 
     return result
 
@@ -651,11 +638,16 @@ def editor_launch(state: AppState, map_path, wait, timeout):
             state.skin.info(f"Map: {map_path}")
 
     # ── Launch process ──────────────────────────────────────────────
+    # stdout/stderr discarded: UE writes its own Saved/Logs/{project}.log,
+    # which is what we monitor below. We intentionally do NOT pipe stderr
+    # back to Python — the pipe would only be read in the crash branch of
+    # _wait_for_api, and any unread bytes beyond the OS pipe buffer (~64KB)
+    # would block the editor's stderr writes.
     try:
         proc = sp.Popen(
             cmd,
             stdout=sp.DEVNULL,
-            stderr=sp.PIPE,
+            stderr=sp.DEVNULL,
         )
     except Exception as e:
         output({"status": "error", "error": f"Failed to launch: {e}"}, state)
@@ -1048,13 +1040,12 @@ def editor_plugin_upgrade(state: AppState):
     build_result = compile_project(
         state.session.project_path,
         engine_root=state.session.engine_root,
-        timeout=600,
     )
     if build_result.get("status") == "error":
         output({
             "status": "compile_failed",
             "error": build_result.get("error", "Build failed"),
-            "details": (build_result.get("stderr", "") or "")[-500:],
+            "log_file": build_result.get("log_file", ""),
         }, state)
         return
 

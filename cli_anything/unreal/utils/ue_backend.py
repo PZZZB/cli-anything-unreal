@@ -8,6 +8,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -284,25 +286,45 @@ def run_uat(
     engine_root: str,
     command: str,
     args: list[str] | None = None,
-    capture: bool = True,
+    log_file: str | None = None,
+    log_label: str = "uat",
+    project_dir: str | None = None,
 ) -> dict:
     """Execute a UAT command.
+
+    stdout/stderr are redirected directly to ``log_file`` (allocated under
+    the project's ``Saved/Logs/`` if not provided) — never buffered in the
+    caller's memory. This prevents huge build logs from polluting AI context.
 
     Args:
         engine_root: Path to engine root.
         command: UAT command name (e.g., "BuildCookRun").
         args: Additional arguments.
-        capture: If True, capture stdout/stderr; else stream to console.
+        log_file: Absolute path to write combined stdout+stderr. If None,
+            a timestamped file is allocated under ``<project_dir>/Saved/Logs``
+            (or the system temp dir if ``project_dir`` is None).
+        log_label: Short tag used in the auto-allocated log filename
+            (e.g. "compile", "cook", "package").
+        project_dir: Project root for default log location.
 
     Returns:
-        {"returncode": int, "stdout": str, "stderr": str}
+        ``{"returncode": int, "log_file": str, "duration_seconds": float}``.
+        On startup failure (FileNotFoundError etc.): returncode=-1 and an
+        extra ``"error"`` key with a short message.
     """
     uat = find_uat(engine_root)
     if not uat:
-        return {"returncode": -1, "stdout": "", "stderr": "RunUAT.bat not found"}
+        return {
+            "returncode": -1,
+            "log_file": "",
+            "duration_seconds": 0.0,
+            "error": "RunUAT.bat not found",
+        }
 
     cmd = [uat, command] + (args or [])
-    return _run_subprocess(cmd, capture=capture)
+    if log_file is None:
+        log_file = _allocate_log_path(project_dir, log_label)
+    return _run_subprocess(cmd, log_file=log_file)
 
 
 def run_build(
@@ -311,8 +333,13 @@ def run_build(
     platform: str = "Win64",
     config: str = "Development",
     extra_args: list[str] | None = None,
+    log_file: str | None = None,
+    log_label: str = "build",
+    project_dir: str | None = None,
 ) -> dict:
     """Execute Build.bat.
+
+    stdout/stderr are redirected to ``log_file`` (see ``run_uat``).
 
     Args:
         engine_root: Path to engine root.
@@ -320,21 +347,49 @@ def run_build(
         platform: Target platform.
         config: Build configuration.
         extra_args: Additional arguments.
+        log_file: Absolute path to write combined output. Auto-allocated
+            under ``<project_dir>/Saved/Logs`` if None.
+        log_label: Short tag for the auto-allocated filename.
+        project_dir: Project root for default log location.
 
     Returns:
-        {"returncode": int, "stdout": str, "stderr": str}
+        Same shape as ``run_uat``.
     """
     build_bat = find_build_bat(engine_root)
     if not build_bat:
-        return {"returncode": -1, "stdout": "", "stderr": "Build.bat not found"}
+        return {
+            "returncode": -1,
+            "log_file": "",
+            "duration_seconds": 0.0,
+            "error": "Build.bat not found",
+        }
 
     cmd = [build_bat, target, platform, config] + (extra_args or [])
-    return _run_subprocess(cmd)
+    if log_file is None:
+        log_file = _allocate_log_path(project_dir, log_label)
+    return _run_subprocess(cmd, log_file=log_file)
 
 
 # Safety timeout: 24 hours. Not user-configurable.
 # The AI should use `build stop` to cancel long-running builds.
 _SAFETY_TIMEOUT = 86400
+
+
+def _allocate_log_path(project_dir: str | None, label: str) -> str:
+    """Build an absolute path under Saved/Logs for a new CLI log file.
+
+    Falls back to the system temp dir when project_dir is None or not a
+    directory, so we never fail just because the caller omitted it.
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"cli_{label}_{ts}.log"
+    if project_dir and Path(project_dir).is_dir():
+        log_dir = Path(project_dir) / "Saved" / "Logs"
+    else:
+        import tempfile
+        log_dir = Path(tempfile.gettempdir()) / "cli_anything_unreal_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return str(log_dir / filename)
 
 
 def _kill_process_tree(pid: int) -> bool:
@@ -369,71 +424,101 @@ def _kill_process_tree(pid: int) -> bool:
 
 def _run_subprocess(
     cmd: list[str],
-    capture: bool = True,
+    log_file: str,
     cwd: str | None = None,
 ) -> dict:
-    """Run a subprocess and return results.
+    """Run a subprocess with stdout+stderr redirected to ``log_file``.
 
-    Uses Popen so we can track the PID and kill the entire process tree
-    on timeout (fixes the orphan MSBuild/UBT process bug).
+    The child's stdout and stderr are wired directly to an on-disk file, so
+    output never transits Python memory and the pipe-buffer deadlock class
+    (child blocks when ~64KB of unread output fills the OS pipe) is
+    impossible by construction. This is the key property for UE build
+    commands, whose combined output can reach tens of MB.
+
+    Uses Popen so we can track the PID and kill the entire process tree on
+    timeout (fixes the orphan MSBuild/UBT bug).
+
+    Args:
+        cmd: Command vector.
+        log_file: Absolute path to the log file. Parent dir will be created.
+            Overwritten if it already exists.
+        cwd: Working directory for the child.
 
     Returns:
-        {"returncode": int, "stdout": str, "stderr": str}
+        ``{"returncode": int, "log_file": str, "duration_seconds": float}``.
+        ``returncode == -1`` for launch failures (with an ``"error"`` key),
+        ``-2`` for timeouts (with an ``"error"`` key naming the timeout).
     """
     use_shell = sys.platform == "win32"
-    stdout_pipe = subprocess.PIPE if capture else subprocess.DEVNULL
-    stderr_pipe = subprocess.PIPE if capture else subprocess.DEVNULL
+
+    # Ensure the log path is writable before spawning anything.
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    started = time.monotonic()
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=stdout_pipe,
-            stderr=stderr_pipe,
-            cwd=cwd,
-            shell=use_shell,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if use_shell else 0,
-        )
-    except FileNotFoundError as e:
+        log_fh = open(log_path, "wb")
+    except OSError as e:
         return {
             "returncode": -1,
-            "stdout": "",
-            "stderr": f"Command not found: {e}",
-        }
-    except Exception as e:
-        return {
-            "returncode": -1,
-            "stdout": "",
-            "stderr": str(e),
+            "log_file": str(log_path),
+            "duration_seconds": 0.0,
+            "error": f"Failed to open log file: {e}",
         }
 
     try:
-        stdout_bytes, stderr_bytes = proc.communicate(timeout=_SAFETY_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        # Kill the entire process tree to prevent orphan MSBuild/UBT
-        _kill_process_tree(proc.pid)
         try:
-            stdout_bytes, stderr_bytes = proc.communicate(timeout=5)
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                cwd=cwd,
+                shell=use_shell,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if use_shell else 0,
+            )
+        except FileNotFoundError as e:
+            return {
+                "returncode": -1,
+                "log_file": str(log_path),
+                "duration_seconds": round(time.monotonic() - started, 2),
+                "error": f"Command not found: {e}",
+            }
+        except Exception as e:
+            return {
+                "returncode": -1,
+                "log_file": str(log_path),
+                "duration_seconds": round(time.monotonic() - started, 2),
+                "error": str(e),
+            }
+
+        try:
+            proc.wait(timeout=_SAFETY_TIMEOUT)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout_bytes, stderr_bytes = proc.communicate()
+            # Kill the entire process tree to prevent orphan MSBuild/UBT.
+            _kill_process_tree(proc.pid)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            return {
+                "returncode": -2,
+                "log_file": str(log_path),
+                "duration_seconds": round(time.monotonic() - started, 2),
+                "error": f"Command timed out after {_SAFETY_TIMEOUT}s",
+            }
+
         return {
-            "returncode": -2,
-            "stdout": (stdout_bytes or b"").decode("utf-8", errors="replace") if capture else "",
-            "stderr": f"Command timed out after {_SAFETY_TIMEOUT}s",
+            "returncode": proc.returncode,
+            "log_file": str(log_path),
+            "duration_seconds": round(time.monotonic() - started, 2),
         }
-
-    stdout_text = ""
-    stderr_text = ""
-    if capture and stdout_bytes is not None:
-        stdout_text = stdout_bytes.decode("utf-8", errors="replace")
-    if capture and stderr_bytes is not None:
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-
-    return {
-        "returncode": proc.returncode,
-        "stdout": stdout_text,
-        "stderr": stderr_text,
-    }
+    finally:
+        try:
+            log_fh.close()
+        except Exception:
+            pass
 
 
 def get_engine_version(engine_root: str) -> Optional[str]:
