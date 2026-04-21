@@ -990,17 +990,30 @@ def find_running_build_processes(uproject_path: str | None = None) -> list[dict]
                 # Extract .uproject path from command line
                 project = ""
                 for token in cmdline.split():
-                    if token.endswith(".uproject") or token.endswith('.uproject"'):
-                        project = token.strip('"')
-                        break
+                    if ".uproject" in token:
+                        # Handle -project=X.uproject and plain X.uproject
+                        if "=" in token:
+                            token = token.split("=", 1)[1]
+                        token = token.strip('"').strip("'")
+                        if token.endswith(".uproject"):
+                            project = token
+                            break
 
                 # Filter by project if requested
                 if uproject_path:
-                    # Normalize both paths for comparison
+                    # If cmdline contains a .uproject, it must match
                     norm_project = project.replace("/", "\\").lower()
                     norm_uproject = uproject_path.replace("/", "\\").lower()
-                    if norm_project != norm_uproject and norm_uproject not in cmdline.lower():
-                        continue
+                    if project:
+                        # This process has a .uproject in its cmdline
+                        if norm_project != norm_uproject:
+                            continue
+                    else:
+                        # No .uproject in cmdline (e.g., bk-ubt-tool, cl.exe).
+                        # Include if any process in the result set DOES reference
+                        # this project (they're likely part of the same build).
+                        # We defer this check — collect all first, filter after.
+                        pass
 
                 processes.append({
                     "pid": int(pid),
@@ -1008,6 +1021,25 @@ def find_running_build_processes(uproject_path: str | None = None) -> list[dict]
                     "cmdline": cmdline,
                     "project": project,
                 })
+            # Post-filter: if uproject_path given, processes without
+            # .uproject in their cmdline (e.g., bk-ubt-tool, cl.exe)
+            # are only included if at least one process explicitly
+            # references this project.
+            if uproject_path:
+                has_matching_project = any(
+                    p["project"] and
+                    p["project"].replace("/", "\\").lower() ==
+                    uproject_path.replace("/", "\\").lower()
+                    for p in processes
+                )
+                if has_matching_project:
+                    # Keep all — project-specific + associated processes
+                    return processes
+                else:
+                    # No process explicitly references this project.
+                    # Only include processes that have no .uproject at all
+                    # and might be related (ambiguous, safer to exclude).
+                    return [p for p in processes if not p["project"]]
             return processes
     except Exception:
         pass

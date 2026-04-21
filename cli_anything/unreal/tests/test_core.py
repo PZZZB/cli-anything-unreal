@@ -479,7 +479,8 @@ class TestBuild:
     def test_compile_no_engine(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
 
-        with patch("cli_anything.unreal.core.build.find_engine_root", return_value=None):
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value=None):
             result = compile_project(temp_project["uproject"])
             assert result["status"] == "error"
             assert "engine root" in result["error"].lower()
@@ -487,14 +488,16 @@ class TestBuild:
     def test_cook_no_engine(self, temp_project):
         from cli_anything.unreal.core.build import cook_content
 
-        with patch("cli_anything.unreal.core.build.find_engine_root", return_value=None):
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value=None):
             result = cook_content(temp_project["uproject"])
             assert result["status"] == "error"
 
     def test_package_no_engine(self, temp_project):
         from cli_anything.unreal.core.build import package_project
 
-        with patch("cli_anything.unreal.core.build.find_engine_root", return_value=None):
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value=None):
             result = package_project(temp_project["uproject"])
             assert result["status"] == "error"
 
