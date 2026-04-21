@@ -6,6 +6,9 @@ package, and project file generation. No editor needed.
 
 import json
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +22,9 @@ from cli_anything.unreal.utils.ue_backend import (
     get_engine_version,
     find_running_build_processes,
     kill_build_processes,
+    start_build_subprocess,
+    collect_subprocess_result,
+    BUILD_HEARTBEAT_INTERVAL,
 )
 
 
@@ -41,6 +47,38 @@ def _check_already_building(uproject_path: str) -> dict | None:
             "running_processes": processes,
         }
     return None
+
+
+def _run_build_with_heartbeat(cmd: list[str]) -> dict:
+    """Run a build command with periodic heartbeat messages.
+
+    Starts the subprocess, then polls every second. Every
+    ``BUILD_HEARTBEAT_INTERVAL`` seconds a heartbeat line is printed
+    (e.g. "[build] still running … 300s elapsed") so the AI / user
+    knows the build is alive.
+
+    This mirrors the editor-launch heartbeat pattern in editor.py.
+
+    Returns:
+        {"returncode": int, "stdout": str, "stderr": str}
+    """
+    proc = start_build_subprocess(cmd)
+    if isinstance(proc, dict):
+        # Error dict from start_build_subprocess
+        return proc
+
+    start_time = time.monotonic()
+    last_heartbeat = start_time
+
+    while proc.poll() is None:
+        now = time.monotonic()
+        elapsed = int(now - start_time)
+        if now - last_heartbeat >= BUILD_HEARTBEAT_INTERVAL:
+            print(f"[build] still running … {elapsed}s elapsed", flush=True)
+            last_heartbeat = now
+        time.sleep(1)
+
+    return collect_subprocess_result(proc)
 
 
 def compile_project(
@@ -74,7 +112,12 @@ def compile_project(
     project_name = path.stem
 
     # Use UAT BuildCookRun with -build only
+    uat = find_uat(engine_root)
+    if not uat:
+        return {"status": "error", "error": "RunUAT.bat not found"}
+
     args = [
+        uat, "BuildCookRun",
         f"-project={uproject_path}",
         f"-platform={platform}",
         f"-clientconfig={config}",
@@ -83,7 +126,7 @@ def compile_project(
         "-utf8output",
     ]
 
-    result = run_uat(engine_root, "BuildCookRun", args)
+    result = _run_build_with_heartbeat(args)
 
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
@@ -118,7 +161,12 @@ def cook_content(
     if not engine_root:
         return {"status": "error", "error": "Could not find engine root"}
 
+    uat = find_uat(engine_root)
+    if not uat:
+        return {"status": "error", "error": "RunUAT.bat not found"}
+
     args = [
+        uat, "BuildCookRun",
         f"-project={uproject_path}",
         f"-platform={platform}",
         "-cook",
@@ -127,7 +175,7 @@ def cook_content(
         "-allmaps",
     ]
 
-    result = run_uat(engine_root, "BuildCookRun", args)
+    result = _run_build_with_heartbeat(args)
 
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
@@ -170,7 +218,12 @@ def package_project(
     if output_dir is None:
         output_dir = str(path.parent / "Packaged")
 
+    uat = find_uat(engine_root)
+    if not uat:
+        return {"status": "error", "error": "RunUAT.bat not found"}
+
     args = [
+        uat, "BuildCookRun",
         f"-project={uproject_path}",
         f"-platform={platform}",
         f"-clientconfig={config}",
@@ -184,7 +237,7 @@ def package_project(
         "-utf8output",
     ]
 
-    result = run_uat(engine_root, "BuildCookRun", args)
+    result = _run_build_with_heartbeat(args)
 
     return {
         "status": "ok" if result["returncode"] == 0 else "error",

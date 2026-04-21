@@ -474,7 +474,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
     api = UEEditorAPI(port=poll_port)
     start_time = time.time()
     deadline = start_time + timeout
-    poll_interval = 5.0
+    poll_interval = 30.0
     last_hint_time = time.time()
     result = {}
 

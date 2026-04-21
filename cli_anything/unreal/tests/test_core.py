@@ -4160,19 +4160,21 @@ class TestInstallSkills:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestBuildSuccessPaths:
-    """Tests for compile/cook/package success paths via mocked run_uat."""
+    """Tests for compile/cook/package success paths via mocked _run_build_with_heartbeat."""
 
     def _mock_engine_root(self):
         return r"F:\RX_ENGINE_5.7"
+
+    def _mock_heartbeat_result(self, returncode=0, stdout="", stderr=""):
+        return {"returncode": returncode, "stdout": stdout, "stderr": stderr}
 
     def test_compile_success(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
 
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
-             patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "BUILD SUCCESSFUL", "stderr": "",
-             }):
+             patch("cli_anything.unreal.core.build.find_uat", return_value="F:/Engine/RunUAT.bat"), \
+             patch("cli_anything.unreal.core.build._run_build_with_heartbeat", return_value=self._mock_heartbeat_result(stdout="BUILD SUCCESSFUL")):
             result = compile_project(temp_project["uproject"])
             assert result["status"] == "ok"
             assert result["returncode"] == 0
@@ -4183,9 +4185,8 @@ class TestBuildSuccessPaths:
 
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
-             patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 1, "stdout": "", "stderr": "error LNK2001",
-             }):
+             patch("cli_anything.unreal.core.build.find_uat", return_value="F:/Engine/RunUAT.bat"), \
+             patch("cli_anything.unreal.core.build._run_build_with_heartbeat", return_value=self._mock_heartbeat_result(returncode=1, stderr="error LNK2001")):
             result = compile_project(temp_project["uproject"])
             assert result["status"] == "error"
             assert result["returncode"] == 1
@@ -4195,9 +4196,8 @@ class TestBuildSuccessPaths:
 
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
-             patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "Cook complete", "stderr": "",
-             }):
+             patch("cli_anything.unreal.core.build.find_uat", return_value="F:/Engine/RunUAT.bat"), \
+             patch("cli_anything.unreal.core.build._run_build_with_heartbeat", return_value=self._mock_heartbeat_result(stdout="Cook complete")):
             result = cook_content(temp_project["uproject"])
             assert result["status"] == "ok"
             assert result["returncode"] == 0
@@ -4207,9 +4207,8 @@ class TestBuildSuccessPaths:
 
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
-             patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "Archive successful", "stderr": "",
-             }):
+             patch("cli_anything.unreal.core.build.find_uat", return_value="F:/Engine/RunUAT.bat"), \
+             patch("cli_anything.unreal.core.build._run_build_with_heartbeat", return_value=self._mock_heartbeat_result(stdout="Archive successful")):
             result = package_project(temp_project["uproject"])
             assert result["status"] == "ok"
             assert "output_dir" in result
@@ -4219,9 +4218,8 @@ class TestBuildSuccessPaths:
 
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
-             patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "", "stderr": "",
-             }):
+             patch("cli_anything.unreal.core.build.find_uat", return_value="F:/Engine/RunUAT.bat"), \
+             patch("cli_anything.unreal.core.build._run_build_with_heartbeat", return_value=self._mock_heartbeat_result()):
             result = package_project(temp_project["uproject"])
             assert result["output_dir"].endswith("Packaged")
 
@@ -4230,9 +4228,8 @@ class TestBuildSuccessPaths:
 
         with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
              patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
-             patch("cli_anything.unreal.core.build.run_uat", return_value={
-                 "returncode": 0, "stdout": "", "stderr": "",
-             }):
+             patch("cli_anything.unreal.core.build.find_uat", return_value="F:/Engine/RunUAT.bat"), \
+             patch("cli_anything.unreal.core.build._run_build_with_heartbeat", return_value=self._mock_heartbeat_result()):
             result = package_project(temp_project["uproject"], output_dir="D:/Out")
             assert result["output_dir"] == "D:/Out"
 
@@ -4542,6 +4539,248 @@ class TestBuildStopAndDetect:
             result = _run_subprocess(["nonexistent_command"])
             assert result["returncode"] == -1
             assert "not found" in result["stderr"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Test build heartbeat
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestBuildHeartbeat:
+    """Tests for the build heartbeat feature.
+
+    The heartbeat pattern mirrors the editor-launch heartbeat:
+    start_build_subprocess() returns a Popen, the caller polls and
+    prints heartbeat messages, then collect_subprocess_result() waits
+    for the final output.
+    """
+
+    def test_build_heartbeat_interval_constant(self):
+        """BUILD_HEARTBEAT_INTERVAL is 300 (5 minutes)."""
+        from cli_anything.unreal.utils.ue_backend import BUILD_HEARTBEAT_INTERVAL
+        assert BUILD_HEARTBEAT_INTERVAL == 300
+
+    def test_start_build_subprocess_returns_popen(self):
+        """start_build_subprocess returns Popen-like object on success."""
+        from cli_anything.unreal.utils.ue_backend import start_build_subprocess
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 1234
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            result = start_build_subprocess(["echo", "test"])
+            # start_build_subprocess returns Popen on success (not a dict)
+            assert not isinstance(result, dict)
+            assert hasattr(result, "pid")
+
+    def test_start_build_subprocess_returns_error_dict(self):
+        """start_build_subprocess returns error dict on FileNotFoundError."""
+        from cli_anything.unreal.utils.ue_backend import start_build_subprocess
+
+        with patch("subprocess.Popen", side_effect=FileNotFoundError("not found")):
+            result = start_build_subprocess(["nonexistent"])
+            assert isinstance(result, dict)
+            assert result["returncode"] == -1
+            assert "not found" in result["stderr"]
+
+    def test_collect_subprocess_result_success(self):
+        """collect_subprocess_result returns result dict on success."""
+        from cli_anything.unreal.utils.ue_backend import collect_subprocess_result
+
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (b"output", b"err")
+        mock_proc.returncode = 0
+
+        result = collect_subprocess_result(mock_proc, capture=True)
+        assert result["returncode"] == 0
+        assert result["stdout"] == "output"
+        assert result["stderr"] == "err"
+
+    def test_collect_subprocess_result_timeout(self):
+        """collect_subprocess_result kills process tree on timeout."""
+        from cli_anything.unreal.utils.ue_backend import collect_subprocess_result
+
+        mock_proc = MagicMock()
+        mock_proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="test", timeout=86400),
+            (b"partial", b""),
+        ]
+        mock_proc.returncode = -2
+
+        with patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True):
+            result = collect_subprocess_result(mock_proc, capture=True)
+            assert result["returncode"] == -2
+            assert "timed out" in result["stderr"]
+
+    def test_run_build_with_heartbeat_fast_process(self):
+        """_run_build_with_heartbeat works when process finishes quickly (no heartbeat)."""
+        from cli_anything.unreal.core.build import _run_build_with_heartbeat
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0  # already finished
+        mock_proc.communicate.return_value = (b"output", b"")
+        mock_proc.returncode = 0
+
+        with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=mock_proc), \
+             patch("cli_anything.unreal.core.build.collect_subprocess_result", return_value={
+                 "returncode": 0, "stdout": "output", "stderr": "",
+             }), \
+             patch("builtins.print") as mock_print:
+            result = _run_build_with_heartbeat(["test"])
+
+        # No heartbeat for a fast process
+        heartbeat_calls = [
+            c for c in mock_print.call_args_list
+            if "[build] still running" in str(c)
+        ]
+        assert len(heartbeat_calls) == 0
+        assert result["returncode"] == 0
+
+    def test_run_build_with_heartbeat_emits_heartbeat(self):
+        """_run_build_with_heartbeat prints heartbeat when build runs long."""
+        from cli_anything.unreal.core.build import _run_build_with_heartbeat
+
+        mock_proc = MagicMock()
+        # poll returns None 3 times (still running), then 0 (finished)
+        poll_count = 0
+        def poll_side_effect():
+            nonlocal poll_count
+            poll_count += 1
+            if poll_count >= 3:
+                return 0
+            return None
+        mock_proc.poll.side_effect = poll_side_effect
+        mock_proc.returncode = 0
+
+        with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=mock_proc), \
+             patch("cli_anything.unreal.core.build.collect_subprocess_result", return_value={
+                 "returncode": 0, "stdout": "output", "stderr": "",
+             }), \
+             patch("cli_anything.unreal.core.build.time") as mock_time, \
+             patch("builtins.print") as mock_print:
+            # Simulate: start=0, 1s, 301s (heartbeat!), 302s
+            mock_time.monotonic.side_effect = [0, 0.5, 301, 301.5, 302]
+            mock_time.sleep = MagicMock()
+
+            result = _run_build_with_heartbeat(["test"])
+
+        heartbeat_calls = [
+            c for c in mock_print.call_args_list
+            if "[build] still running" in str(c)
+        ]
+        assert len(heartbeat_calls) >= 1
+        assert result["returncode"] == 0
+
+    def test_run_build_with_heartbeat_no_heartbeat_if_fast(self):
+        """No heartbeat printed when process finishes before interval."""
+        from cli_anything.unreal.core.build import _run_build_with_heartbeat
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0  # finished immediately
+        mock_proc.returncode = 0
+
+        with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=mock_proc), \
+             patch("cli_anything.unreal.core.build.collect_subprocess_result", return_value={
+                 "returncode": 0, "stdout": "output", "stderr": "",
+             }), \
+             patch("cli_anything.unreal.core.build.time") as mock_time, \
+             patch("builtins.print") as mock_print:
+            mock_time.monotonic.side_effect = [0, 0.1]
+            mock_time.sleep = MagicMock()
+
+            result = _run_build_with_heartbeat(["test"])
+
+        heartbeat_calls = [
+            c for c in mock_print.call_args_list
+            if "[build] still running" in str(c)
+        ]
+        assert len(heartbeat_calls) == 0
+
+    def test_run_build_with_heartbeat_error_dict(self):
+        """_run_build_with_heartbeat passes through error dicts from start_build_subprocess."""
+        from cli_anything.unreal.core.build import _run_build_with_heartbeat
+
+        error_dict = {"returncode": -1, "stdout": "", "stderr": "Command not found"}
+
+        with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=error_dict):
+            result = _run_build_with_heartbeat(["nonexistent"])
+
+        assert result["returncode"] == -1
+        assert "not found" in result["stderr"]
+
+    def test_compile_uses_heartbeat(self, temp_project):
+        """compile_project uses _run_build_with_heartbeat (not run_uat)."""
+        from cli_anything.unreal.core.build import compile_project
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value="F:/Engine"), \
+             patch("cli_anything.unreal.core.build.find_uat", return_value="F:/Engine/RunUAT.bat"), \
+             patch("cli_anything.unreal.core.build._run_build_with_heartbeat", return_value={
+                 "returncode": 0, "stdout": "", "stderr": "",
+             }) as mock_hb:
+            result = compile_project(temp_project["uproject"])
+            assert result["status"] == "ok"
+            mock_hb.assert_called_once()
+
+    def test_cook_uses_heartbeat(self, temp_project):
+        """cook_content uses _run_build_with_heartbeat."""
+        from cli_anything.unreal.core.build import cook_content
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value="F:/Engine"), \
+             patch("cli_anything.unreal.core.build.find_uat", return_value="F:/Engine/RunUAT.bat"), \
+             patch("cli_anything.unreal.core.build._run_build_with_heartbeat", return_value={
+                 "returncode": 0, "stdout": "", "stderr": "",
+             }) as mock_hb:
+            result = cook_content(temp_project["uproject"])
+            assert result["status"] == "ok"
+            mock_hb.assert_called_once()
+
+    def test_package_uses_heartbeat(self, temp_project):
+        """package_project uses _run_build_with_heartbeat."""
+        from cli_anything.unreal.core.build import package_project
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value="F:/Engine"), \
+             patch("cli_anything.unreal.core.build.find_uat", return_value="F:/Engine/RunUAT.bat"), \
+             patch("cli_anything.unreal.core.build._run_build_with_heartbeat", return_value={
+                 "returncode": 0, "stdout": "", "stderr": "",
+             }) as mock_hb:
+            result = package_project(temp_project["uproject"])
+            assert result["status"] == "ok"
+            mock_hb.assert_called_once()
+
+    def test_heartbeat_multiple_intervals(self):
+        """Multiple heartbeats emitted when build runs long enough."""
+        from cli_anything.unreal.core.build import _run_build_with_heartbeat
+
+        mock_proc = MagicMock()
+        poll_count = 0
+        def poll_side_effect():
+            nonlocal poll_count
+            poll_count += 1
+            if poll_count >= 5:
+                return 0
+            return None
+        mock_proc.poll.side_effect = poll_side_effect
+        mock_proc.returncode = 0
+
+        with patch("cli_anything.unreal.core.build.start_build_subprocess", return_value=mock_proc), \
+             patch("cli_anything.unreal.core.build.collect_subprocess_result", return_value={
+                 "returncode": 0, "stdout": "", "stderr": "",
+             }), \
+             patch("cli_anything.unreal.core.build.time") as mock_time, \
+             patch("builtins.print") as mock_print:
+            # Start=0, advance past 300 (1st), past 600 (2nd), then finish
+            mock_time.monotonic.side_effect = [0, 0.5, 301, 301.5, 601, 601.5, 602]
+            mock_time.sleep = MagicMock()
+
+            _run_build_with_heartbeat(["test"])
+
+        heartbeat_calls = [
+            c for c in mock_print.call_args_list
+            if "[build] still running" in str(c)
+        ]
+        assert len(heartbeat_calls) == 2
 
 
 # ═══════════════════════════════════════════════════════════════════════
