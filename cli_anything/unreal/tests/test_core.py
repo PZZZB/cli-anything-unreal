@@ -4153,6 +4153,119 @@ class TestInstallSkills:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Build success-path tests (mocked run_uat)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestBuildSuccessPaths:
+    """Tests for compile/cook/package success paths via mocked run_uat."""
+
+    def _mock_engine_root(self):
+        return r"F:\RX_ENGINE_5.7"
+
+    def test_compile_success(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
+             patch("cli_anything.unreal.core.build.run_uat", return_value={
+                 "returncode": 0, "stdout": "BUILD SUCCESSFUL", "stderr": "",
+             }):
+            result = compile_project(temp_project["uproject"])
+            assert result["status"] == "ok"
+            assert result["returncode"] == 0
+            assert "BUILD SUCCESSFUL" in result["stdout"]
+
+    def test_compile_error_returncode(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
+             patch("cli_anything.unreal.core.build.run_uat", return_value={
+                 "returncode": 1, "stdout": "", "stderr": "error LNK2001",
+             }):
+            result = compile_project(temp_project["uproject"])
+            assert result["status"] == "error"
+            assert result["returncode"] == 1
+
+    def test_cook_success(self, temp_project):
+        from cli_anything.unreal.core.build import cook_content
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
+             patch("cli_anything.unreal.core.build.run_uat", return_value={
+                 "returncode": 0, "stdout": "Cook complete", "stderr": "",
+             }):
+            result = cook_content(temp_project["uproject"])
+            assert result["status"] == "ok"
+            assert result["returncode"] == 0
+
+    def test_package_success(self, temp_project):
+        from cli_anything.unreal.core.build import package_project
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
+             patch("cli_anything.unreal.core.build.run_uat", return_value={
+                 "returncode": 0, "stdout": "Archive successful", "stderr": "",
+             }):
+            result = package_project(temp_project["uproject"])
+            assert result["status"] == "ok"
+            assert "output_dir" in result
+
+    def test_package_default_output_dir(self, temp_project):
+        from cli_anything.unreal.core.build import package_project
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
+             patch("cli_anything.unreal.core.build.run_uat", return_value={
+                 "returncode": 0, "stdout": "", "stderr": "",
+             }):
+            result = package_project(temp_project["uproject"])
+            assert result["output_dir"].endswith("Packaged")
+
+    def test_package_custom_output_dir(self, temp_project):
+        from cli_anything.unreal.core.build import package_project
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[]), \
+             patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
+             patch("cli_anything.unreal.core.build.run_uat", return_value={
+                 "returncode": 0, "stdout": "", "stderr": "",
+             }):
+            result = package_project(temp_project["uproject"], output_dir="D:/Out")
+            assert result["output_dir"] == "D:/Out"
+
+    def test_stop_build_calls_kill(self, temp_project):
+        from cli_anything.unreal.core.build import stop_build
+
+        with patch("cli_anything.unreal.core.build.kill_build_processes", return_value={
+            "killed": [100, 200], "remaining": [], "status": "ok",
+        }):
+            result = stop_build(temp_project["uproject"])
+            assert result["status"] == "ok"
+            assert 100 in result["killed"]
+
+    def test_is_building_calls_find(self, temp_project):
+        from cli_anything.unreal.core.build import is_building
+
+        with patch("cli_anything.unreal.core.build.find_running_build_processes", return_value=[
+            {"pid": 100, "name": "MSBuild.exe", "cmdline": "", "project": ""},
+        ]):
+            result = is_building(temp_project["uproject"])
+            assert result["building"] is True
+
+    def test_generate_project_files_uat_fallback(self, temp_project):
+        """generate_project_files uses UAT fallback when bat not found."""
+        from cli_anything.unreal.core.build import generate_project_files
+
+        with patch("cli_anything.unreal.core.build.find_engine_root", return_value=self._mock_engine_root()), \
+             patch("cli_anything.unreal.core.build.find_generate_project_files", return_value=None), \
+             patch("cli_anything.unreal.core.build.run_uat", return_value={
+                 "returncode": 0, "stdout": "Project files generated", "stderr": "",
+             }):
+            result = generate_project_files(temp_project["uproject"])
+            assert result["status"] == "ok"
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Test build stop / is-building / no-timeout (new features)
 # ═══════════════════════════════════════════════════════════════════════
 
