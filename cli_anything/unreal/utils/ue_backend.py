@@ -12,27 +12,21 @@ from pathlib import Path
 from typing import Optional
 
 
-# ── Default engine paths ────────────────────────────────────────────────
-
-_DEFAULT_ENGINE_ROOTS = [
-    r"F:\RX_ENGINE_5.7",
-    r"C:\Program Files\Epic Games\UE_5.4",
-    r"C:\Program Files\Epic Games\UE_5.3",
-]
+# ── Engine discovery ──────────────────────────────────────────────────
 
 
 def find_engine_root(uproject_path: Optional[str] = None) -> Optional[str]:
     """Discover the Unreal Engine root directory.
 
     Strategy:
-    1. If uproject_path given, parse EngineAssociation from .uproject
-       and look up in registry / known paths
+    1. If uproject_path given, parse EngineAssociation from .uproject:
+       a. If it's a directory path, use directly
+       b. If it's a version string (e.g. "5.7"), look up in registry
     2. Check UE_ENGINE_ROOT environment variable
-    3. Check default installation paths
-    4. Look for Build.version in parent directories
+    3. Windows registry (any registered engine, no version filter)
 
     Returns:
-        Engine root path (e.g. F:\\RX_ENGINE_5.7) or None.
+        Engine root path or None.
     """
     # Strategy 1: From .uproject
     if uproject_path:
@@ -41,14 +35,16 @@ def find_engine_root(uproject_path: Optional[str] = None) -> Optional[str]:
             try:
                 data = json.loads(uproject.read_text(encoding="utf-8-sig"))
                 assoc = data.get("EngineAssociation", "")
-                # Check if it's a path-based association (custom build)
-                if assoc and os.path.isdir(assoc):
-                    return str(assoc)
-                # Try to find via .sln file in project dir
-                project_dir = uproject.parent
-                for sln in project_dir.glob("*.sln"):
-                    # .sln may contain engine path references
-                    pass
+                if assoc:
+                    # 1a: Path-based association (custom build)
+                    if os.path.isdir(assoc):
+                        return str(assoc)
+                    # 1b: Version/GUID association — look up in registry
+                    #     UE stores official engines in HKLM by version ("5.7"),
+                    #     custom builds in HKCU by GUID ("{...}").
+                    version_root = _find_engine_by_association(assoc)
+                    if version_root:
+                        return version_root
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -57,12 +53,7 @@ def find_engine_root(uproject_path: Optional[str] = None) -> Optional[str]:
     if env_root and _validate_engine_root(env_root):
         return env_root
 
-    # Strategy 3: Default paths
-    for root in _DEFAULT_ENGINE_ROOTS:
-        if _validate_engine_root(root):
-            return root
-
-    # Strategy 4: Windows registry (Epic Games Launcher)
+    # Strategy 3: Windows registry (any registered engine)
     reg_root = _find_engine_from_registry()
     if reg_root:
         return reg_root
@@ -81,10 +72,120 @@ def _validate_engine_root(path: str) -> bool:
     )
 
 
-def _find_engine_from_registry() -> Optional[str]:
-    """Try to find engine path from Windows registry."""
+def _read_engine_version(engine_root: str) -> Optional[str]:
+    """Read engine version (major.minor) from Build.version file.
+
+    Args:
+        engine_root: Path to engine root directory.
+
+    Returns:
+        Version string like "5.7" or None if not readable.
+    """
+    build_version_path = Path(engine_root) / "Engine" / "Build" / "Build.version"
+    if not build_version_path.is_file():
+        return None
+    try:
+        data = json.loads(build_version_path.read_text(encoding="utf-8"))
+        major = data.get("MajorVersion")
+        minor = data.get("MinorVersion")
+        if major is not None and minor is not None:
+            return f"{major}.{minor}"
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _find_engine_by_association(assoc: str) -> Optional[str]:
+    """Find engine root by EngineAssociation string.
+
+    Mirrors UE's own resolution logic:
+    1. HKLM SOFTWARE\\EpicGames\\Unreal Engine\\<version> — official installs
+       The subkey name IS the version (e.g. "5.7").
+    2. HKCU SOFTWARE\\Epic Games\\Unreal Engine\\Builds — custom/source builds
+       Value names are GUIDs like "{F9E7804A-...}", values are paths.
+
+    Args:
+        assoc: EngineAssociation from .uproject — version string ("5.7")
+               or GUID ("{F9E7804A-46B1-30B0-1C7B-4B99E6AAB63F}").
+
+    Returns:
+        Engine root path or None.
+    """
     if sys.platform != "win32":
         return None
+
+    # 1. HKLM — subkey name matches version directly
+    result = _find_engine_in_hklm(assoc)
+    if result:
+        return result
+
+    # 2. HKCU Builds — lookup by GUID name, or scan by Build.version
+    return _find_engine_in_hkcu(assoc)
+
+
+def _find_engine_in_hklm(version: str) -> Optional[str]:
+    """Look up engine in HKLM by version subkey name."""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\EpicGames\Unreal Engine",
+        )
+        try:
+            subkey = winreg.OpenKey(key, version)
+            install_dir, _ = winreg.QueryValueEx(subkey, "InstalledDirectory")
+            if _validate_engine_root(install_dir):
+                return install_dir
+        except OSError:
+            pass
+    except (ImportError, OSError):
+        pass
+    return None
+
+
+def _find_engine_in_hkcu(assoc: str) -> Optional[str]:
+    """Look up engine in HKCU Builds.
+
+    If assoc is a GUID like "{F9E7804A-...}", look up the value by name.
+    Otherwise, scan all entries and match by Build.version.
+    """
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"SOFTWARE\Epic Games\Unreal Engine\Builds",
+        )
+        # GUID lookup: assoc is the value name
+        if assoc.startswith("{") and assoc.endswith("}"):
+            try:
+                install_dir, _ = winreg.QueryValueEx(key, assoc)
+                if isinstance(install_dir, str) and _validate_engine_root(install_dir):
+                    return install_dir
+            except OSError:
+                pass
+            return None
+        # Version string: scan all entries, match by Build.version
+        i = 0
+        while True:
+            try:
+                name, install_dir, vtype = winreg.EnumValue(key, i)
+                if isinstance(install_dir, str) and _validate_engine_root(install_dir):
+                    engine_ver = _read_engine_version(install_dir)
+                    if engine_ver == assoc:
+                        return install_dir
+                i += 1
+            except OSError:
+                break
+    except (ImportError, OSError):
+        pass
+    return None
+
+
+def _find_engine_from_registry() -> Optional[str]:
+    """Try to find any engine path from Windows registry."""
+    if sys.platform != "win32":
+        return None
+    # HKLM — official installs
     try:
         import winreg
         key = winreg.OpenKey(
@@ -100,6 +201,24 @@ def _find_engine_from_registry() -> Optional[str]:
                     subkey, "InstalledDirectory"
                 )
                 if _validate_engine_root(install_dir):
+                    return install_dir
+                i += 1
+            except OSError:
+                break
+    except (ImportError, OSError):
+        pass
+    # HKCU — custom builds
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"SOFTWARE\Epic Games\Unreal Engine\Builds",
+        )
+        i = 0
+        while True:
+            try:
+                name, install_dir, vtype = winreg.EnumValue(key, i)
+                if isinstance(install_dir, str) and _validate_engine_root(install_dir):
                     return install_dir
                 i += 1
             except OSError:

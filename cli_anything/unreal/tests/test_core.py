@@ -326,7 +326,222 @@ class TestBackend:
         with patch.dict(os.environ, {}, clear=True):
             # Should not crash even if no engine found
             root = find_engine_root("/nonexistent.uproject")
-            # Result depends on default paths existing
+
+    def test_find_engine_root_version_hklm(self, tmp_path):
+        """EngineAssociation '5.7' resolves via HKLM subkey name."""
+        from cli_anything.unreal.utils.ue_backend import find_engine_root
+
+        uproject = tmp_path / "Test.uproject"
+        uproject.write_text('{"EngineAssociation": "5.7"}', encoding="utf-8")
+
+        mock_install_dir = r"C:\Program Files\Epic Games\UE_5.7"
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hklm", return_value=mock_install_dir),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hkcu", return_value=None),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_from_registry", return_value=None),
+        ):
+            root = find_engine_root(str(uproject))
+            assert root == mock_install_dir
+
+    def test_find_engine_root_guid_hkcu(self, tmp_path):
+        """EngineAssociation '{GUID}' resolves via HKCU Builds."""
+        from cli_anything.unreal.utils.ue_backend import find_engine_root
+
+        guid = "{F9E7804A-46B1-30B0-1C7B-4B99E6AAB63F}"
+        uproject = tmp_path / "Test.uproject"
+        uproject.write_text(f'{{"EngineAssociation": "{guid}"}}', encoding="utf-8")
+
+        mock_install_dir = r"F:\RX_ENGINE_5.7"
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hklm", return_value=None),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hkcu", return_value=mock_install_dir),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_from_registry", return_value=None),
+        ):
+            root = find_engine_root(str(uproject))
+            assert root == mock_install_dir
+
+    def test_find_engine_root_path_assoc(self, tmp_path):
+        """EngineAssociation that is a directory path is used directly."""
+        from cli_anything.unreal.utils.ue_backend import find_engine_root
+
+        engine_dir = tmp_path / "MyEngine"
+        engine_dir.mkdir()
+        (engine_dir / "Engine" / "Build").mkdir(parents=True)
+
+        uproject = tmp_path / "Test.uproject"
+        uproject.write_text(f'{{"EngineAssociation": "{str(engine_dir).replace(chr(92), "/")}"}}', encoding="utf-8")
+
+        with patch.dict(os.environ, {}, clear=True):
+            root = find_engine_root(str(uproject))
+            assert root is not None
+
+    def test_find_engine_by_association_hklm_direct(self):
+        """_find_engine_in_hklm opens subkey by version name directly."""
+        from cli_anything.unreal.utils.ue_backend import _find_engine_in_hklm
+
+        mock_winreg = MagicMock()
+        mock_subkey = MagicMock()
+        mock_subkey.__enter__ = lambda s: s
+        mock_subkey.__exit__ = MagicMock(return_value=False)
+        mock_winreg.OpenKey.return_value = mock_subkey
+        mock_winreg.HKEY_LOCAL_MACHINE = MagicMock()
+        mock_winreg.QueryValueEx.return_value = (r"C:\Program Files\Epic Games\UE_5.7", MagicMock())
+
+        with patch.dict("sys.modules", {"winreg": mock_winreg}), \
+             patch("cli_anything.unreal.utils.ue_backend._validate_engine_root", return_value=True):
+            result = _find_engine_in_hklm("5.7")
+            assert result == r"C:\Program Files\Epic Games\UE_5.7"
+            # Verify it opened the version subkey directly
+            mock_winreg.OpenKey.assert_called()
+
+    def test_find_engine_by_association_hkcu_guid(self):
+        """_find_engine_in_hkcu looks up GUID by value name."""
+        from cli_anything.unreal.utils.ue_backend import _find_engine_in_hkcu
+
+        guid = "{F9E7804A-46B1-30B0-1C7B-4B99E6AAB63F}"
+        mock_winreg = MagicMock()
+        mock_key = MagicMock()
+        mock_winreg.OpenKey.return_value = mock_key
+        mock_winreg.HKEY_CURRENT_USER = MagicMock()
+        mock_winreg.QueryValueEx.return_value = (r"F:\RX_ENGINE_5.7", MagicMock())
+
+        with patch.dict("sys.modules", {"winreg": mock_winreg}), \
+             patch("cli_anything.unreal.utils.ue_backend._validate_engine_root", return_value=True):
+            result = _find_engine_in_hkcu(guid)
+            assert result == r"F:\RX_ENGINE_5.7"
+            mock_winreg.QueryValueEx.assert_called_with(mock_key, guid)
+
+    def test_find_engine_by_association_hklm_takes_priority(self, tmp_path):
+        """When both HKLM and HKCU match, HKLM wins."""
+        from cli_anything.unreal.utils.ue_backend import find_engine_root
+
+        uproject = tmp_path / "Test.uproject"
+        uproject.write_text('{"EngineAssociation": "5.7"}', encoding="utf-8")
+
+        hklm_dir = r"C:\Program Files\Epic Games\UE_5.7"
+        hkcu_dir = r"F:\RX_ENGINE_5.7"
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hklm", return_value=hklm_dir),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hkcu", return_value=hkcu_dir),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_from_registry", return_value=None),
+        ):
+            root = find_engine_root(str(uproject))
+            assert root == hklm_dir
+
+    def test_find_engine_by_association_hkcu_fallback(self, tmp_path):
+        """When HKLM has no match, falls back to HKCU Build.version scan."""
+        from cli_anything.unreal.utils.ue_backend import find_engine_root
+
+        uproject = tmp_path / "Test.uproject"
+        uproject.write_text('{"EngineAssociation": "5.7"}', encoding="utf-8")
+
+        hkcu_dir = r"F:\RX_ENGINE_5.7"
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hklm", return_value=None),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hkcu", return_value=hkcu_dir),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_from_registry", return_value=None),
+        ):
+            root = find_engine_root(str(uproject))
+            assert root == hkcu_dir
+
+    def test_find_engine_by_association_no_match(self, tmp_path):
+        """No matching engine returns None."""
+        from cli_anything.unreal.utils.ue_backend import find_engine_root
+
+        uproject = tmp_path / "Test.uproject"
+        uproject.write_text('{"EngineAssociation": "99.9"}', encoding="utf-8")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hklm", return_value=None),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_in_hkcu", return_value=None),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_from_registry", return_value=None),
+        ):
+            root = find_engine_root(str(uproject))
+            assert root is None
+
+    def test_find_engine_root_no_uproject_uses_registry(self):
+        """Without uproject, falls back to registry."""
+        from cli_anything.unreal.utils.ue_backend import find_engine_root
+
+        mock_dir = r"C:\Program Files\Epic Games\UE_5.7"
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("cli_anything.unreal.utils.ue_backend._find_engine_from_registry", return_value=mock_dir),
+        ):
+            root = find_engine_root()
+            assert root == mock_dir
+
+    def test_read_engine_version(self, tmp_path):
+        """_read_engine_version reads MajorVersion.MinorVersion from Build.version."""
+        from cli_anything.unreal.utils.ue_backend import _read_engine_version
+
+        engine = tmp_path / "Engine"
+        build_dir = engine / "Build"
+        build_dir.mkdir(parents=True)
+        (build_dir / "Build.version").write_text(
+            '{"MajorVersion": 5, "MinorVersion": 7, "PatchVersion": 0}', encoding="utf-8"
+        )
+        assert _read_engine_version(str(tmp_path)) == "5.7"
+
+    def test_read_engine_version_missing_file(self, tmp_path):
+        """_read_engine_version returns None if Build.version is missing."""
+        from cli_anything.unreal.utils.ue_backend import _read_engine_version
+
+        assert _read_engine_version(str(tmp_path)) is None
+
+    def test_find_engine_in_hkcu_version_scan(self):
+        """_find_engine_in_hkcu scans entries by Build.version when assoc is not GUID."""
+        from cli_anything.unreal.utils.ue_backend import _find_engine_in_hkcu
+
+        mock_winreg = MagicMock()
+        mock_key = MagicMock()
+        mock_winreg.OpenKey.return_value = mock_key
+        mock_winreg.HKEY_CURRENT_USER = MagicMock()
+
+        # First entry: version doesn't match
+        # Second entry: version matches
+        mock_winreg.EnumValue.side_effect = [
+            ("{GUID1}", r"F:\Engine1", 1),
+            ("{GUID2}", r"F:\Engine2", 1),
+            OSError,  # end enumeration
+        ]
+
+        def mock_read_version(path):
+            return "5.5" if "Engine1" in path else "5.7"
+
+        with patch.dict("sys.modules", {"winreg": mock_winreg}), \
+             patch("cli_anything.unreal.utils.ue_backend._validate_engine_root", return_value=True), \
+             patch("cli_anything.unreal.utils.ue_backend._read_engine_version", side_effect=mock_read_version):
+            result = _find_engine_in_hkcu("5.7")
+            assert result == r"F:\Engine2"
+
+    def test_find_engine_from_registry_checks_both_hives(self):
+        """_find_engine_from_registry checks HKLM first, then HKCU."""
+        from cli_anything.unreal.utils.ue_backend import _find_engine_from_registry
+
+        mock_winreg = MagicMock()
+        mock_key = MagicMock()
+        mock_winreg.OpenKey.return_value = mock_key
+        mock_winreg.HKEY_LOCAL_MACHINE = MagicMock()
+        mock_winreg.HKEY_CURRENT_USER = MagicMock()
+
+        # HKLM has no entries (EnumKey raises OSError immediately)
+        mock_winreg.EnumKey.side_effect = OSError
+        # HKCU has one entry
+        mock_winreg.EnumValue.side_effect = [
+            ("{GUID1}", r"F:\CustomEngine", 1),
+            OSError,
+        ]
+
+        with patch.dict("sys.modules", {"winreg": mock_winreg}), \
+             patch("cli_anything.unreal.utils.ue_backend._validate_engine_root", return_value=True):
+            result = _find_engine_from_registry()
+            assert result == r"F:\CustomEngine"
 
 
 # ═══════════════════════════════════════════════════════════════════════
