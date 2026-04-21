@@ -8,7 +8,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -249,12 +248,6 @@ def _kill_process_tree(pid: int) -> bool:
         return False
 
 
-# Build heartbeat interval (seconds). During long-running builds,
-# a heartbeat message is emitted every this many seconds so the
-# AI / user can see the build is still alive.
-BUILD_HEARTBEAT_INTERVAL = 300  # 5 minutes
-
-
 def _run_subprocess(
     cmd: list[str],
     capture: bool = True,
@@ -298,85 +291,6 @@ def _run_subprocess(
         stdout_bytes, stderr_bytes = proc.communicate(timeout=_SAFETY_TIMEOUT)
     except subprocess.TimeoutExpired:
         # Kill the entire process tree to prevent orphan MSBuild/UBT
-        _kill_process_tree(proc.pid)
-        try:
-            stdout_bytes, stderr_bytes = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout_bytes, stderr_bytes = proc.communicate()
-        return {
-            "returncode": -2,
-            "stdout": (stdout_bytes or b"").decode("utf-8", errors="replace") if capture else "",
-            "stderr": f"Command timed out after {_SAFETY_TIMEOUT}s",
-        }
-
-    stdout_text = ""
-    stderr_text = ""
-    if capture and stdout_bytes is not None:
-        stdout_text = stdout_bytes.decode("utf-8", errors="replace")
-    if capture and stderr_bytes is not None:
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-
-    return {
-        "returncode": proc.returncode,
-        "stdout": stdout_text,
-        "stderr": stderr_text,
-    }
-
-
-def start_build_subprocess(
-    cmd: list[str],
-    capture: bool = True,
-    cwd: str | None = None,
-) -> subprocess.Popen | dict:
-    """Start a build subprocess and return the Popen object.
-
-    Unlike ``_run_subprocess`` this does **not** wait for the process
-    to finish.  The caller is expected to poll the process and emit
-    heartbeat messages while it runs, then collect stdout/stderr.
-
-    Returns:
-        ``subprocess.Popen`` on success, or an error dict
-        ``{"returncode": -1, ...}`` on failure.
-    """
-    use_shell = sys.platform == "win32"
-    stdout_pipe = subprocess.PIPE if capture else subprocess.DEVNULL
-    stderr_pipe = subprocess.PIPE if capture else subprocess.DEVNULL
-
-    try:
-        return subprocess.Popen(
-            cmd,
-            stdout=stdout_pipe,
-            stderr=stderr_pipe,
-            cwd=cwd,
-            shell=use_shell,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if use_shell else 0,
-        )
-    except FileNotFoundError as e:
-        return {
-            "returncode": -1,
-            "stdout": "",
-            "stderr": f"Command not found: {e}",
-        }
-    except Exception as e:
-        return {
-            "returncode": -1,
-            "stdout": "",
-            "stderr": str(e),
-        }
-
-
-def collect_subprocess_result(proc: subprocess.Popen, capture: bool = True) -> dict:
-    """Wait for a Popen process to finish and collect results.
-
-    Kills the process tree if the safety timeout is exceeded.
-
-    Returns:
-        {"returncode": int, "stdout": str, "stderr": str}
-    """
-    try:
-        stdout_bytes, stderr_bytes = proc.communicate(timeout=_SAFETY_TIMEOUT)
-    except subprocess.TimeoutExpired:
         _kill_process_tree(proc.pid)
         try:
             stdout_bytes, stderr_bytes = proc.communicate(timeout=5)

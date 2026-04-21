@@ -6,10 +6,6 @@ package, and project file generation. No editor needed.
 
 import json
 import os
-import subprocess
-import sys
-import threading
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -23,9 +19,6 @@ from cli_anything.unreal.utils.ue_backend import (
     get_engine_version,
     find_running_build_processes,
     kill_build_processes,
-    start_build_subprocess,
-    collect_subprocess_result,
-    BUILD_HEARTBEAT_INTERVAL,
 )
 
 
@@ -48,73 +41,6 @@ def _check_already_building(uproject_path: str) -> dict | None:
             "running_processes": processes,
         }
     return None
-
-
-def _run_build_with_heartbeat(cmd: list[str]) -> dict:
-    """Run a build command with periodic heartbeat messages.
-
-    Starts the subprocess, then polls every second. Every
-    ``BUILD_HEARTBEAT_INTERVAL`` seconds a heartbeat line is printed
-    (e.g. "[build] still running … 300s elapsed") so the AI / user
-    knows the build is alive.
-
-    Background threads drain stdout/stderr into buffers so the pipe
-    never fills up and blocks the child process.
-
-    Returns:
-        {"returncode": int, "stdout": str, "stderr": str}
-    """
-    proc = start_build_subprocess(cmd)
-    if isinstance(proc, dict):
-        # Error dict from start_build_subprocess
-        return proc
-
-    # Drain stdout/stderr in background threads to avoid pipe deadlock.
-    # If the OS pipe buffer (~64 KB) fills up, the child process blocks
-    # on write() and appears to hang — this was causing the real build
-    # to stall silently.
-    stdout_chunks: list[bytes] = []
-    stderr_chunks: list[bytes] = []
-
-    def _drain(pipe, chunks):
-        try:
-            for data in iter(lambda: pipe.read(65536), b""):
-                chunks.append(data)
-        except Exception:
-            pass
-
-    stdout_thread = threading.Thread(
-        target=_drain, args=(proc.stdout, stdout_chunks), daemon=True,
-    )
-    stderr_thread = threading.Thread(
-        target=_drain, args=(proc.stderr, stderr_chunks), daemon=True,
-    )
-    stdout_thread.start()
-    stderr_thread.start()
-
-    start_time = time.monotonic()
-    last_heartbeat = start_time
-
-    while proc.poll() is None:
-        now = time.monotonic()
-        elapsed = int(now - start_time)
-        if now - last_heartbeat >= BUILD_HEARTBEAT_INTERVAL:
-            print(f"[build] still running … {elapsed}s elapsed", flush=True)
-            last_heartbeat = now
-        time.sleep(1)
-
-    # Wait for drain threads to finish
-    stdout_thread.join(timeout=5)
-    stderr_thread.join(timeout=5)
-
-    stdout_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-    stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
-
-    return {
-        "returncode": proc.returncode,
-        "stdout": stdout_text,
-        "stderr": stderr_text,
-    }
 
 
 def compile_project(
@@ -148,12 +74,7 @@ def compile_project(
     project_name = path.stem
 
     # Use UAT BuildCookRun with -build only
-    uat = find_uat(engine_root)
-    if not uat:
-        return {"status": "error", "error": "RunUAT.bat not found"}
-
     args = [
-        uat, "BuildCookRun",
         f"-project={uproject_path}",
         f"-platform={platform}",
         f"-clientconfig={config}",
@@ -162,7 +83,7 @@ def compile_project(
         "-utf8output",
     ]
 
-    result = _run_build_with_heartbeat(args)
+    result = run_uat(engine_root, "BuildCookRun", args)
 
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
@@ -197,12 +118,7 @@ def cook_content(
     if not engine_root:
         return {"status": "error", "error": "Could not find engine root"}
 
-    uat = find_uat(engine_root)
-    if not uat:
-        return {"status": "error", "error": "RunUAT.bat not found"}
-
     args = [
-        uat, "BuildCookRun",
         f"-project={uproject_path}",
         f"-platform={platform}",
         "-cook",
@@ -211,7 +127,7 @@ def cook_content(
         "-allmaps",
     ]
 
-    result = _run_build_with_heartbeat(args)
+    result = run_uat(engine_root, "BuildCookRun", args)
 
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
@@ -254,12 +170,7 @@ def package_project(
     if output_dir is None:
         output_dir = str(path.parent / "Packaged")
 
-    uat = find_uat(engine_root)
-    if not uat:
-        return {"status": "error", "error": "RunUAT.bat not found"}
-
     args = [
-        uat, "BuildCookRun",
         f"-project={uproject_path}",
         f"-platform={platform}",
         f"-clientconfig={config}",
@@ -273,7 +184,7 @@ def package_project(
         "-utf8output",
     ]
 
-    result = _run_build_with_heartbeat(args)
+    result = run_uat(engine_root, "BuildCookRun", args)
 
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
