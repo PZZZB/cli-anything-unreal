@@ -66,8 +66,6 @@ cli-anything-unreal asset duplicate /Game/Old /Game/New --force
 
 See [Asset Deletion — Safe Workflow](#asset-deletion--safe-workflow) below for the full delete workflow with reference checks.
 
-### Asset Deletion — Safe Workflow
-
 `asset delete` checks references before deleting, avoiding modal dialogs:
 
 ```bash

@@ -11,16 +11,17 @@ For workflows and examples, see the workflow files in this directory.
 | `editor status [TASK_ID] [--port PORT]` | Check editor state or async task progress. Returns `online`/`starting`/`zombie`/`not_running` | - |
 | `editor list [--scan-range START-END]` | Discover all running editor instances | - |
 | `editor preflight` | Check engine/project build compatibility | No |
-| `editor launch [--map MAP] [--no-wait]` | Launch editor with preflight check | No |
-| `editor close` | Gracefully close the editor | Yes |
+| `editor launch [--map MAP] [--no-wait] [--timeout N]` | Launch editor (blocks until ready; auto-kills zombie processes) | No |
+| `editor close` | Gracefully close the editor | No |
 | `editor new-level PATH [--template PATH]` | Create and open a new level safely | Yes |
 | `editor save-level` | Save the current level safely | Yes |
-| `editor exec COMMAND [--timeout N]` | Execute console command (py prefix = Python mode) | Yes |
+| `editor exec COMMAND [--timeout N] [--no-save]` | Execute console command (py prefix = Python mode) | Yes |
 | `editor run-script PATH [--timeout N] [--no-save]` | Execute .py script with result capture | Yes |
 | `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable | Yes |
 | `editor enable-remote` | Enable Remote Control in project config | No |
-| `editor api-discover TARGET [-q QUERY] [-d NAMES]` | Discover API surface of a UE class. TARGET can be class name, asset path (/Game/...), or actor path (auto-detects class) | Yes |
+| `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover API surface of a UE class. TARGET can be class name, asset path (/Game/...), or actor path (auto-detects class) | Yes |
 | `editor cancel TASK_ID` | Cancel an async editor launch task | - |
+| `editor plugin-version` | Check bundled vs loaded plugin version | Yes (for loaded) |
 | `editor plugin-upgrade` | Upgrade plugin: deploy → compile → restart | No |
 
 ### api-discover Usage
@@ -77,7 +78,7 @@ cli-anything-unreal api-discover DirectionalLight   # not top-level, needs 'edit
 
 | Command | Description |
 |---------|-------------|
-| `project info` | Display project information (.uproject) |
+| `project info [--project PATH]` | Display project information (.uproject) |
 | `project config list` | List all configuration files |
 | `project config get CONFIG_NAME [--section SEC]` | Read a configuration file |
 | `project config set CONFIG_NAME SECTION KEY VALUE` | Set a configuration value |
@@ -121,7 +122,7 @@ All scene commands require the editor.
 | `scene property ACTOR_PATH PROP[=VALUE]` | Get or set a property (`Prop` to read, `Prop=Value` to write) |
 | `scene get-transform ACTOR_PATH` | Get actor transform (location, rotation, scale) |
 | `scene list-components ACTOR_PATH` | List components on an actor |
-| `scene get-material ACTOR_PATH` | Get material assigned to actor's mesh |
+| `scene get-material ACTOR_PATH [--index N]` | Get material assigned to actor's mesh |
 
 ## material — Material Viewing & Editing
 
@@ -137,17 +138,17 @@ All material commands require the editor.
 | `material get-errors MATERIAL_PATH` | Check for compilation errors |
 | `material list-textures MATERIAL_PATH` | List referenced textures |
 | `material analyze MATERIAL_PATH` | Auto-detect common issues |
-| `material dump-hlsl MATERIAL_PATH [--platform P] [--shader-type T]` | Compiled HLSL (legacy, r.DumpShaderDebugInfo) |
+| `material dump-hlsl MATERIAL_PATH --output PATH [--platform P] [--shader-type T] [--full]` | Compiled HLSL (legacy, r.DumpShaderDebugInfo) |
 | `material hlsl-code MATERIAL_PATH` | Material HLSL expression source (Material.ush) |
 | `material shader-source MATERIAL_PATH` | All compiled shader source (.usf) with cbuffer/struct defs |
 
 ### Editing
 | Command | Description |
 |---------|-------------|
-| `material add-node PATH --type CLASS [--pos-x X] [--pos-y Y]` | Add expression node |
+| `material add-node PATH --type CLASS [--pos-x X] [--pos-y Y] [--set KEY=VALUE] [--add-input NAME] [--code-file PATH]` | Add expression node |
 | `material delete-node PATH --node NAME` | Delete expression node |
-| `material connect PATH --from NODE --to NODE --to-input PIN` | Connect two nodes |
-| `material disconnect PATH --from NODE --to NODE --to-input PIN` | Disconnect nodes |
+| `material connect PATH --from NODE [--from-output PIN] --to NODE --to-input PIN` | Connect two nodes |
+| `material disconnect PATH --from NODE [--from-output PIN] --to NODE --to-input PIN` | Disconnect nodes |
 | `material set-param PATH --name N --value V --type scalar\|vector\|texture` | Set MaterialInstance parameter |
 | `material get-param PATH --name N` | Get MaterialInstance parameter |
 | `material recompile PATH` | Force shader recompilation |
@@ -174,7 +175,7 @@ All screenshot commands require the editor.
 
 | Command | Description |
 |---------|-------------|
-| `screenshot capture [--filename NAME]` | Capture main editor window |
+| `screenshot capture [--path PATH] [--filename NAME] [--no-compress]` | Capture main editor window |
 | `screenshot capture-sequence [-n N] [-i SEC] [--no-compress]` | Capture N screenshots at interval |
 
 ## session — Undo/Redo

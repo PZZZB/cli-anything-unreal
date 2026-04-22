@@ -144,7 +144,7 @@ def _check_already_running(session, state) -> dict | None:
                 "pid": editor_proc["pid"],
                 "project": proc_project,
                 "message": f"Found UnrealEditor.exe for this project but the API is not reachable on port {state.session.port}.",
-                "suggestion": "Use editor launch --force to terminate the stale process and restart cleanly.",
+                "suggestion": "Stale process will be automatically terminated on next launch. Run editor launch to proceed.",
             }
             if dialogs:
                 zombie["dialogs"] = [{"title": dialog["title"]} for dialog in dialogs]

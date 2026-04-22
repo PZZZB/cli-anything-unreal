@@ -10,7 +10,7 @@ These patterns were all observed in benchmark testing and caused catastrophic fa
 |-----------|-------------|-----|
 | `rm /path/to/DLL` or `del *.dll` | `build compile` or `editor close` | DLL files are locked by the running editor; deleting them corrupts the build |
 | `rm /path/to/Asset.uasset` | `asset delete --force` | Bypasses engine reference tracking; corrupts Content Browser cache |
-| `sleep 60 && editor status` | `editor launch --wait` | Blind polling wastes agent turns; `--wait` blocks until ready |
+| `sleep 60 && editor status` | `editor launch` | Blind polling wastes agent turns; `editor launch` blocks until the API is ready by default |
 | `os.remove()` for .uasset in Python | `EditorAssetLibrary.delete_asset()` | Direct file deletion corrupts the engine's in-memory asset registry |
 | `taskkill` / `kill` editor process | `editor close` | Unclean shutdown leaves lock files and corrupts saved state |
 | Editing `.ini` config files directly | `project config set` | Manual edits may not be picked up; CLI ensures proper formatting |
