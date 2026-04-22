@@ -24,18 +24,18 @@ native component, not on the actor** — always check the components tree first.
 
 ```bash
 # 1. Find actor
-cli-anything-unreal --json scene list --class DirectionalLight
+cli-anything-unreal scene list --class DirectionalLight
 
 # 2. api-discover <actor> — returns components tree (matches Details panel)
-cli-anything-unreal --json editor api-discover ".../DirectionalLight_0"
+cli-anything-unreal editor api-discover ".../DirectionalLight_0"
 # → components: [{ path: ".../DirectionalLight_0.LightComponent0",
 #                  class: "DirectionalLightComponent", is_root: true }]
 
 # 3. api-discover <component.path> — drill into it
-cli-anything-unreal --json editor api-discover ".../DirectionalLight_0.LightComponent0" -d Intensity
+cli-anything-unreal editor api-discover ".../DirectionalLight_0.LightComponent0" -d Intensity
 
 # 4. scene property — accepts actor OR component path
-cli-anything-unreal --json scene property ".../DirectionalLight_0.LightComponent0" Intensity=50.0
+cli-anything-unreal scene property ".../DirectionalLight_0.LightComponent0" Intensity=50.0
 ```
 
 Editor-only visualizers (arrow gizmos, billboard icons) are filtered from the
@@ -45,24 +45,26 @@ components tree by default to match the Details panel.
 
 ```bash
 # Discover asset class and properties (auto-detects class from asset path)
-cli-anything-unreal --json editor api-discover /Game/MyAsset
-cli-anything-unreal --json editor api-discover /Game/MyAsset -d BlendMode,ShadingModel
+cli-anything-unreal editor api-discover /Game/MyAsset
+cli-anything-unreal editor api-discover /Game/MyAsset -d BlendMode,ShadingModel
 
 # Or use class name directly if you already know it
-cli-anything-unreal --json editor api-discover Material -d BlendMode,ShadingModel
+cli-anything-unreal editor api-discover Material -d BlendMode,ShadingModel
 
 # Get/Set property values
-cli-anything-unreal --json asset property /Game/MyAsset BlendMode
-cli-anything-unreal --json asset property /Game/MyAsset BlendMode=Translucent
+cli-anything-unreal asset property /Game/MyAsset BlendMode
+cli-anything-unreal asset property /Game/MyAsset BlendMode=Translucent
 
 # Rename and duplicate
-cli-anything-unreal --json asset rename /Game/Old /Game/New
-cli-anything-unreal --json asset duplicate /Game/Old /Game/New --force
+cli-anything-unreal asset rename /Game/Old /Game/New
+cli-anything-unreal asset duplicate /Game/Old /Game/New --force
 
-# Check references before deleting (avoids breaking other assets)
-cli-anything-unreal --json asset refs /Game/MyAsset
-cli-anything-unreal --json asset delete /Game/MyAsset
+# Rename and duplicate
+cli-anything-unreal asset rename /Game/Old /Game/New
+cli-anything-unreal asset duplicate /Game/Old /Game/New --force
 ```
+
+See [Asset Deletion — Safe Workflow](#asset-deletion--safe-workflow) below for the full delete workflow with reference checks.
 
 ### Asset Deletion — Safe Workflow
 
@@ -70,15 +72,15 @@ cli-anything-unreal --json asset delete /Game/MyAsset
 
 ```bash
 # 1. Check what references the asset
-cli-anything-unreal --json asset refs /Game/M_Old
+cli-anything-unreal asset refs /Game/M_Old
 # → {"asset": "/Game/M_Old", "referencers": ["/Game/Maps/Level1"], "count": 1}
 
 # 2. Delete without --force — blocked because of references
-cli-anything-unreal --json asset delete /Game/M_Old
+cli-anything-unreal asset delete /Game/M_Old
 # → {"status": "has_references", "deleted": false, "hint": "Use --force to delete anyway"}
 
 # 3. Force delete (referencers will have broken references)
-cli-anything-unreal --json asset delete /Game/M_Old --force
+cli-anything-unreal asset delete /Game/M_Old --force
 # → {"status": "ok", "deleted": true, "had_references": true}
 ```
 
@@ -88,46 +90,46 @@ cli-anything-unreal --json asset delete /Game/M_Old --force
 
 ```bash
 # Discover actor class and properties (auto-detects class from actor path)
-cli-anything-unreal --json editor api-discover <actor_path>
-cli-anything-unreal --json editor api-discover <actor_path> -d Intensity,bVisible
+cli-anything-unreal editor api-discover <actor_path>
+cli-anything-unreal editor api-discover <actor_path> -d Intensity,bVisible
 
 # Search actors by name
-cli-anything-unreal --json scene list -q "DirectionalLight"
+cli-anything-unreal scene list -q "DirectionalLight"
 
 # Get/Set property
-cli-anything-unreal --json scene property <actor_path> Intensity
-cli-anything-unreal --json scene property <actor_path> Intensity=5.0
+cli-anything-unreal scene property <actor_path> Intensity
+cli-anything-unreal scene property <actor_path> Intensity=5.0
 
 # Check transform
-cli-anything-unreal --json scene get-transform <actor_path>
+cli-anything-unreal scene get-transform <actor_path>
 
 # List components
-cli-anything-unreal --json scene list-components <actor_path>
+cli-anything-unreal scene list-components <actor_path>
 
 # Find which material an actor uses
-cli-anything-unreal --json scene get-material <actor_path>
+cli-anything-unreal scene get-material <actor_path>
 ```
 
 ## Blueprint Editing
 
 ```bash
 # 1. Find the blueprint
-cli-anything-unreal --json blueprint list --path /Game/Blueprints/
+cli-anything-unreal blueprint list --path /Game/Blueprints/
 
 # 2. Inspect current state (graphs, nodes, variables)
-cli-anything-unreal --json blueprint info /Game/BP_Enemy
+cli-anything-unreal blueprint info /Game/BP_Enemy
 
 # 3. Add a variable
-cli-anything-unreal --json blueprint add-variable /Game/BP_Enemy --name Health --type Float
+cli-anything-unreal blueprint add-variable /Game/BP_Enemy --name Health --type float
 
 # 4. Add a function
-cli-anything-unreal --json blueprint add-function /Game/BP_Enemy --name TakeDamage
+cli-anything-unreal blueprint add-function /Game/BP_Enemy --name TakeDamage
 
 # 5. Clean up unused variables
-cli-anything-unreal --json blueprint delete-unused-variables /Game/BP_Enemy
+cli-anything-unreal blueprint delete-unused-variables /Game/BP_Enemy
 
 # 6. Compile and verify
-cli-anything-unreal --json blueprint compile /Game/BP_Enemy
+cli-anything-unreal blueprint compile /Game/BP_Enemy
 ```
 
 ## Operations Without Dedicated Subcommands
@@ -178,10 +180,10 @@ result = {"status": "ok", "actor": actor.get_path_name()}
 
 ```bash
 # Create and open a new level
-cli-anything-unreal --json editor new-level /Game/Maps/NewLevel
+cli-anything-unreal editor new-level /Game/Maps/NewLevel
 
 # Save the current level
-cli-anything-unreal --json editor save-level
+cli-anything-unreal editor save-level
 ```
 
 If the level path already exists, the command refuses to avoid modal dialogs — use `asset delete` first or pick a different path.

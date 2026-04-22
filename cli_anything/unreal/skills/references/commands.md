@@ -1,6 +1,6 @@
 # CLI Command Reference
 
-Complete command reference for `cli-anything-unreal`. All commands support `--json` for structured output.
+Complete command reference for `cli-anything-unreal`. Output defaults to JSON for non-TTY callers; use `--output json` explicitly to force it in a terminal.
 
 For workflows and examples, see the workflow files in this directory.
 
@@ -8,10 +8,10 @@ For workflows and examples, see the workflow files in this directory.
 
 | Command | Description | Requires Editor |
 |---------|-------------|:-:|
-| `editor status` | Check if editor is running and reachable | - |
+| `editor status [TASK_ID] [--port PORT]` | Check editor state or async task progress. Returns `online`/`starting`/`zombie`/`not_running` | - |
 | `editor list [--scan-range START-END]` | Discover all running editor instances | - |
 | `editor preflight` | Check engine/project build compatibility | No |
-| `editor launch [--map MAP] [--wait/--no-wait]` | Launch editor with preflight check | No |
+| `editor launch [--map MAP] [--no-wait]` | Launch editor with preflight check | No |
 | `editor close` | Gracefully close the editor | Yes |
 | `editor new-level PATH [--template PATH]` | Create and open a new level safely | Yes |
 | `editor save-level` | Save the current level safely | Yes |
@@ -19,8 +19,8 @@ For workflows and examples, see the workflow files in this directory.
 | `editor run-script PATH [--timeout N] [--no-save]` | Execute .py script with result capture | Yes |
 | `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable | Yes |
 | `editor enable-remote` | Enable Remote Control in project config | No |
-| `editor api-discover TARGET [-m FILTER] [-d NAMES]` | Discover API surface of a UE class. TARGET can be class name, asset path (/Game/...), or actor path (auto-detects class) | Yes |
-| `editor plugin-version` | Check bundled vs loaded plugin version | Yes (for loaded) |
+| `editor api-discover TARGET [-q QUERY] [-d NAMES]` | Discover API surface of a UE class. TARGET can be class name, asset path (/Game/...), or actor path (auto-detects class) | Yes |
+| `editor cancel TASK_ID` | Cancel an async editor launch task | - |
 | `editor plugin-upgrade` | Upgrade plugin: deploy → compile → restart | No |
 
 ### api-discover Usage
@@ -31,18 +31,18 @@ For workflows and examples, see the workflow files in this directory.
 
 ```bash
 # Class name — direct lookup:
-cli-anything-unreal --json editor api-discover DirectionalLight
-cli-anything-unreal --json editor api-discover unreal.MaterialEditingLibrary -m connect
+cli-anything-unreal editor api-discover DirectionalLight
+cli-anything-unreal editor api-discover unreal.MaterialEditingLibrary -q connect
 
 # Asset path (/Game/...) — auto-detects class from the live asset:
-cli-anything-unreal --json editor api-discover /Game/Materials/M_Water
+cli-anything-unreal editor api-discover /Game/Materials/M_Water
 
 # Actor path (contains PersistentLevel) — auto-detects class from scene actor:
-cli-anything-unreal --json editor api-discover /Game/Maps/L.L:PersistentLevel.Light_0
+cli-anything-unreal editor api-discover /Game/Maps/L.L:PersistentLevel.Light_0
 
 # Drill into details with -d:
-cli-anything-unreal --json editor api-discover DirectionalLight -d bHidden,Intensity
-cli-anything-unreal --json editor api-discover /Game/Materials/M_Water -d BlendMode,ShadingModel
+cli-anything-unreal editor api-discover DirectionalLight -d bHidden,Intensity
+cli-anything-unreal editor api-discover /Game/Materials/M_Water -d BlendMode,ShadingModel
 
 # WRONG — these will fail:
 cli-anything-unreal api-discover DirectionalLight   # not top-level, needs 'editor' prefix
@@ -103,12 +103,13 @@ None of the build commands require the editor.
 
 | Command | Description |
 |---------|-------------|
-| `build compile` | Compile C++ code |
-| `build cook [--platform P]` | Cook content assets |
-| `build package [--platform P] [--config C]` | Full package pipeline |
+| `build compile [--config C] [--platform P] [--no-wait] [--timeout N]` | Compile C++ code |
+| `build cook [--platform P] [--no-wait] [--timeout N]` | Cook content assets |
+| `build package [--platform P] [--config C] [--output-dir DIR] [--no-wait] [--timeout N]` | Full package pipeline |
 | `build stop` | Stop a running build (kills MSBuild/UBT process tree) |
 | `build is-building` | Check if the project is currently being compiled |
-| `build status` | Check build status (binaries, logs) |
+| `build status [TASK_ID]` | Check build status (binaries, logs) or async task progress |
+| `build cancel TASK_ID` | Cancel an async build task |
 
 ## scene — Scene/Level Queries
 
@@ -185,12 +186,27 @@ All screenshot commands require the editor.
 | `session redo` | Redo last undone change |
 | `session history` | Show undo history |
 
+## task — Background Task Management
+
+Generic commands for polling or canceling any async task (build, editor launch, etc.).
+
+| Command | Description |
+|---------|-------------|
+| `task status TASK_ID` | Check task progress and result |
+| `task cancel TASK_ID` | Cancel a running or pending task |
+
+## install-skills — IDE Skill Installation
+
+| Command | Description |
+|---------|-------------|
+| `install-skills [--target PATH]` | Install skill docs into IDE directories (Claude, CodeBuddy, Gemini) or a custom path |
+
 ## Multi-Instance Support
 
 Multiple editors can run simultaneously on different ports. Use `editor list` to discover instances, then `--port` to target one:
 
 ```bash
-cli-anything-unreal --json editor list
-cli-anything-unreal --json --port 30010 editor status
-cli-anything-unreal --json --port 30011 material list
+cli-anything-unreal editor list
+cli-anything-unreal --port 30010 editor status
+cli-anything-unreal --port 30011 material list
 ```

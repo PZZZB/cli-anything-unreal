@@ -1,4 +1,4 @@
-Always use `--output json` for AI callers. **Important: `--output json` is a top-level flag and must appear BEFORE the subcommand:**
+CLI output defaults to JSON for non-TTY callers (AI agents). If you ever need to force it explicitly, `--output json` is a top-level flag and must appear BEFORE the subcommand:
 - ✅ `cli-anything-unreal --output json editor launch`
 - ❌ `cli-anything-unreal editor launch --output json`
 

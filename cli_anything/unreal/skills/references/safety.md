@@ -13,7 +13,7 @@ These patterns were all observed in benchmark testing and caused catastrophic fa
 | `sleep 60 && editor status` | `editor launch --wait` | Blind polling wastes agent turns; `--wait` blocks until ready |
 | `os.remove()` for .uasset in Python | `EditorAssetLibrary.delete_asset()` | Direct file deletion corrupts the engine's in-memory asset registry |
 | `taskkill` / `kill` editor process | `editor close` | Unclean shutdown leaves lock files and corrupts saved state |
-| Editing `.ini` config files directly | `project config write` | Manual edits may not be picked up; CLI ensures proper formatting |
+| Editing `.ini` config files directly | `project config set` | Manual edits may not be picked up; CLI ensures proper formatting |
 | `LevelEditorSubsystem.new_level` or `save_current_level` in Python | `editor new-level` or `editor save-level` CLI | These UE5 APIs trigger engine teardown in the HTTP tick thread, causing a C++ Access Violation crash |
 
 **General rule:** All UE operations go through CLI commands. Direct file manipulation bypasses engine locks and reference tracking, causing corruption.
@@ -59,7 +59,7 @@ if can_create:
 Some UE operations fail at the C++ level without raising a Python exception. If a script completes "successfully" but the result is wrong, check recent engine errors:
 
 ```bash
-cli-anything-unreal --json editor exec "py import unreal; result = list(unreal.CliAnythingBridgeLibrary.get_recent_engine_errors(10))"
+cli-anything-unreal editor exec "py import unreal; result = list(unreal.CliAnythingBridgeLibrary.get_recent_engine_errors(10))"
 ```
 
 ## Test Agent — Asset Validation Requirements
