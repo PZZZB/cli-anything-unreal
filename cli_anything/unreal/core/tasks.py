@@ -1,4 +1,4 @@
-﻿"""Persistent background-task helpers for long-running CLI operations."""
+"""Persistent background-task helpers for long-running CLI operations."""
 
 from __future__ import annotations
 
@@ -329,7 +329,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     save_task(task)
 
     log_file = Path(state.session.project_dir) / "Saved" / "Logs" / f"{state.session.project_name}.log"
-    wait_result = _wait_for_api(proc, state.session.port, int(payload.get("timeout", 600)), log_file, state)
+    wait_result = _wait_for_api(proc, state.session.port, payload.get("timeout"), log_file, state)
 
     task = load_task(task["task_id"]) or task
     task["log_file"] = str(log_file)
@@ -352,5 +352,3 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "message": wait_result.get("error", "Editor startup failed"),
         }
     return save_task(task)
-
-

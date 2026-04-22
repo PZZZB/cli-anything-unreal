@@ -1,4 +1,4 @@
-﻿"""Build command definitions."""
+"""Build command definitions."""
 
 from __future__ import annotations
 
@@ -31,12 +31,16 @@ def _run_task(command: str, payload: dict, *, timeout: int | None, no_wait: bool
     final_task = wait_for_task(task["task_id"], timeout)
     if final_task is None:
         current = load_task(task["task_id"]) or task
+        if timeout is None:
+            message = "Task did not finish (no timeout was set)."
+        else:
+            message = f"Task did not finish within {timeout}s."
         return {
             "task_id": task["task_id"],
             "status": "timeout",
             "progress": task_progress(current).get("progress", 0),
             "suggested_poll_interval_seconds": 5,
-            "message": f"Task did not finish within {timeout}s.",
+            "message": message,
             "code": timeout_code,
         }
 
@@ -61,7 +65,7 @@ def build_group():
 @click.option("--config", "build_config", default="Development", type=click.Choice(["Development", "Shipping", "DebugGame", "Test"]))
 @click.option("--platform", default="Win64")
 @click.option("--no-wait", is_flag=True, default=False)
-@click.option("--timeout", type=int, default=1800)
+@click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
 def build_compile(state: AppState, build_config, platform, no_wait, timeout):
@@ -74,7 +78,7 @@ def build_compile(state: AppState, build_config, platform, no_wait, timeout):
 @build_group.command("cook")
 @click.option("--platform", default="Win64")
 @click.option("--no-wait", is_flag=True, default=False)
-@click.option("--timeout", type=int, default=1800)
+@click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
 def build_cook(state: AppState, platform, no_wait, timeout):
@@ -89,7 +93,7 @@ def build_cook(state: AppState, platform, no_wait, timeout):
 @click.option("--config", "build_config", default="Development", type=click.Choice(["Development", "Shipping", "DebugGame", "Test"]))
 @click.option("--output-dir", type=click.Path(), help="Archive output directory")
 @click.option("--no-wait", is_flag=True, default=False)
-@click.option("--timeout", type=int, default=3600)
+@click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
 def build_package(state: AppState, platform, build_config, output_dir, no_wait, timeout):

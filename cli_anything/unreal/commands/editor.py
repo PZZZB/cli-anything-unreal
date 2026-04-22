@@ -1,4 +1,4 @@
-﻿"""Editor control commands."""
+"""Editor control commands."""
 
 from __future__ import annotations
 
@@ -299,7 +299,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 @editor_group.command("launch")
 @click.option("--map", "map_path", default=None, help="Level/map to open (.umap path)")
 @click.option("--no-wait", is_flag=True, default=False)
-@click.option("--timeout", default=600, type=int, help="Max seconds to wait for editor startup")
+@click.option("--timeout", default=None, type=int, help="Max seconds to wait for editor startup")
 @handle_error
 @click.pass_obj
 def editor_launch(state: AppState, map_path, no_wait, timeout):
@@ -677,9 +677,3 @@ def editor_save_level(state: AppState):
     api = require_editor(state)
     result = save_level(api)
     output(result, state)
-
-
-
-
-
-
