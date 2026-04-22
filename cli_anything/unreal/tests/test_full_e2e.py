@@ -84,7 +84,7 @@ class TestEditorConnection:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "editor", "status",
         ])
         assert result.exit_code == 0
@@ -104,7 +104,7 @@ class TestProjectE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "project", "info",
+            "--output", "json", "project", "info",
             "--project", project_path,
         ])
         assert result.exit_code == 0
@@ -116,7 +116,7 @@ class TestProjectE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path,
+            "--output", "json", "--project", project_path,
             "project", "config", "list",
         ])
         assert result.exit_code == 0
@@ -127,7 +127,7 @@ class TestProjectE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "--project", project_path,
             "asset", "list",
         ])
@@ -172,7 +172,7 @@ class TestMaterialsE2E:
 
         # First list materials
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "list",
         ])
         if result.exit_code != 0:
@@ -186,7 +186,7 @@ class TestMaterialsE2E:
 
         # Analyze
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "analyze", mat_path,
         ])
         assert result.exit_code == 0
@@ -224,7 +224,7 @@ class TestScreenshotE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "screenshot", "capture", "--filename", "e2e_cli_test",
         ])
 
@@ -239,7 +239,7 @@ class TestScreenshotE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "screenshot", "capture-sequence", "-n", "2", "-i", "0.35",
         ])
         data = json.loads(result.output)
@@ -283,7 +283,7 @@ class TestScreenshotE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "screenshot", "capture-sequence", "-n", "2", "-i", "0.35", "--no-compress",
         ])
         data = json.loads(result.output)
@@ -347,7 +347,7 @@ class TestConsoleE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "editor", "exec", "stat fps",
         ])
         assert result.exit_code == 0
@@ -552,7 +552,7 @@ else:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "add-node", self.TEST_MATERIAL,
             "--type", "MaterialExpressionConstant",
         ])
@@ -565,7 +565,7 @@ else:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "recompile", self.TEST_MATERIAL,
         ])
         assert result.exit_code == 0
@@ -669,7 +669,7 @@ result = {"cleaned": True}
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "get-errors", "/Game/E2E_TestMaterial",
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
@@ -795,7 +795,7 @@ class TestMaterialHlslShaderSourceE2E:
 
         # First get a material path
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "list",
         ])
         if result.exit_code != 0:
@@ -808,7 +808,7 @@ class TestMaterialHlslShaderSourceE2E:
         mat_path = data["materials"][0]["path"]
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "hlsl-code", mat_path,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
@@ -825,7 +825,7 @@ class TestMaterialHlslShaderSourceE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "list",
         ])
         if result.exit_code != 0:
@@ -838,7 +838,7 @@ class TestMaterialHlslShaderSourceE2E:
         mat_path = data["materials"][0]["path"]
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "shader-source", mat_path,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
@@ -873,6 +873,9 @@ class TestBlueprintEditingE2E:
             create_script = '''
 import unreal
 import json
+
+
+
 
 bp_path = "/Game/E2E_TestBlueprint"
 
@@ -991,7 +994,7 @@ else:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "blueprint", "list",
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
@@ -1003,7 +1006,7 @@ else:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "blueprint", "info", self.TEST_BLUEPRINT,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
@@ -1015,7 +1018,7 @@ else:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--project", project_path, "--port", str(api_port),
+            "--output", "json", "--project", project_path, "--port", str(api_port),
             "blueprint", "compile", self.TEST_BLUEPRINT,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
@@ -1043,7 +1046,7 @@ class TestSceneE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "scene", "list",
         ])
         assert result.exit_code == 0
@@ -1066,7 +1069,7 @@ class TestSceneE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "scene", "list", "-q", "Light",
         ])
         assert result.exit_code == 0
@@ -1097,7 +1100,7 @@ class TestSceneE2E:
 
         actor_path = all_actors["actors"][0]["path"]
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "scene", "get-transform", actor_path,
         ])
         assert result.exit_code == 0
@@ -1128,7 +1131,7 @@ class TestSceneE2E:
             pytest.skip("No light actor in level to test components tree")
 
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "editor", "api-discover", actor_path,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
@@ -1154,7 +1157,7 @@ class TestSceneE2E:
 
         # Step 1: discover the light component path
         r1 = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "editor", "api-discover", actor_path,
         ])
         assert r1.exit_code == 0
@@ -1168,7 +1171,7 @@ class TestSceneE2E:
 
         # Step 2: api-discover that component
         r2 = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "editor", "api-discover", light_comp["path"], "-q", "intensity",
         ])
         assert r2.exit_code == 0, f"CLI failed: {r2.output}"
@@ -1188,7 +1191,7 @@ class TestSceneE2E:
             pytest.skip("No light actor in level")
 
         r1 = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "editor", "api-discover", actor_path,
         ])
         d1 = json.loads(r1.output)
@@ -1203,7 +1206,7 @@ class TestSceneE2E:
 
         # Read current intensity
         rg = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port),
+            "--output", "json", "--port", str(api_port),
             "scene", "property", comp_path, "Intensity",
         ])
         assert rg.exit_code == 0, f"Read failed: {rg.output}"
@@ -1214,13 +1217,13 @@ class TestSceneE2E:
         probe_value = float(original) + 1.0
         try:
             rs = cli_runner.invoke(cli, [
-                "--json", "--port", str(api_port),
+                "--output", "json", "--port", str(api_port),
                 "scene", "property", comp_path, f"Intensity={probe_value}",
             ])
             assert rs.exit_code == 0, f"Write failed: {rs.output}"
 
             rv = cli_runner.invoke(cli, [
-                "--json", "--port", str(api_port),
+                "--output", "json", "--port", str(api_port),
                 "scene", "property", comp_path, "Intensity",
             ])
             assert rv.exit_code == 0
@@ -1228,7 +1231,7 @@ class TestSceneE2E:
         finally:
             # Always restore the pre-test value
             cli_runner.invoke(cli, [
-                "--json", "--port", str(api_port),
+                "--output", "json", "--port", str(api_port),
                 "scene", "property", comp_path, f"Intensity={original}",
             ])
 
@@ -1368,7 +1371,7 @@ class TestAssetsE2E:
         from cli_anything.unreal.unreal_cli import cli
 
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port), "--project", project_path,
+            "--output", "json", "--port", str(api_port), "--project", project_path,
             "asset", "exists", "/Game/E2E_NonExistent",
         ])
         assert result.exit_code == 0
@@ -1402,7 +1405,7 @@ class TestAssetsE2E:
         run_python_code(api, cleanup_code, project_dir=project_dir, timeout=15, save=False)
 
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port), "--project", project_path,
+            "--output", "json", "--port", str(api_port), "--project", project_path,
             "asset", "refs", self.TEST_ASSET,
         ])
         assert result.exit_code == 0
@@ -1437,7 +1440,7 @@ class TestAssetsE2E:
 
         # 1. List with filter to find the asset
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port), "--project", project_path,
+            "--output", "json", "--port", str(api_port), "--project", project_path,
             "asset", "list", "-q", "E2E_AssetPropTest",
         ])
         assert result.exit_code == 0
@@ -1447,7 +1450,7 @@ class TestAssetsE2E:
 
         # 2. Get Property via asset property
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port), "--project", project_path,
+            "--output", "json", "--port", str(api_port), "--project", project_path,
             "asset", "property", "/Game/E2E_AssetPropTest", "BlendMode",
         ])
         assert result.exit_code == 0
@@ -1457,7 +1460,7 @@ class TestAssetsE2E:
 
         # 3. Set Property
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port), "--project", project_path,
+            "--output", "json", "--port", str(api_port), "--project", project_path,
             "asset", "property", "/Game/E2E_AssetPropTest", "BlendMode=BLEND_Masked",
         ])
         assert result.exit_code == 0
@@ -1466,7 +1469,7 @@ class TestAssetsE2E:
 
         # 4. Get Property again to verify
         result = cli_runner.invoke(cli, [
-            "--json", "--port", str(api_port), "--project", project_path,
+            "--output", "json", "--port", str(api_port), "--project", project_path,
             "asset", "property", "/Game/E2E_AssetPropTest", "BlendMode",
         ])
         assert result.exit_code == 0

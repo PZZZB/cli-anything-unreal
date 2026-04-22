@@ -1,16 +1,11 @@
-"""commands/ — Domain-separated Click command definitions for cli-anything-unreal.
+﻿"""Shared CLI protocol helpers and command registration."""
 
-This package provides:
-  - AppState: shared state object stored on Click's ctx.obj
-  - output(): unified output (JSON or pretty-printed)
-  - handle_error: decorator for consistent error handling
-  - require_project() / require_editor(): precondition helpers
-  - register_commands(): wire all groups into the root CLI
-"""
+from __future__ import annotations
 
 import functools
 import json
 import sys
+from dataclasses import dataclass
 
 import click
 
@@ -18,116 +13,180 @@ from cli_anything.unreal.core.session import Session
 from cli_anything.unreal.utils.repl_skin import ReplSkin
 
 
-# ── State ──────────────────────────────────────────────────────────────
+@dataclass
+class AppError(Exception):
+    code: str
+    message: str
+    exit_code: int = 1
+    suggestion: str | None = None
+    details: dict | list | None = None
+
 
 class AppState:
-    """Holds all mutable session state, stored on Click's ctx.obj."""
+    """Holds mutable session state shared across Click commands."""
 
     def __init__(self):
-        self.json_output: bool = False
+        self.json_output: bool = True
         self.session: Session = Session()
-        self.skin: ReplSkin = ReplSkin("unreal", version="0.1.1")
+        self.skin: ReplSkin = ReplSkin("unreal", version="0.2.0")
         self.in_repl: bool = False
+        self.output_mode: str = "json"
 
 
-# ── Output ─────────────────────────────────────────────────────────────
+def emit_json(payload: dict | list) -> None:
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
+def success_payload(result) -> dict:
+    return {"status": "success", "result": result}
+
+
+def error_payload(
+    code: str,
+    message: str,
+    *,
+    suggestion: str | None = None,
+    details=None,
+) -> dict:
+    payload = {
+        "status": "error",
+        "code": code,
+        "message": message,
+    }
+    if suggestion:
+        payload["suggestion"] = suggestion
+    if details is not None:
+        payload["details"] = details
+    return payload
+
 
 def output(data, state: AppState):
-    """Output data as JSON or pretty-printed."""
+    """Emit either structured JSON or a compact text rendering."""
     if state.json_output:
-        click.echo(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-    elif isinstance(data, dict):
+        emit_json(success_payload(data))
+        return
+
+    if isinstance(data, dict):
         for k, v in data.items():
             if isinstance(v, (dict, list)):
-                click.echo(f"  {k}: {json.dumps(v, indent=2, ensure_ascii=False, default=str)}")
+                click.echo(f"{k}: {json.dumps(v, indent=2, ensure_ascii=False, default=str)}")
             else:
-                click.echo(f"  {k}: {v}")
-    elif isinstance(data, list):
+                click.echo(f"{k}: {v}")
+        return
+
+    if isinstance(data, list):
         for item in data:
-            if isinstance(item, dict):
-                click.echo(f"  {json.dumps(item, ensure_ascii=False, default=str)}")
-            else:
-                click.echo(f"  {item}")
+            click.echo(json.dumps(item, ensure_ascii=False, default=str) if isinstance(item, dict) else str(item))
+        return
+
+    click.echo(str(data))
+
+
+def fail(
+    state: AppState,
+    code: str,
+    message: str,
+    *,
+    exit_code: int = 1,
+    suggestion: str | None = None,
+    details=None,
+):
+    if state.json_output:
+        emit_json(error_payload(code, message, suggestion=suggestion, details=details))
     else:
-        click.echo(str(data))
+        state.skin.error(message)
+        if suggestion:
+            state.skin.hint(suggestion)
+    if not state.in_repl:
+        raise SystemExit(exit_code)
 
-
-# ── Error handling ─────────────────────────────────────────────────────
 
 def handle_error(f):
-    """Decorator for consistent error handling across commands."""
+    """Decorator for consistent protocol-level error handling."""
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
+        state = _get_state()
         try:
             return f(*args, **kwargs)
+        except SystemExit:
+            raise
+        except AppError as e:
+            fail(
+                state,
+                e.code,
+                e.message,
+                exit_code=e.exit_code,
+                suggestion=e.suggestion,
+                details=e.details,
+            )
+        except click.UsageError as e:
+            fail(
+                state,
+                "INVALID_ARGUMENT",
+                str(e),
+                exit_code=2,
+                suggestion="Check --help for the expected arguments.",
+            )
         except FileNotFoundError as e:
-            state = _get_state()
-            if state.json_output:
-                click.echo(json.dumps({"error": str(e)}))
-            else:
-                state.skin.error(str(e))
-            if not state.in_repl:
-                sys.exit(1)
+            fail(
+                state,
+                "FILE_NOT_FOUND",
+                str(e),
+                exit_code=3,
+            )
         except ConnectionError as e:
-            state = _get_state()
-            msg = f"Editor not reachable (port {state.session.port}): {e}"
-            if state.json_output:
-                click.echo(json.dumps({"error": msg}))
-            else:
-                state.skin.error(msg)
-                state.skin.hint("Is the UE editor running with Remote Control plugin enabled?")
-                state.skin.hint(f"Try: cli-anything-unreal editor status --port {state.session.port}")
-            if not state.in_repl:
-                sys.exit(1)
+            fail(
+                state,
+                "EDITOR_UNREACHABLE",
+                str(e),
+                exit_code=4,
+                suggestion=f"Run 'editor status --port {state.session.port}' to verify editor connectivity.",
+            )
         except Exception as e:
-            state = _get_state()
-            if state.json_output:
-                click.echo(json.dumps({"error": str(e), "type": type(e).__name__}))
-            else:
-                state.skin.error(f"{type(e).__name__}: {e}")
-            if not state.in_repl:
-                sys.exit(1)
+            fail(
+                state,
+                "INTERNAL_ERROR",
+                f"{type(e).__name__}: {e}",
+                exit_code=1,
+            )
 
     return wrapper
 
 
 def _get_state() -> AppState:
-    """Retrieve AppState from the current Click context."""
     try:
         ctx = click.get_current_context()
         return ctx.obj
     except RuntimeError:
-        # Fallback for edge cases (e.g. tests without a Click context)
         return AppState()
 
 
-# ── Precondition helpers ───────────────────────────────────────────────
-
 def require_project(state: AppState):
-    """Ensure a project is loaded. Raises click.UsageError if not."""
     if not state.session.is_loaded:
-        raise click.UsageError(
-            "No project loaded. Use --project or run: project info --project <path>"
+        raise AppError(
+            "PROJECT_REQUIRED",
+            "No project loaded.",
+            exit_code=2,
+            suggestion="Pass --project <path-to.uproject>.",
         )
 
 
 def require_editor(state: AppState):
-    """Ensure editor is reachable. Returns UEEditorAPI."""
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     api = UEEditorAPI(port=state.session.port)
     if not api.is_alive():
-        raise ConnectionError(
-            f"Editor HTTP API not responding on port {state.session.port}"
+        raise AppError(
+            "EDITOR_UNREACHABLE",
+            f"Editor HTTP API not responding on port {state.session.port}.",
+            exit_code=4,
+            suggestion="Start the editor first or confirm the Remote Control port.",
         )
     return api
 
 
-# ── Command registration ──────────────────────────────────────────────
-
 def register_commands(cli_group: click.Group):
-    """Import and register all command sub-groups onto the root CLI."""
     from cli_anything.unreal.commands.project import project_group
     from cli_anything.unreal.commands.asset import asset_group
     from cli_anything.unreal.commands.build import build_group

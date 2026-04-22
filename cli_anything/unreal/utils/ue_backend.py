@@ -290,6 +290,7 @@ def run_uat(
     log_label: str = "uat",
     project_dir: str | None = None,
     heartbeat_seconds: float = 60.0,
+    on_start=None,
 ) -> dict:
     """Execute a UAT command synchronously.
 
@@ -344,6 +345,7 @@ def run_uat(
         log_file=log_file,
         heartbeat_seconds=heartbeat_seconds,
         heartbeat_label=log_label,
+        on_start=on_start,
     )
 
 
@@ -357,6 +359,7 @@ def run_build(
     log_label: str = "build",
     project_dir: str | None = None,
     heartbeat_seconds: float = 60.0,
+    on_start=None,
 ) -> dict:
     """Execute Build.bat.
 
@@ -397,6 +400,7 @@ def run_build(
         log_file=log_file,
         heartbeat_seconds=heartbeat_seconds,
         heartbeat_label=log_label,
+        on_start=on_start,
     )
 
 
@@ -458,6 +462,7 @@ def _run_subprocess(
     cwd: str | None = None,
     heartbeat_seconds: float = 60.0,
     heartbeat_label: str = "build",
+    on_start=None,
 ) -> dict:
     """Run a subprocess with stdout+stderr redirected to ``log_file``.
 
@@ -524,6 +529,8 @@ def _run_subprocess(
                 shell=use_shell,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if use_shell else 0,
             )
+            if on_start is not None:
+                on_start(proc)
         except FileNotFoundError as e:
             return {
                 "returncode": -1,

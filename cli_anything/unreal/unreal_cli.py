@@ -1,13 +1,10 @@
-"""unreal_cli.py — Click CLI main entry point for cli-anything-unreal.
+﻿"""Click CLI main entry point for cli-anything-unreal."""
 
-Thin entry point that wires up the root Click group and delegates
-all command definitions to the ``commands/`` package.
-"""
+from __future__ import annotations
 
 import json
 import sys
 
-# ── Fix Windows GBK terminal encoding for Unicode output (✓✗⚠●◆) ────
 if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -17,24 +14,69 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 
 import click
 
-from cli_anything.unreal.commands import AppState, register_commands
+from cli_anything.unreal.commands import AppError, AppState, emit_json, error_payload, register_commands
+from cli_anything.unreal.core.tasks import cancel_task, load_task, run_task_worker, submit_task, task_progress, wait_for_task
+
+
+COMMAND_SPECS = [
+    {
+        "name": "build compile",
+        "description": "Compile the project's C++ code.",
+        "async_supported": True,
+        "estimated_duration": "300-900s",
+        "parameters": [
+            {"name": "--project", "required": True},
+            {"name": "--config", "required": False},
+            {"name": "--platform", "required": False},
+            {"name": "--no-wait", "required": False},
+            {"name": "--timeout", "required": False},
+        ],
+    },
+    {
+        "name": "build cook",
+        "description": "Cook content assets for the target platform.",
+        "async_supported": True,
+        "estimated_duration": "120-600s",
+        "parameters": [
+            {"name": "--project", "required": True},
+            {"name": "--platform", "required": False},
+            {"name": "--no-wait", "required": False},
+            {"name": "--timeout", "required": False},
+        ],
+    },
+    {
+        "name": "build package",
+        "description": "Run build, cook, stage and package.",
+        "async_supported": True,
+        "estimated_duration": "600-1800s",
+        "parameters": [
+            {"name": "--project", "required": True},
+            {"name": "--platform", "required": False},
+            {"name": "--config", "required": False},
+            {"name": "--output-dir", "required": False},
+            {"name": "--no-wait", "required": False},
+            {"name": "--timeout", "required": False},
+        ],
+    },
+    {
+        "name": "editor launch",
+        "description": "Launch the Unreal Editor and wait for Remote Control API readiness.",
+        "async_supported": True,
+        "estimated_duration": "30-180s",
+        "parameters": [
+            {"name": "--project", "required": True},
+            {"name": "--map", "required": False},
+            {"name": "--no-wait", "required": False},
+            {"name": "--timeout", "required": False},
+            {"name": "--port", "required": False},
+        ],
+    },
+]
 
 
 def _fix_argv_msys2():
-    """Fix MSYS2 (Git Bash) path mangling in sys.argv BEFORE Click parses.
-
-    MSYS2 auto-converts any argument starting with / to a Windows path
-    when calling non-MSYS .exe programs:
-        /Game/M_Test  ->  D:/Git/Game/M_Test
-        /Engine/...   ->  D:/Git/Engine/...
-
-    Detection: if an argv looks like a Windows absolute path (X:/...)
-    but that path does NOT exist on disk, it was almost certainly mangled.
-    Restore it to /remainder (strip the drive + MSYS prefix).
-
-    This runs once at startup and is invisible to the user.
-    """
     import os
+
     fixed = []
     for arg in sys.argv:
         if (
@@ -42,55 +84,38 @@ def _fix_argv_msys2():
             and arg[0].isalpha()
             and arg[1] == ":"
             and arg[2] in ("/", "\\")
-            and not os.path.exists(arg)          # real disk path? leave it alone
-            and not os.path.exists(arg.split("*")[0])  # glob pattern guard
+            and not os.path.exists(arg)
+            and not os.path.exists(arg.split("*")[0])
         ):
-            # Strip drive + leading prefix, restore as /...
-            rest = arg[2:].replace("\\", "/")    # ":/Git/Game/M_Test" -> "/Git/Game/M_Test"
-            # MSYS2 prepends its install dir, e.g. D:/Git -> /Git is the root
-            # The original arg was just /Game/M_Test, which became D:/Git/Game/M_Test
-            # We need to strip everything up to (but not including) the first path
-            # component that the user actually typed.
-            # Heuristic: the MSYS root is the part that exists on disk.
-            # Walk from the left, find the longest prefix that is a real directory.
+            rest = arg[2:].replace("\\", "/")
             parts = rest.strip("/").split("/")
             msys_prefix_len = 0
             for i in range(len(parts)):
-                candidate = arg[0:3] + "/".join(parts[:i + 1])
+                candidate = arg[0:3] + "/".join(parts[: i + 1])
                 if os.path.isdir(candidate):
                     msys_prefix_len = i + 1
                 else:
                     break
-            # Restore: skip the MSYS prefix directories
-            restored = "/" + "/".join(parts[msys_prefix_len:])
-            fixed.append(restored)
+            fixed.append("/" + "/".join(parts[msys_prefix_len:]))
         else:
             fixed.append(arg)
     sys.argv = fixed
 
 
-# ── Root CLI group ──────────────────────────────────────────────────────
+def _default_output_mode() -> str:
+    return "text" if sys.stdout.isatty() else "json"
+
 
 @click.group(invoke_without_command=True)
-@click.option("--json", "use_json", is_flag=True, help="Output in JSON format")
-@click.option(
-    "--project", "project_path", type=click.Path(),
-    help="Path to .uproject file",
-)
-@click.option(
-    "--port", type=int, default=30010,
-    help="Editor Remote Control API port (default: 30010, for multi-instance support)",
-)
+@click.option("--output", "output_mode", type=click.Choice(["json", "text"]), default=None)
+@click.option("--project", "project_path", type=click.Path(), help="Path to .uproject file")
+@click.option("--port", type=int, default=30010, help="Editor Remote Control API port")
+@click.option("--list-commands", is_flag=True, help="List CLI commands in a machine-readable format")
 @click.pass_context
-def cli(ctx, use_json, project_path, port):
-    """cli-anything-unreal — AI Agent CLI for Unreal Engine.
-
-    Control UE editor via command-line: materials, screenshots, builds.
-
-    Multi-instance: use --port to target a specific editor instance.
-    """
+def cli(ctx, output_mode, project_path, port, list_commands):
     state = AppState()
-    state.json_output = use_json
+    state.output_mode = output_mode or _default_output_mode()
+    state.json_output = state.output_mode == "json"
     state.session.port = port
     ctx.obj = state
 
@@ -98,25 +123,84 @@ def cli(ctx, use_json, project_path, port):
         try:
             state.session.load_project(project_path)
         except FileNotFoundError:
-            if use_json:
-                click.echo(json.dumps({"error": f"Project not found: {project_path}"}))
-            else:
-                state.skin.error(f"Project not found: {project_path}")
+            emit_json(error_payload("PROJECT_NOT_FOUND", f"Project not found: {project_path}"))
+            raise SystemExit(3)
+
+    if list_commands:
+        emit_json(COMMAND_SPECS)
+        return
 
     if ctx.invoked_subcommand is None:
-        from cli_anything.unreal.commands.repl import repl_cmd
-        ctx.invoke(repl_cmd)
+        if state.json_output:
+            emit_json({"name": "cli-anything-unreal", "commands": COMMAND_SPECS})
+        else:
+            from cli_anything.unreal.commands.repl import repl_cmd
+
+            ctx.invoke(repl_cmd)
 
 
-# ── Register all command groups ─────────────────────────────────────────
+@cli.group("_task-worker", hidden=True)
+def task_worker_group():
+    pass
+
+
+@task_worker_group.command("run")
+@click.argument("task_id")
+def task_worker_run(task_id):
+    try:
+        run_task_worker(task_id)
+        emit_json({"task_id": task_id, "status": "accepted"})
+    except FileNotFoundError:
+        emit_json(error_payload("TASK_NOT_FOUND", f"Task not found: {task_id}"))
+        raise SystemExit(3)
+    except Exception as e:
+        task = load_task(task_id)
+        if task:
+            task["status"] = "failed"
+            task["error"] = {"code": "TASK_EXECUTION_FAILED", "message": str(e)}
+            task["result"] = {"exception_type": type(e).__name__}
+            from cli_anything.unreal.core.tasks import save_task
+
+            save_task(task)
+        emit_json(error_payload("TASK_EXECUTION_FAILED", str(e)))
+        raise SystemExit(1)
+
+
+@cli.group("task")
+def task_group():
+    """Background task management."""
+
+
+@task_group.command("status")
+@click.argument("task_id")
+def task_status_cmd(task_id):
+    task = load_task(task_id)
+    if task is None:
+        emit_json(error_payload("TASK_NOT_FOUND", f"Task not found: {task_id}"))
+        raise SystemExit(3)
+    emit_json(task_progress(task))
+
+
+@task_group.command("cancel")
+@click.argument("task_id")
+def task_cancel_cmd(task_id):
+    task = cancel_task(task_id)
+    if task is None:
+        emit_json(error_payload("TASK_NOT_FOUND", f"Task not found: {task_id}"))
+        raise SystemExit(3)
+    emit_json(task_progress(task))
+
+
 register_commands(cli)
 
 
-# ── Entry point ─────────────────────────────────────────────────────────
-
 def main():
     _fix_argv_msys2()
-    cli()
+    try:
+        cli()
+    except AppError as e:
+        emit_json(error_payload(e.code, e.message, suggestion=e.suggestion, details=e.details))
+        raise SystemExit(e.exit_code)
 
 
 if __name__ == "__main__":

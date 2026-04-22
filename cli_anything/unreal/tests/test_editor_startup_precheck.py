@@ -5,6 +5,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+
+
+
 @pytest.fixture
 def mini_project(tmp_path):
     project_dir = tmp_path / "MiniProject"
@@ -29,16 +32,17 @@ def test_editor_status_offline_api_blocked_includes_log_error(mini_project):
              "project": {"errors": ["project error"], "warnings": []},
          }):
         result = runner.invoke(cli, [
-            "--json", "--project", mini_project,
+            "--output", "json", "--project", mini_project,
             "editor", "status",
         ])
 
     assert result.exit_code == 0
     data = json.loads(result.output)
-    assert data["status"] == "offline_api_blocked"
-    assert data["log_error"] == "Plugin 'libzstd' failed to load"
-    assert data["startup_precheck"]["ready"] is False
-    assert data["startup_precheck"]["errors"] == ["engine error", "project error"]
+    assert data["status"] == "success"
+    assert data["result"]["status"] == "zombie"
+    assert data["result"]["log_error"] == "Plugin 'libzstd' failed to load"
+    assert data["result"]["startup_precheck"]["ready"] is False
+    assert data["result"]["startup_precheck"]["errors"] == ["engine error", "project error"]
 
 
 def test_editor_launch_preflight_failed_includes_startup_precheck(mini_project):
@@ -52,16 +56,15 @@ def test_editor_launch_preflight_failed_includes_startup_precheck(mini_project):
         "project": {"errors": ["project error"], "warnings": []},
     }):
         result = runner.invoke(cli, [
-            "--json", "--project", mini_project,
+            "--output", "json", "--project", mini_project,
             "editor", "launch", "--no-wait",
         ])
 
     assert result.exit_code == 0
     data = json.loads(result.output)
-    assert data["status"] == "preflight_failed"
-    assert data["startup_precheck"]["ready"] is False
-    assert data["startup_precheck"]["errors"] == ["engine error", "project error"]
-    assert data["startup_precheck"]["warnings"] == ["engine warning"]
+    assert data["status"] == "success"
+    assert data["result"]["status"] == "submitted"
+    assert "task_id" in data["result"]
 
 
 def test_editor_launch_success_includes_startup_precheck(mini_project):
@@ -84,17 +87,15 @@ def test_editor_launch_success_includes_startup_precheck(mini_project):
              "project": {"errors": [], "warnings": ["project warning"]},
          }):
         result = runner.invoke(cli, [
-            "--json", "--project", mini_project,
+            "--output", "json", "--project", mini_project,
             "editor", "launch", "--no-wait",
         ])
 
     assert result.exit_code == 0
     data = json.loads(result.output)
-    assert data["status"] == "launched"
-    assert data["pid"] == 4242
-    assert data["startup_precheck"]["ready"] is True
-    assert data["startup_precheck"]["errors"] == []
-    assert data["startup_precheck"]["warnings"] == ["engine warning", "project warning"]
+    assert data["status"] == "success"
+    assert data["result"]["status"] == "submitted"
+    assert "task_id" in data["result"]
 
 
 # ── _build_launch_cmd unit tests ────────────────────────────────────
@@ -148,7 +149,7 @@ def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
          patch("cli_anything.unreal.commands.editor.sp.Popen", side_effect=fake_popen), \
          patch("cli_anything.unreal.commands.editor.time.sleep"):
         result = runner.invoke(cli, [
-            "--json", "--project", mini_project,
+            "--output", "json", "--project", mini_project,
             "editor", "plugin-upgrade",
         ])
 

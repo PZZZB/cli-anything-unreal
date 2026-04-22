@@ -33,16 +33,7 @@ def scene_list_actors(state: AppState, actor_class, query):
 
     api = require_editor(state)
     result = list_actors(api, actor_class=actor_class, name_filter=query)
-
-    if not state.json_output:
-        actors = result.get("actors", [])
-        state.skin.info(f"Found {len(actors)} actors")
-        if actors:
-            headers = ["Name", "Class", "Path"]
-            rows = [[a["name"], a["class"], a.get("path", "")[:60]] for a in actors]
-            state.skin.table(headers, rows)
-    else:
-        output(result, state)
+    output(result, state)
 
 
 @scene_group.command("property")

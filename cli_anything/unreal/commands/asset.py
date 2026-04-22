@@ -37,16 +37,7 @@ def asset_list(state: AppState, query, class_name, package_path, limit):
     api = require_editor(state)
     result = search_assets(api, query=query, class_name=class_name,
                            package_path=package_path, limit=limit)
-
-    if not state.json_output:
-        assets = result.get("assets", [])
-        state.skin.info(f"Found {len(assets)} assets")
-        if assets:
-            headers = ["Name", "Class", "Path"]
-            rows = [[a["name"], a["class"], a["path"]] for a in assets]
-            state.skin.table(headers, rows)
-    else:
-        output(result, state)
+    output(result, state)
 
 
 @asset_group.command("exists")

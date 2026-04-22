@@ -1,49 +1,32 @@
-# Test Guide
+﻿# Test Guide
 
-## Unit Tests (test_core.py)
-
-Run without any external dependencies:
+## Unit Tests
 
 ```bash
 cd F:\workspace\CLI-Anything\unreal\agent-harness
 pip install -e ".[dev]"
-pytest cli_anything/unreal/tests/test_core.py -v
+python -m pytest cli_anything/unreal/tests/test_core.py cli_anything/unreal/tests/test_editor_startup_precheck.py -q
 ```
 
-Tests cover:
-- Project parsing (.uproject, .ini configs, content listing)
-- Engine discovery (engine root, editor exe, UAT/Build.bat)
-- Session management (undo/redo, save/load, history)
-- Build status checking
-- HTTP API (mocked)
-- Material analysis (mocked)
-- CLI interface (Click test runner)
+## Bounded E2E Smoke
 
-## E2E Tests (test_full_e2e.py)
-
-Require a running UE editor with AutomationTestAPI plugin:
+Use the F:\Test574 project by default, require JSON protocol, and either verify an already-running editor or auto-launch it with a hard timeout.
 
 ```bash
-# Set environment
-set UE_TEST_PROJECT=F:\Test_RXEngine_5_7\Test_RXEngine_5_7.uproject
-set UE_TEST_PORT=30020
-
-# Run E2E tests
-pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e
+set UE_TEST_PROJECT=F:\Test574\Test574.uproject
+python -m pytest cli_anything/unreal/tests/test_full_e2e.py -q --e2e --e2e-smoke --e2e-auto-launch --e2e-launch-timeout 180
 ```
 
-E2E tests cover:
-- Editor connection
-- Project info queries
-- Material listing and analysis
-- Screenshot (user-facing: `screenshot static`, `screenshot dynamic`; E2E also hits Python APIs / flags)
-- Console command execution
+Behavior:
+- If the editor is already reachable, tests proceed immediately.
+- If it is not reachable and `--e2e-auto-launch` is absent, tests fail fast instead of hanging.
+- If `--e2e-auto-launch` is present, the suite runs `editor launch --timeout <N>` and fails clearly on launch error or timeout.
 
-## Multi-Instance Testing
+## Full E2E
 
-To test with multiple editors, start editors on different ports and run:
+The current suite is intentionally reduced to a bounded smoke subset until the rest of the legacy E2E cases are migrated to the new `--output json` protocol and explicit launch gating.
 
-```bash
-set UE_TEST_PORT=30021
-pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e
-```
+
+Current environment note:
+- F:\Test574\Test574.uproject preflight passes, but auto-launch currently times out because the editor process starts without exposing the Remote Control API on port 30010. Smoke E2E therefore cannot be marked passing on this machine until that project-side startup issue is fixed.
+

@@ -136,35 +136,6 @@ def material_graph(state: AppState, material_path):
 
     api = require_editor(state)
     result = get_material_connections(api, material_path, state.session.project_dir)
-
-    if not state.json_output and "error" not in result:
-        state.skin.section(f"Connections Graph: {material_path}")
-        
-        # Add the graph to the skin output
-        graph_text = format_material_connections_mermaid(result)
-        click.echo(graph_text)
-
-        orphans = result.get("orphan_nodes", [])
-        if orphans:
-            state.skin.warning(f"{len(orphans)} orphan node(s) (not connected to output):")
-            for name in orphans[:10]:
-                state.skin.hint(f"  {name}")
-            if len(orphans) > 10:
-                state.skin.hint(f"  ... and {len(orphans) - 10} more")
-
-        # Show Custom nodes with code
-        nodes = result.get("nodes", [])
-        customs = [n for n in nodes if n.get("type") == "MaterialExpressionCustom"]
-        if customs:
-            state.skin.info(f"\nCustom HLSL Nodes ({len(customs)}):")
-            for c in customs:
-                preview = c.get("code_preview", "(no code)")
-                lines = c.get("code_lines", "?")
-                state.skin.status(f"  {c['name']}", f"{lines} lines")
-                if preview:
-                    for line in preview.split("\n")[:3]:
-                        click.echo(f"    {line}")
-
     output(result, state)
 
 
@@ -178,31 +149,7 @@ def material_analyze(state: AppState, material_path):
 
     api = require_editor(state)
     result = analyze_material(api, material_path, state.session.project_dir)
-
-    if not state.json_output:
-        state.skin.section(f"Analysis: {material_path}")
-
-        issues = result.get("issues", [])
-        warnings = result.get("warnings", [])
-        stats = result.get("stats", {})
-
-        if issues:
-            for issue in issues:
-                state.skin.error(f"ISSUE: {issue}")
-        if warnings:
-            for warning in warnings:
-                state.skin.warning(f"WARNING: {warning}")
-        if not issues and not warnings:
-            state.skin.success("No issues found")
-
-        if stats:
-            state.skin.status_block({
-                "Texture Samples": str(stats.get("texture_sample_count", "?")),
-                "Node Count": str(stats.get("node_count", "?")),
-                "Textures": str(stats.get("texture_count", "?")),
-            }, title="Statistics")
-    else:
-        output(result, state)
+    output(result, state)
 
 
 @material_group.command("dump-hlsl")
@@ -231,10 +178,6 @@ def material_hlsl(state: AppState, material_path, output_path, platform, shader_
     api = require_editor(state)
     require_project(state)
 
-    if not state.json_output:
-        state.skin.info(f"Dumping HLSL for {material_path} ({platform})...")
-        state.skin.hint("This triggers a shader recompile, may take a few seconds...")
-
     result = get_material_hlsl(
         api, material_path,
         project_dir=state.session.project_dir,
@@ -257,7 +200,7 @@ def material_hlsl(state: AppState, material_path, output_path, platform, shader_
                     elif result.get("shaders"):
                         first = result["shaders"][0]
                         f.write(first.get("code", "No code"))
-            
+
             result["file"] = out_path
             if "material_code" in result:
                 result["lines"] = len(result["material_code"].splitlines())
@@ -270,14 +213,7 @@ def material_hlsl(state: AppState, material_path, output_path, platform, shader_
         except Exception as e:
             result["error"] = f"Failed to write output file: {e}"
 
-    if not state.json_output and "error" not in result:
-        state.skin.success(f"Got {result.get('shader_count', 0)} shaders")
-        state.skin.status("Platform", result.get("platform", ""))
-        state.skin.status("Available", ", ".join(result.get("available_platforms", [])))
-        state.skin.success(f"Wrote HLSL to {result.get('file')}")
-
-    if state.json_output or "error" in result:
-        output(result, state)
+    output(result, state)
 
 
 @material_group.command("add-node")
@@ -509,11 +445,6 @@ def material_hlsl_code(state: AppState, material_path):
 
     result = get_material_hlsl_code(api, material_path,
                                      project_dir=state.session.project_dir)
-
-    if not state.json_output and "error" not in result:
-        state.skin.success(f"HLSL code: {result.get('lines', '?')} lines")
-        state.skin.status("File", result.get("file", ""))
-
     output(result, state)
 
 
@@ -541,18 +472,6 @@ def material_shader_source(state: AppState, material_path):
     api = require_editor(state)
     require_project(state)
 
-    if not state.json_output:
-        state.skin.info(f"Compiling shaders for {material_path}...")
-        state.skin.hint("This triggers a synchronous recompile, may take a moment...")
-
     result = get_material_shader_source(api, material_path,
                                          project_dir=state.session.project_dir)
-
-    if not state.json_output and "error" not in result:
-        shaders = result.get("shaders", [])
-        state.skin.success(f"Got {result.get('shader_count', 0)} shaders")
-        state.skin.status("Output dir", result.get("output_dir", ""))
-        for s in shaders:
-            state.skin.hint(f"  {s.get('name', '?')} ({s.get('lines', '?')} lines)")
-
     output(result, state)
