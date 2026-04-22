@@ -9,7 +9,10 @@ Set environment variables before running:
     UE_TEST_PORT=30020  (optional; if unset, port is read from Config/DefaultRemoteControl.ini)
 
 Run with:
-    pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e
+    pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e --e2e-auto-launch
+
+Or auto-launch the editor if not running:
+    pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e --e2e-auto-launch --e2e-launch-timeout 300
 
 Screenshot E2E covers **user-facing CLIs** (``screenshot static`` / ``screenshot dynamic``)
 plus optional paths (Python API, ``--no-compress``) to guard different entry points.
@@ -21,6 +24,8 @@ Skip with:
 
 import json
 import os
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -52,13 +57,37 @@ def api_port(project_path):
 
 
 @pytest.fixture
-def api(api_port):
-    """Get a connected API instance."""
+def api(api_port, project_path, request):
+    """Get a connected API instance. Auto-launch editor if --e2e-auto-launch is set."""
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     api = UEEditorAPI(port=api_port)
     if not api.is_alive():
-        pytest.skip(f"UE editor not reachable on port {api_port}")
+        if request.config.getoption("--e2e-auto-launch"):
+            # Launch editor via CLI
+            launch_timeout = request.config.getoption("--e2e-launch-timeout")
+            result = subprocess.run(
+                [
+                    "python", "-m", "cli_anything.unreal",
+                    "--output", "json",
+                    "--project", project_path,
+                    "editor", "launch",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                pytest.skip(f"Editor launch failed: {result.stderr}")
+            # Wait for editor to come online
+            deadline = time.time() + launch_timeout
+            while time.time() < deadline:
+                if api.is_alive():
+                    break
+                time.sleep(2)
+            else:
+                pytest.skip(f"Editor did not come online within {launch_timeout}s")
+        else:
+            pytest.skip(f"UE editor not reachable on port {api_port}")
     return api
 
 
@@ -89,7 +118,8 @@ class TestEditorConnection:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data["status"] == "online"
+        assert data["status"] == "success"
+        assert data["result"]["status"] == "online"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -109,8 +139,9 @@ class TestProjectE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "name" in data
-        assert "modules" in data
+        assert data["status"] == "success"
+        assert "name" in data["result"]
+        assert "modules" in data["result"]
 
     def test_project_config_list(self, cli_runner, project_path):
         from cli_anything.unreal.unreal_cli import cli
@@ -121,7 +152,8 @@ class TestProjectE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert len(data) > 0
+        assert data["status"] == "success"
+        assert len(data["result"]) > 0
 
     def test_project_content(self, cli_runner, project_path, api_port):
         from cli_anything.unreal.unreal_cli import cli
@@ -133,7 +165,8 @@ class TestProjectE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "count" in data
+        assert data["status"] == "success"
+        assert "count" in data["result"]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -179,10 +212,11 @@ class TestMaterialsE2E:
             pytest.skip("Could not list materials")
 
         data = json.loads(result.output)
-        if not data.get("materials"):
+        result_data = data.get("result", data)
+        if not result_data.get("materials"):
             pytest.skip("No materials in project")
 
-        mat_path = data["materials"][0]["path"]
+        mat_path = result_data["materials"][0]["path"]
 
         # Analyze
         result = cli_runner.invoke(cli, [
@@ -191,8 +225,10 @@ class TestMaterialsE2E:
         ])
         assert result.exit_code == 0
         analysis = json.loads(result.output)
-        assert "issues" in analysis
-        assert "warnings" in analysis
+        assert analysis["status"] == "success"
+        result_data = analysis.get("result", analysis)
+        assert "issues" in result_data
+        assert "warnings" in result_data
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -229,8 +265,9 @@ class TestScreenshotE2E:
         ])
 
         data = json.loads(result.output)
-        if data.get("status") != "ok":
-            pytest.fail(f"screenshot static failed; detail: {data.get('error', data)}")
+        result_data = data.get("result", data)
+        if result_data.get("status") != "ok":
+            pytest.fail(f"screenshot static failed; detail: {result_data.get('error', result_data)}")
 
         assert result.exit_code == 0
 
@@ -243,37 +280,38 @@ class TestScreenshotE2E:
             "screenshot", "capture-sequence", "-n", "2", "-i", "0.35",
         ])
         data = json.loads(result.output)
-        if data.get("status") != "ok":
+        result_data = data.get("result", data)
+        if result_data.get("status") != "ok":
             pytest.fail(
                 "sequence capture incomplete (viewport focus or UE automation queue); "
-                f"detail: {data.get('error', data)}"
+                f"detail: {result_data.get('error', result_data)}"
             )
 
         assert result.exit_code == 0
 
-        atlas = Path(data["atlas_path"])
+        atlas = Path(result_data["atlas_path"])
         assert atlas.exists()
         assert atlas.stat().st_size > 1000
-        assert data.get("frame_count") == 2
-        assert len(data.get("frame_paths") or []) == 2
-        for fp in data["frame_paths"]:
+        assert result_data.get("frame_count") == 2
+        assert len(result_data.get("frame_paths") or []) == 2
+        for fp in result_data["frame_paths"]:
             assert Path(fp).exists()
 
-        grid = data.get("grid") or {}
+        grid = result_data.get("grid") or {}
         assert grid.get("cols", 0) >= 1
         assert grid.get("rows", 0) >= 1
 
-        prep = data.get("viewport_prep") or {}
+        prep = result_data.get("viewport_prep") or {}
         assert prep.get("realtime") is True
 
-        assert data.get("cli_command", "").startswith("screenshot dynamic")
-        assert "llm_context" in data
+        assert result_data.get("cli_command", "").startswith("screenshot dynamic")
+        assert "llm_context" in result_data
 
-        dp = data.get("default_path") or ""
+        dp = result_data.get("default_path") or ""
         assert dp
         assert Path(dp).exists()
-        if data.get("compressed"):
-            assert Path(data["compressed"]).exists()
+        if result_data.get("compressed"):
+            assert Path(result_data["compressed"]).exists()
             assert dp.lower().endswith(".jpg")
         else:
             assert dp.lower().endswith(".png")
@@ -287,18 +325,19 @@ class TestScreenshotE2E:
             "screenshot", "capture-sequence", "-n", "2", "-i", "0.35", "--no-compress",
         ])
         data = json.loads(result.output)
-        if data.get("status") != "ok":
+        result_data = data.get("result", data)
+        if result_data.get("status") != "ok":
             pytest.fail(
                 "sequence capture incomplete; "
-                f"detail: {data.get('error', data)}"
+                f"detail: {result_data.get('error', result_data)}"
             )
 
         assert result.exit_code == 0
 
-        assert Path(data["atlas_path"]).exists()
-        assert data.get("default_path") == data.get("atlas_path")
-        assert str(data["default_path"]).lower().endswith(".png")
-        assert "compressed" not in data
+        assert Path(result_data["atlas_path"]).exists()
+        assert result_data.get("default_path") == result_data.get("atlas_path")
+        assert str(result_data["default_path"]).lower().endswith(".png")
+        assert "compressed" not in result_data
 
     def test_capture_screenshot_atlas_core(self, api, project_path):
         """Python API: ``capture_screenshot_atlas`` (same core as ``screenshot dynamic``)."""
@@ -558,7 +597,8 @@ else:
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
-        assert data.get("status") == "ok"
+        assert data["status"] == "success"
+        assert data["result"].get("status") == "ok"
 
     def test_recompile_cli(self, cli_runner, project_path, api_port):
         """Test recompile via CLI."""
@@ -570,7 +610,8 @@ else:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data.get("status") == "ok"
+        assert data["status"] == "success"
+        assert data["result"].get("status") == "ok"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -674,12 +715,13 @@ result = {"cleaned": True}
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
+        result_data = data.get("result", data)
 
-        if "error" in data and "not loaded" in data.get("error", ""):
+        if "error" in result_data and "not loaded" in result_data.get("error", ""):
             pytest.skip("Bridge plugin not loaded")
 
-        assert data.get("source") == "plugin"
-        assert data.get("has_errors") is False
+        assert result_data.get("source") == "plugin"
+        assert result_data.get("has_errors") is False
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -802,10 +844,11 @@ class TestMaterialHlslShaderSourceE2E:
             pytest.skip("Could not list materials")
 
         data = json.loads(result.output)
-        if not data.get("materials"):
+        result_data = data.get("result", data)
+        if not result_data.get("materials"):
             pytest.skip("No materials in project")
 
-        mat_path = data["materials"][0]["path"]
+        mat_path = result_data["materials"][0]["path"]
 
         result = cli_runner.invoke(cli, [
             "--output", "json", "--project", project_path, "--port", str(api_port),
@@ -813,12 +856,13 @@ class TestMaterialHlslShaderSourceE2E:
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
+        result_data = data.get("result", data)
 
-        if "error" in data and "not loaded" in data.get("error", ""):
+        if "error" in result_data and "not loaded" in result_data.get("error", ""):
             pytest.skip("Bridge plugin not loaded")
 
-        assert data.get("source") == "plugin"
-        assert data.get("lines", 0) > 0
+        assert result_data.get("source") == "plugin"
+        assert result_data.get("lines", 0) > 0
 
     def test_shader_source_cli(self, cli_runner, project_path, api_port):
         """Test material shader-source CLI command."""
@@ -832,10 +876,11 @@ class TestMaterialHlslShaderSourceE2E:
             pytest.skip("Could not list materials")
 
         data = json.loads(result.output)
-        if not data.get("materials"):
+        result_data = data.get("result", data)
+        if not result_data.get("materials"):
             pytest.skip("No materials in project")
 
-        mat_path = data["materials"][0]["path"]
+        mat_path = result_data["materials"][0]["path"]
 
         result = cli_runner.invoke(cli, [
             "--output", "json", "--project", project_path, "--port", str(api_port),
@@ -843,12 +888,13 @@ class TestMaterialHlslShaderSourceE2E:
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
+        result_data = data.get("result", data)
 
-        if "error" in data and "not loaded" in data.get("error", ""):
+        if "error" in result_data and "not loaded" in result_data.get("error", ""):
             pytest.skip("Bridge plugin not loaded")
 
-        assert data.get("source") == "plugin"
-        assert data.get("shader_count", 0) > 0
+        assert result_data.get("source") == "plugin"
+        assert result_data.get("shader_count", 0) > 0
 # ═══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.e2e
@@ -999,7 +1045,8 @@ else:
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
-        assert "blueprints" in data
+        assert data["status"] == "success"
+        assert "blueprints" in data["result"]
 
     def test_blueprint_info_cli(self, cli_runner, project_path, api_port):
         """Test blueprint info via CLI."""
@@ -1011,7 +1058,8 @@ else:
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
-        assert data.get("name") == "E2E_TestBlueprint"
+        assert data["status"] == "success"
+        assert data["result"].get("name") == "E2E_TestBlueprint"
 
     def test_blueprint_compile_cli(self, cli_runner, project_path, api_port):
         """Test blueprint compile via CLI."""
@@ -1023,7 +1071,8 @@ else:
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
-        assert data.get("status") == "ok"
+        assert data["status"] == "success"
+        assert data["result"].get("status") == "ok"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1051,8 +1100,9 @@ class TestSceneE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "actors" in data
-        assert "count" in data
+        assert data["status"] == "success"
+        assert "actors" in data["result"]
+        assert "count" in data["result"]
 
     def test_find_actor_by_name(self, api):
         from cli_anything.unreal.core.scene import list_actors, find_actor_by_name
@@ -1074,7 +1124,8 @@ class TestSceneE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "actors" in data
+        assert data["status"] == "success"
+        assert "actors" in data["result"]
 
 
     def test_get_actor_transform(self, api):
@@ -1105,7 +1156,8 @@ class TestSceneE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "location" in data
+        assert data["status"] == "success"
+        assert "location" in data["result"]
 
     # ─── api-discover: the actor → component → property workflow ─────────
     # These protect the "human's Details-panel path" contract added in plugin v1.9:
@@ -1137,9 +1189,11 @@ class TestSceneE2E:
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         data = json.loads(result.output)
 
-        assert data.get("class") == class_name
-        assert "components" in data, "actor api-discover must include components tree"
-        comps = data["components"]
+        assert data["status"] == "success"
+        result_data = data.get("result", data)
+        assert result_data.get("class") == class_name
+        assert "components" in result_data, "actor api-discover must include components tree"
+        comps = result_data["components"]
         assert isinstance(comps, list) and len(comps) >= 1
         # Every component entry should carry a usable path + class
         for c in comps:
@@ -1162,8 +1216,9 @@ class TestSceneE2E:
         ])
         assert r1.exit_code == 0
         d1 = json.loads(r1.output)
+        d1_result = d1.get("result", d1)
         light_comp = next(
-            (c for c in d1["components"] if "Light" in c["class"]),
+            (c for c in d1_result["components"] if "Light" in c["class"]),
             None,
         )
         if light_comp is None:
@@ -1176,11 +1231,12 @@ class TestSceneE2E:
         ])
         assert r2.exit_code == 0, f"CLI failed: {r2.output}"
         d2 = json.loads(r2.output)
+        d2_result = d2.get("result", d2)
 
-        assert d2.get("component") == light_comp["path"]
-        assert d2.get("owning_actor") == actor_path
+        assert d2_result.get("component") == light_comp["path"]
+        assert d2_result.get("owning_actor") == actor_path
         # LightComponent should have Intensity in the filter result
-        assert "Intensity" in d2.get("properties", [])
+        assert "Intensity" in d2_result.get("properties", [])
 
     def test_scene_property_accepts_component_path(self, cli_runner, api_port, api):
         """scene property get/set works on a component subobject path, not just actor."""
@@ -1195,8 +1251,9 @@ class TestSceneE2E:
             "editor", "api-discover", actor_path,
         ])
         d1 = json.loads(r1.output)
+        d1_result = d1.get("result", d1)
         light_comp = next(
-            (c for c in d1["components"] if "Light" in c["class"]),
+            (c for c in d1_result["components"] if "Light" in c["class"]),
             None,
         )
         if light_comp is None:
@@ -1210,7 +1267,9 @@ class TestSceneE2E:
             "scene", "property", comp_path, "Intensity",
         ])
         assert rg.exit_code == 0, f"Read failed: {rg.output}"
-        original = json.loads(rg.output).get("Intensity")
+        rg_data = json.loads(rg.output)
+        rg_result = rg_data.get("result", rg_data)
+        original = rg_result.get("Intensity")
         assert original is not None
 
         # Write a new value, then restore
@@ -1227,7 +1286,9 @@ class TestSceneE2E:
                 "scene", "property", comp_path, "Intensity",
             ])
             assert rv.exit_code == 0
-            assert abs(float(json.loads(rv.output)["Intensity"]) - probe_value) < 1e-3
+            rv_data = json.loads(rv.output)
+            rv_result = rv_data.get("result", rv_data)
+            assert abs(float(rv_result["Intensity"]) - probe_value) < 1e-3
         finally:
             # Always restore the pre-test value
             cli_runner.invoke(cli, [
@@ -1376,7 +1437,8 @@ class TestAssetsE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data["exists"] is False
+        assert data["status"] == "success"
+        assert data["result"]["exists"] is False
 
     def test_asset_refs_cli(self, cli_runner, api_port, api, project_path):
         from cli_anything.unreal.unreal_cli import cli
@@ -1410,7 +1472,8 @@ class TestAssetsE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "count" in data
+        assert data["status"] == "success"
+        assert "count" in data["result"]
 
     def test_asset_describe_and_property_cli(self, cli_runner, api_port, api, project_path):
         from cli_anything.unreal.unreal_cli import cli
@@ -1445,8 +1508,9 @@ class TestAssetsE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "assets" in data
-        assert any(a["name"] == "E2E_AssetPropTest" for a in data["assets"])
+        assert data["status"] == "success"
+        assert "assets" in data["result"]
+        assert any(a["name"] == "E2E_AssetPropTest" for a in data["result"]["assets"])
 
         # 2. Get Property via asset property
         result = cli_runner.invoke(cli, [
@@ -1455,8 +1519,9 @@ class TestAssetsE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "BlendMode" in data
-        assert data["BlendMode"] == "Opaque"
+        assert data["status"] == "success"
+        assert "BlendMode" in data["result"]
+        assert data["result"]["BlendMode"] == "Opaque"
 
         # 3. Set Property
         result = cli_runner.invoke(cli, [
@@ -1465,7 +1530,8 @@ class TestAssetsE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data.get("status") == "ok"
+        assert data["status"] == "success"
+        assert data["result"].get("status") == "ok"
 
         # 4. Get Property again to verify
         result = cli_runner.invoke(cli, [
@@ -1474,7 +1540,8 @@ class TestAssetsE2E:
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data["BlendMode"] == "Masked"
+        assert data["status"] == "success"
+        assert data["result"]["BlendMode"] == "Masked"
 
         # Cleanup via script
         run_python_code(api, (
