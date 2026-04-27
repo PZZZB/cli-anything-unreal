@@ -238,14 +238,17 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 
     if not state.json_output:
         try:
-            sys.stderr.write(f"[editor] waiting for Remote Control API on port {poll_port} (timeout {timeout}s), log {log_file}\n")
+            if timeout is not None:
+                sys.stderr.write(f"[editor] waiting for Remote Control API on port {poll_port} (timeout {timeout}s), log {log_file}\n")
+            else:
+                sys.stderr.write(f"[editor] waiting for Remote Control API on port {poll_port} (no timeout), log {log_file}\n")
             sys.stderr.flush()
         except Exception:
             pass
 
     api = UEEditorAPI(port=poll_port)
     start_time = time.time()
-    deadline = start_time + timeout
+    deadline = start_time + timeout if timeout is not None else float("inf")
     poll_interval = 5.0
     heartbeat_interval = 60.0
     next_beat = start_time + heartbeat_interval
@@ -287,7 +290,10 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 
     result["status"] = "timeout"
     result["log_file"] = str(log_file)
-    result["error"] = f"Editor API did not respond within {timeout}s on port {poll_port}."
+    if timeout is not None:
+        result["error"] = f"Editor API did not respond within {timeout}s on port {poll_port}."
+    else:
+        result["error"] = f"Editor API did not respond on port {poll_port}."
     log_error, _ = _check_log_errors_incremental(log_file, log_offset)
     if not log_error:
         log_error = _check_log_errors(log_file)
