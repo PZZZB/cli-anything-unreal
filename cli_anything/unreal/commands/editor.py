@@ -113,6 +113,8 @@ def editor_preflight(state: AppState):
 def _summarize_startup_precheck(check: dict) -> dict:
     errors = check.get("engine", {}).get("errors", []) + check.get("project", {}).get("errors", [])
     warnings = check.get("engine", {}).get("warnings", []) + check.get("project", {}).get("warnings", [])
+    for issue in check.get("bridge_plugin", {}).get("issues", []):
+        warnings.append(f"Fixed: {issue}")
     return {
         "ready": check.get("ready", False),
         "errors": errors,

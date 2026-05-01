@@ -144,7 +144,91 @@ class TestPluginBridge:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Test get_material_errors with plugin path
+#  Test _ensure_plugin_enabled and _is_plugin_enabled_in_uproject
 # ═══════════════════════════════════════════════════════════════════════
 
+
+class TestPluginEnableInUproject:
+    """Tests for ue_backend._ensure_plugin_enabled and _is_plugin_enabled_in_uproject."""
+
+    def test_ensure_plugin_enabled_auto_enables_bridge(self, tmp_path):
+        """_ensure_plugin_enabled enables CliAnythingBridge in .uproject."""
+        from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
+
+        project_dir = tmp_path / "TestProj"
+        project_dir.mkdir()
+        uproject = project_dir / "TestProj.uproject"
+        uproject.write_text(json.dumps({"FileVersion": 3}), encoding="utf-8")
+
+        changed = _ensure_plugin_enabled(str(project_dir), "CliAnythingBridge")
+        assert changed is True
+
+        data = json.loads(uproject.read_text(encoding="utf-8"))
+        plugin_names = [p["Name"] for p in data["Plugins"]]
+        assert "CliAnythingBridge" in plugin_names
+        assert next(p for p in data["Plugins"] if p["Name"] == "CliAnythingBridge")["Enabled"] is True
+
+    def test_ensure_plugin_enabled_no_change_when_already_enabled(self, tmp_path):
+        """_ensure_plugin_enabled returns False when plugin already enabled."""
+        from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
+
+        project_dir = tmp_path / "TestProj"
+        project_dir.mkdir()
+        uproject = project_dir / "TestProj.uproject"
+        uproject.write_text(json.dumps({
+            "FileVersion": 3,
+            "Plugins": [{"Name": "CliAnythingBridge", "Enabled": True}],
+        }), encoding="utf-8")
+
+        changed = _ensure_plugin_enabled(str(project_dir), "CliAnythingBridge")
+        assert changed is False
+
+    def test_ensure_plugin_enabled_enables_disabled_entry(self, tmp_path):
+        """_ensure_plugin_enabled changes Enabled from False to True."""
+        from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
+
+        project_dir = tmp_path / "TestProj"
+        project_dir.mkdir()
+        uproject = project_dir / "TestProj.uproject"
+        uproject.write_text(json.dumps({
+            "FileVersion": 3,
+            "Plugins": [{"Name": "CliAnythingBridge", "Enabled": False}],
+        }), encoding="utf-8")
+
+        changed = _ensure_plugin_enabled(str(project_dir), "CliAnythingBridge")
+        assert changed is True
+
+        data = json.loads(uproject.read_text(encoding="utf-8"))
+        assert next(p for p in data["Plugins"] if p["Name"] == "CliAnythingBridge")["Enabled"] is True
+
+    def test_is_plugin_enabled_in_uproject_read_only(self, tmp_path):
+        """_is_plugin_enabled_in_uproject checks without modifying."""
+        from cli_anything.unreal.utils.ue_backend import _is_plugin_enabled_in_uproject
+
+        project_dir = tmp_path / "TestProj"
+        project_dir.mkdir()
+        uproject = project_dir / "TestProj.uproject"
+
+        # Not enabled
+        uproject.write_text(json.dumps({"FileVersion": 3}), encoding="utf-8")
+        assert _is_plugin_enabled_in_uproject(str(project_dir), "CliAnythingBridge") is False
+
+        # Explicitly disabled
+        uproject.write_text(json.dumps({
+            "FileVersion": 3,
+            "Plugins": [{"Name": "CliAnythingBridge", "Enabled": False}],
+        }), encoding="utf-8")
+        assert _is_plugin_enabled_in_uproject(str(project_dir), "CliAnythingBridge") is False
+
+        # Enabled
+        uproject.write_text(json.dumps({
+            "FileVersion": 3,
+            "Plugins": [{"Name": "CliAnythingBridge", "Enabled": True}],
+        }), encoding="utf-8")
+        assert _is_plugin_enabled_in_uproject(str(project_dir), "CliAnythingBridge") is True
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Test get_material_errors with plugin path
+# ═══════════════════════════════════════════════════════════════════════
 

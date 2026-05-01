@@ -391,6 +391,49 @@ class TestBuildStopAndDetect:
             assert len(result) == 1
             assert result[0]["pid"] == 100
 
+    def test_find_running_build_processes_skips_idle_msbuild_daemons(self):
+        """find_running_build_processes skips Rider/VS idle MSBuild node-reuse daemons."""
+        from cli_anything.unreal.utils.ue_backend import find_running_build_processes
+
+        ps_output = json.dumps([
+            {"ProcessId": 100, "Name": "MSBuild.exe", "CommandLine": "MSBuild.exe /noautoresponse /nologo /nodemode:1 /nodeReuse:false"},
+            {"ProcessId": 200, "Name": "MSBuild.exe", "CommandLine": "MSBuild.exe /noautoresponse /nologo /nodemode:1 /nodeReuse:false /low:false"},
+            {"ProcessId": 300, "Name": "MSBuild.exe", "CommandLine": "MSBuild.exe /nr:true"},
+        ])
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=ps_output)
+            result = find_running_build_processes("F:\\Test574\\Test574.uproject")
+            assert len(result) == 0
+
+    def test_find_running_build_processes_no_false_positive_for_other_project(self):
+        """find_running_build_processes returns [] when only other projects are building."""
+        from cli_anything.unreal.utils.ue_backend import find_running_build_processes
+
+        ps_output = json.dumps([
+            {"ProcessId": 100, "Name": "UnrealBuildTool.exe", "CommandLine": "UnrealBuildTool.exe -project=F:\\Other\\Other.uproject"},
+            {"ProcessId": 200, "Name": "cl.exe", "CommandLine": "cl.exe some.cpp"},
+        ])
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=ps_output)
+            result = find_running_build_processes("F:\\Test574\\Test574.uproject")
+            assert len(result) == 0
+
+    def test_find_running_build_processes_keeps_associated_processes_when_project_matches(self):
+        """When a project matches, associated processes (cl.exe without .uproject) are kept."""
+        from cli_anything.unreal.utils.ue_backend import find_running_build_processes
+
+        ps_output = json.dumps([
+            {"ProcessId": 100, "Name": "MSBuild.exe", "CommandLine": "MSBuild.exe -project=F:\\Test574\\Test574.uproject"},
+            {"ProcessId": 200, "Name": "cl.exe", "CommandLine": "cl.exe some.cpp"},
+        ])
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=ps_output)
+            result = find_running_build_processes("F:\\Test574\\Test574.uproject")
+            assert len(result) == 2
+            pids = {p["pid"] for p in result}
+            assert 100 in pids
+            assert 200 in pids
+
     def test_kill_build_processes_all_killed(self):
         """kill_build_processes kills all found processes."""
         from cli_anything.unreal.utils.ue_backend import kill_build_processes

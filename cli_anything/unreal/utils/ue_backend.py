@@ -672,6 +672,65 @@ _REMOTE_CONTROL_REQUIRED_SETTINGS = {
 }
 
 
+def _is_plugin_enabled_in_uproject(project_dir: str, plugin_name: str) -> bool:
+    """Check if a plugin is enabled in .uproject (read-only).
+
+    Returns True if the plugin entry exists with Enabled=True.
+    """
+    project_file = Path(project_dir)
+    if project_file.is_file() and project_file.suffix == ".uproject":
+        uproject_path = project_file
+    else:
+        uproject_files = list(Path(project_dir).glob("*.uproject"))
+        if not uproject_files:
+            return False
+        uproject_path = uproject_files[0]
+
+    try:
+        data = json.loads(uproject_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return False
+    for p in data.get("Plugins", []):
+        if p.get("Name") == plugin_name and p.get("Enabled") is True:
+            return True
+    return False
+
+
+def _ensure_plugin_enabled(project_dir: str, plugin_name: str) -> bool:
+    """Ensure a plugin is enabled in the .uproject file.
+
+    Returns:
+        True if the file was modified, False otherwise.
+    """
+    project_file = Path(project_dir)
+    if project_file.is_file() and project_file.suffix == ".uproject":
+        uproject_path = project_file
+    else:
+        uproject_files = list(Path(project_dir).glob("*.uproject"))
+        if not uproject_files:
+            return False
+        uproject_path = uproject_files[0]
+
+    try:
+        data = json.loads(uproject_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return False
+
+    plugins = data.get("Plugins", [])
+    for p in plugins:
+        if p.get("Name") == plugin_name:
+            if p.get("Enabled") is True:
+                return False
+            p["Enabled"] = True
+            break
+    else:
+        plugins.append({"Name": plugin_name, "Enabled": True})
+
+    data["Plugins"] = plugins
+    uproject_path.write_text(json.dumps(data, indent="\t") + "\n", encoding="utf-8")
+    return True
+
+
 def ensure_remote_control_config(project_dir: str) -> dict:
     """Ensure the project has Remote Control configured for CLI use.
 
@@ -679,6 +738,8 @@ def ensure_remote_control_config(project_dir: str) -> dict:
     - Remote console command execution
     - Remote Python execution
     - Allow all origins
+
+    Also enables the RemoteControl plugin in the .uproject file.
 
     Args:
         project_dir: Path to project root directory.
@@ -692,6 +753,10 @@ def ensure_remote_control_config(project_dir: str) -> dict:
 
     if not config_dir.is_dir():
         config_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure RemoteControl plugin is enabled
+    if _ensure_plugin_enabled(project_dir, "RemoteControl"):
+        changes.append("Enabled RemoteControl plugin in .uproject")
 
     if not config_file.exists():
         # Create new config
@@ -726,6 +791,8 @@ def ensure_remote_control_config(project_dir: str) -> dict:
         config_file.write_text(content, encoding="utf-8")
         return {"status": "updated", "file": str(config_file), "changes": changes}
 
+    if changes:
+        return {"status": "updated", "file": str(config_file), "changes": changes}
     return {"status": "ok", "file": str(config_file), "changes": []}
 
 
@@ -1107,6 +1174,21 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
                     f"Fixed: {issue} (editor restart needed)"
                 )
 
+    # Check bridge plugin readiness (informational — auto-fixed during launch)
+    from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+    bridge_deploy = ensure_plugin_deployed(project_dir)
+    bridge_enabled = _is_plugin_enabled_in_uproject(project_dir, "CliAnythingBridge")
+    bridge_issues = []
+    if not bridge_enabled:
+        bridge_issues.append("CliAnythingBridge plugin not enabled in .uproject")
+    if bridge_deploy.get("action") != "already_up_to_date":
+        bridge_issues.append(f"CliAnythingBridge plugin needs {bridge_deploy.get('action', 'update')}")
+    result["bridge_plugin"] = {
+        "ready": len(bridge_issues) == 0,
+        "issues": bridge_issues,
+        "auto_fixable": True,
+    }
+
     result["engine"] = engine_check
     result["project"] = project_check
     result["remote_control"] = rc_check
@@ -1324,10 +1406,23 @@ def find_running_build_processes(
             data = json.loads(result.stdout)
             if isinstance(data, dict):
                 data = [data]
+            # Helper: identify idle MSBuild node-reuse daemons
+            def _is_idle_msbuild(name, cmdline):
+                return name == "MSBuild.exe" and (
+                    "/nodeMode:1" in cmdline or
+                    "/nr:true" in cmdline or
+                    "/nodeReuse" in cmdline
+                )
+
             for proc in data:
                 pid = proc.get("ProcessId", 0)
                 name = proc.get("Name", "")
                 cmdline = proc.get("CommandLine", "") or ""
+
+                # Skip idle MSBuild daemons immediately (Rider/VS keep these
+                # alive for fast incremental builds — they are NOT active builds)
+                if _is_idle_msbuild(name, cmdline):
+                    continue
 
                 # Extract .uproject path from command line
                 project = ""
@@ -1379,9 +1474,9 @@ def find_running_build_processes(
                     pass
                 else:
                     # No process explicitly references this project.
-                    # Only include processes that have no .uproject at all
-                    # and might be related (ambiguous, safer to exclude).
-                    processes = [p for p in processes if not p["project"]]
+                    # Discard all ambiguous processes — they belong to other
+                    # projects or are idle daemons we already filtered.
+                    processes = []
             if not include_cmdline:
                 processes = [
                     {k: v for k, v in p.items() if k != "cmdline"}

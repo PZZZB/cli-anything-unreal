@@ -159,3 +159,149 @@ def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
     relaunch_cmd = popen_calls[0]
     assert "-nosplash" in relaunch_cmd
     assert "-unattended" in relaunch_cmd
+
+
+# ── auto-compile on plugin load failure / skip when OK ────────────────
+
+
+def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
+    """_run_editor_launch_task compiles and retries when plugin fails to load."""
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "fresh_install", "version": "1.9"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=True), \
+         patch("cli_anything.unreal.core.build.compile_project", return_value={"status": "ok"}) as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=[
+             {"status": "error_dialog", "error": "Plugin 'CliAnythingBridge' failed to load because module 'CliAnythingBridge' could not be found."},
+             {"status": "online"},
+         ]):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    mock_compile.assert_called_once()
+    assert result["status"] == "completed"
+    assert result["result"].get("recompiled") is True
+
+
+def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
+    """_run_editor_launch_task skips compilation when plugin loads successfully."""
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    mock_compile.assert_not_called()
+    assert result["status"] == "completed"
+
+
+def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
+    """_run_editor_launch_task fails with COMPILE_FAILED when auto-compile after plugin load failure fails."""
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=True), \
+         patch("cli_anything.unreal.core.build.compile_project", return_value={
+             "status": "error", "error": "Build failed", "returncode": 1
+         }), \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={
+             "status": "error_dialog", "error": "Plugin 'CliAnythingBridge' failed to load because module 'CliAnythingBridge' could not be found."
+         }):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "COMPILE_FAILED"
+
+
+def test_summarize_startup_precheck_includes_bridge_plugin_issues():
+    """_summarize_startup_precheck includes bridge_plugin issues as warnings."""
+    from cli_anything.unreal.commands.editor import _summarize_startup_precheck
+
+    check = {
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+        "bridge_plugin": {
+            "ready": False,
+            "issues": ["CliAnythingBridge plugin not enabled in .uproject"],
+            "auto_fixable": True,
+        },
+    }
+    result = _summarize_startup_precheck(check)
+    assert "Fixed: CliAnythingBridge plugin not enabled in .uproject" in result["warnings"]

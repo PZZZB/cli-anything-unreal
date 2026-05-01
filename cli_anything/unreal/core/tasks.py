@@ -76,24 +76,10 @@ def task_progress(task: dict) -> dict:
     if "log_file" in task:
         result["log_file"] = task["log_file"]
 
-    if status in FINAL_TASK_STATUSES:
-        result["progress"] = 100
-        if "result" in task:
-            result["result"] = task["result"]
-        if "error" in task:
-            result["error"] = task["error"]
-        return result
-
-    if status == "submitted":
-        result["progress"] = 0
-        return result
-
-    started_at = task.get("started_at", task.get("created_at", time.time()))
-    estimate = task.get("estimated_total_seconds")
-    if estimate:
-        elapsed = max(0, int(time.time() - started_at))
-        result["progress"] = min(95, int((elapsed / estimate) * 100))
-        result["estimated_remaining_seconds"] = max(0, estimate - elapsed)
+    if "result" in task:
+        result["result"] = task["result"]
+    if "error" in task:
+        result["error"] = task["error"]
     return result
 
 
@@ -311,7 +297,11 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         task["result"] = port_result
         return save_task(task)
 
-    _deploy_bridge(state.session, state)
+    deploy_result = _deploy_bridge(state.session, state)
+
+    # Auto-enable CliAnythingBridge in .uproject
+    from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
+    _ensure_plugin_enabled(state.session.project_dir, "CliAnythingBridge")
 
     cmd = _build_launch_cmd(editor_exe, state.session.project_path, payload.get("map_path"))
     proc = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
@@ -330,6 +320,49 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     log_file = Path(state.session.project_dir) / "Saved" / "Logs" / f"{state.session.project_name}.log"
     wait_result = _wait_for_api(proc, state.session.port, payload.get("timeout"), log_file, state)
+
+    # Auto-compile and retry if plugin failed to load
+    if wait_result.get("status") == "error_dialog" and "failed to load" in wait_result.get("error", ""):
+        import shutil
+        plugin_dir = Path(state.session.project_dir) / "Plugins" / "CliAnythingBridge"
+        for sub in ("Intermediate", "Binaries"):
+            d = plugin_dir / sub
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
+
+        task = load_task(task["task_id"]) or task
+        task["status"] = "compiling"
+        task["result"] = dict(task.get("result", {}))
+        task["result"]["compile_reason"] = "Bridge plugin failed to load"
+        save_task(task)
+
+        from cli_anything.unreal.core.build import compile_project
+        compile_result = compile_project(
+            state.session.project_path,
+            engine_root=state.session.engine_root,
+        )
+        if compile_result.get("status") != "ok":
+            task["status"] = "failed"
+            task["error"] = {
+                "code": "COMPILE_FAILED",
+                "message": f"Bridge plugin compilation failed: {compile_result.get('error', 'Unknown error')}",
+                "details": compile_result,
+            }
+            task["result"]["compile_result"] = compile_result
+            return save_task(task)
+
+        # Relaunch after successful compilation
+        cmd = _build_launch_cmd(editor_exe, state.session.project_path, payload.get("map_path"))
+        proc = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+
+        task = load_task(task["task_id"]) or task
+        task["pid"] = proc.pid
+        task["status"] = "running"
+        task["result"]["pid"] = proc.pid
+        task["result"]["recompiled"] = True
+        save_task(task)
+
+        wait_result = _wait_for_api(proc, state.session.port, payload.get("timeout"), log_file, state)
 
     task = load_task(task["task_id"]) or task
     task["log_file"] = str(log_file)
