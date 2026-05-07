@@ -1035,6 +1035,48 @@ class TestScriptRunner:
         # Should reference the user code file
         assert "cli_anything_user_code" in tb
 
+    def test_traceback_robust_when_exc_info_cleared(self):
+        """Traceback must still work even when sys.exc_info() is cleared.
+
+        In UE's embedded Python, the exception context (sys.exc_info()) can
+        be cleared by the engine between the except block and subsequent code.
+        Our fix uses format_exception(type, value, tb) from the exception
+        object's __traceback__ attribute, which is immune to this issue.
+
+        This test verifies the wrapper template uses format_exception (which
+        takes explicit type/value/tb args) rather than format_exc() (which
+        relies on sys.exc_info()).
+        """
+        from cli_anything.unreal.core.script_runner import _WRAPPER_TEMPLATE
+
+        # Verify the wrapper template uses format_exception, not format_exc
+        assert "format_exception(" in _WRAPPER_TEMPLATE
+        # The actual traceback assignment must NOT use format_exc()
+        # (comments mentioning it are fine, only check executable lines)
+        for line in _WRAPPER_TEMPLATE.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "_cli_traceback" in stripped and "format_exc()" in stripped:
+                raise AssertionError(
+                    f"Wrapper uses format_exc() for traceback capture: {stripped}"
+                )
+
+    def test_traceback_has_line_number_for_multiline_script(self):
+        """Traceback should show the exact line where the error occurs."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        mock_api = MagicMock()
+        self._make_exec_python_ex_mock(mock_api)
+
+        code = "a = 1\nb = 2\nc = 3\nd = a / 0\n"
+        result = run_python_code(mock_api, code, timeout=5, save=False)
+        assert result["error_type"] == "ZeroDivisionError"
+        tb = result["traceback"]
+        # Should contain a line number reference
+        assert "line 4" in tb or "line 4," in tb
+        assert "NoneType: None" not in tb
+
     def test_run_python_code_isolates_user_globals_between_calls(self):
         """Separate invocations should not leak user globals into later runs."""
         from cli_anything.unreal.core.script_runner import run_python_code

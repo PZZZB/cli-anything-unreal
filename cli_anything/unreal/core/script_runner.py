@@ -73,7 +73,9 @@ try:
 {save_block}
 except Exception as _cli_exc:
     _cli_error = _cli_exc
-    _cli_traceback = _cli_tb.format_exc()
+    # Use the exception object directly — sys.exc_info() can be unreliable
+    # in UE's embedded Python, causing format_exc() to return "NoneType: None".
+    _cli_traceback = "".join(_cli_tb.format_exception(type(_cli_exc), _cli_exc, _cli_exc.__traceback__))
 finally:
     _cli_sys.stdout = _cli_old_stdout
     _cli_captured_stdout = _cli_string_io.getvalue()
