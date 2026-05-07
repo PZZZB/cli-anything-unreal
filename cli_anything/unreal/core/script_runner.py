@@ -61,6 +61,7 @@ import json as _cli_json, traceback as _cli_tb, unreal as _cli_unreal
 import sys as _cli_sys, io as _cli_io
 
 _cli_error = None
+_cli_traceback = None
 _cli_captured_stdout = ""
 _cli_old_stdout = _cli_sys.stdout
 _cli_string_io = _cli_io.StringIO()
@@ -72,6 +73,7 @@ try:
 {save_block}
 except Exception as _cli_exc:
     _cli_error = _cli_exc
+    _cli_traceback = _cli_tb.format_exc()
 finally:
     _cli_sys.stdout = _cli_old_stdout
     _cli_captured_stdout = _cli_string_io.getvalue()
@@ -81,7 +83,7 @@ if _cli_error is not None:
     _cli_result.update({{
         "error": str(_cli_error),
         "error_type": type(_cli_error).__name__,
-        "traceback": _cli_tb.format_exc(),
+        "traceback": _cli_traceback,
     }})
 else:
     try:

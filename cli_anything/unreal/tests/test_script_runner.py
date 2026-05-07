@@ -1017,6 +1017,24 @@ class TestScriptRunner:
         assert "error" in result
         assert result["error_type"] == "AttributeError"
 
+    def test_script_error_traceback_contains_line_info(self):
+        """Traceback must contain real line numbers, not 'NoneType: None'."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        mock_api = MagicMock()
+        self._make_exec_python_ex_mock(mock_api)
+
+        code = "x = 1\ny = 2\nraise RuntimeError('deliberate')\n"
+        result = run_python_code(mock_api, code, timeout=5, save=False)
+        assert result["error_type"] == "RuntimeError"
+        tb = result["traceback"]
+        # Must have actual traceback content, not the empty "NoneType: None"
+        assert "NoneType: None" not in tb
+        assert "RuntimeError" in tb
+        assert "deliberate" in tb
+        # Should reference the user code file
+        assert "cli_anything_user_code" in tb
+
     def test_run_python_code_isolates_user_globals_between_calls(self):
         """Separate invocations should not leak user globals into later runs."""
         from cli_anything.unreal.core.script_runner import run_python_code

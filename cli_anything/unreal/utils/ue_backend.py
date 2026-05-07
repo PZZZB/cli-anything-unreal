@@ -878,6 +878,67 @@ def read_rc_port(project_dir: str) -> int | None:
     return _parse_rc_port(content)
 
 
+def _write_rc_port(project_dir: str, port: int) -> None:
+    """Write RemoteControlHttpServerPort to the project's DefaultRemoteControl.ini."""
+    config_file = Path(project_dir) / "Config" / "DefaultRemoteControl.ini"
+    if not config_file.exists():
+        config_file.write_text(
+            f"\n[/Script/RemoteControlCommon.RemoteControlSettings]\n"
+            f"RemoteControlHttpServerPort={port}\n",
+            encoding="utf-8",
+        )
+        return
+
+    content = config_file.read_text(encoding="utf-8-sig")
+    key = "RemoteControlHttpServerPort="
+    if key in content:
+        lines = content.splitlines()
+        for i, line in enumerate(lines):
+            if line.strip().startswith(key):
+                lines[i] = f"{key}{port}"
+                break
+        content = "\n".join(lines)
+        if not content.endswith("\n"):
+            content += "\n"
+    else:
+        content = content.rstrip("\n") + f"\n{key}{port}\n"
+    config_file.write_text(content, encoding="utf-8")
+
+
+def resolve_available_port(project_dir: str, desired_port: int) -> int:
+    """If *desired_port* is already occupied by another editor, find and persist an available one.
+
+    Scans upward from desired_port+1 (max 10 attempts). When a free port is
+    found, writes it to the project's DefaultRemoteControl.ini so the editor
+    picks it up on launch.
+
+    Returns the port to use (may be the original if it's free).
+    """
+    import socket
+
+    def _port_in_use(port: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                s.connect(("127.0.0.1", port))
+                return True
+        except (ConnectionRefusedError, OSError, TimeoutError):
+            return False
+
+    if not _port_in_use(desired_port):
+        return desired_port
+
+    # Find next free port
+    for offset in range(1, 11):
+        candidate = desired_port + offset
+        if not _port_in_use(candidate):
+            _write_rc_port(project_dir, candidate)
+            return candidate
+
+    # All 10 candidates occupied — fall back to original and let UE fail naturally
+    return desired_port
+
+
 # ── Build status checks ─────────────────────────────────────────────────
 
 def check_engine_build(engine_root: str) -> dict:

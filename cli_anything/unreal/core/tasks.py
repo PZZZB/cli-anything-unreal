@@ -289,13 +289,10 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     port_result = _check_port_in_use(state.session.port, state)
     if port_result is not None:
-        task["status"] = "failed"
-        task["error"] = {
-            "code": "PORT_IN_USE",
-            "message": port_result.get("message", "Target port already in use"),
-        }
-        task["result"] = port_result
-        return save_task(task)
+        # Port occupied — auto-resolve to next available port
+        from cli_anything.unreal.utils.ue_backend import resolve_available_port
+        new_port = resolve_available_port(state.session.project_dir, state.session.port)
+        state.session.port = new_port
 
     deploy_result = _deploy_bridge(state.session, state)
 

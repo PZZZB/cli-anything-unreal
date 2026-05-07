@@ -21,10 +21,9 @@ def editor_group():
 
 @editor_group.command("status")
 @click.argument("task_id", required=False)
-@click.option("--port", type=int, help="Override port for this check")
 @handle_error
 @click.pass_obj
-def editor_status(state: AppState, task_id, port):
+def editor_status(state: AppState, task_id):
     if task_id:
         task = load_task(task_id)
         if task is None:
@@ -34,7 +33,7 @@ def editor_status(state: AppState, task_id, port):
 
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
-    check_port = port or state.session.port
+    check_port = state.session.port
     api = UEEditorAPI(port=check_port)
     alive = api.is_alive()
 

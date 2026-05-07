@@ -410,6 +410,33 @@ class TestSession:
         assert history[0]["description"] == "third"
         assert history[2]["description"] == "first"
 
+    def test_resolve_available_port_free(self, temp_project):
+        """When desired port is free, return it unchanged."""
+        from cli_anything.unreal.utils.ue_backend import resolve_available_port
+
+        # Use a port that's almost certainly free
+        result = resolve_available_port(temp_project["dir"], 39999)
+        assert result == 39999
+
+    def test_resolve_available_port_occupied(self, temp_project):
+        """When desired port is occupied, find next free and persist to ini."""
+        import socket
+        from cli_anything.unreal.utils.ue_backend import read_rc_port, resolve_available_port
+
+        # Occupy a port with a real socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        occupied_port = sock.getsockname()[1]
+        sock.listen(1)
+        try:
+            result = resolve_available_port(temp_project["dir"], occupied_port)
+            assert result == occupied_port + 1
+            # Verify the ini was updated
+            persisted = read_rc_port(temp_project["dir"])
+            assert persisted == occupied_port + 1
+        finally:
+            sock.close()
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Test build.py (command assembly, no real build)

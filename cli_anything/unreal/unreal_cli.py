@@ -68,7 +68,6 @@ COMMAND_SPECS = [
             {"name": "--map", "required": False},
             {"name": "--no-wait", "required": False},
             {"name": "--timeout", "required": False},
-            {"name": "--port", "required": False},
         ],
     },
 ]
@@ -109,14 +108,12 @@ def _default_output_mode() -> str:
 @click.group(invoke_without_command=True)
 @click.option("--output", "output_mode", type=click.Choice(["json", "text"]), default=None)
 @click.option("--project", "project_path", type=click.Path(), help="Path to .uproject file")
-@click.option("--port", type=int, default=30010, help="Editor Remote Control API port")
 @click.option("--list-commands", is_flag=True, help="List CLI commands in a machine-readable format")
 @click.pass_context
-def cli(ctx, output_mode, project_path, port, list_commands):
+def cli(ctx, output_mode, project_path, list_commands):
     state = AppState()
     state.output_mode = output_mode or _default_output_mode()
     state.json_output = state.output_mode == "json"
-    state.session.port = port
     ctx.obj = state
 
     if project_path:
@@ -125,6 +122,12 @@ def cli(ctx, output_mode, project_path, port, list_commands):
         except FileNotFoundError:
             emit_json(error_payload("PROJECT_NOT_FOUND", f"Project not found: {project_path}"))
             raise SystemExit(3)
+
+    if state.session.project_dir:
+        from cli_anything.unreal.utils.ue_backend import read_rc_port
+        ini_port = read_rc_port(state.session.project_dir)
+        if ini_port is not None:
+            state.session.port = ini_port
 
     if list_commands:
         emit_json(COMMAND_SPECS)
