@@ -927,8 +927,8 @@ class TestScriptRunner:
 
     # -- CLI integration tests ------------------------------------------
 
-    def test_editor_exec_py_uses_script_runner(self):
-        """``editor exec 'py ...'`` should route through run_python_code."""
+    def test_editor_run_script_inline_code(self):
+        """``editor run-script -c '...'`` should route through run_python_code."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
@@ -939,7 +939,7 @@ class TestScriptRunner:
             mock_run.return_value = {"status": "ok", "actors": 42}
 
             result = runner.invoke(cli, [
-                "--output", "json", "editor", "exec", "py result = {'actors': 42}",
+                "--output", "json", "editor", "run-script", "-c", "result = {'actors': 42}",
             ])
             assert result.exit_code == 0
             data = json.loads(result.output)

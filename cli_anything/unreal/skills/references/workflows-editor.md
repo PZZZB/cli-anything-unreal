@@ -74,21 +74,30 @@ cli-anything-unreal editor close
 
 ## Python Scripting Patterns
 
-Use `editor run-script` for operations not covered by CLI commands. Use `editor exec "py ..."` for quick one-liners.
+Use `editor run-script` for operations not covered by CLI commands. Use `-c` for quick inline code, or pass a file path for larger scripts.
 
 ### Result Convention
 
 Set a `result` dict variable to return structured data. If not set, returns `{"status": "ok"}`. If the script raises an exception, returns `{"error": "...", "error_type": "...", "traceback": "..."}`.
 
 ```bash
-# Inline Python — result variable is captured
-cli-anything-unreal editor exec "py result = {'actors': 42}"
+# Inline Python via -c — result variable is captured
+cli-anything-unreal editor run-script -c "result = {'actors': 42}"
 
 # Script file — same result capture, auto-save
 cli-anything-unreal editor run-script build_scene.py --timeout 60
 
 # Read-only script — skip auto-save
 cli-anything-unreal editor run-script query.py --no-save
+```
+
+### Console Commands
+
+Use `editor exec` for UE console commands (stat, renderdoc, cvars, etc.):
+
+```bash
+cli-anything-unreal editor exec "stat unit"
+cli-anything-unreal editor exec "renderdoc.captureframe"
 ```
 
 ### Synchronous Execution — No Tick Callbacks
@@ -101,8 +110,8 @@ cli-anything-unreal editor run-script query.py --no-save
 
 ### Inline Python Auto-Mode
 
-When `editor exec` command starts with `py `, it automatically switches to reliable script mode:
-- Code is written to a temp file, executed via `exec_python_file`, result captured as JSON.
+`editor run-script -c` executes inline Python with full result capture:
+- Code is executed via `exec_python_file`, result captured as JSON.
 - Dirty packages are auto-saved after execution (use `--no-save` to skip).
 - If the script errors, the error message and traceback are returned (not a silent timeout).
 

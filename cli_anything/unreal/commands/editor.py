@@ -397,57 +397,47 @@ def editor_close(state: AppState):
 
 @editor_group.command("exec")
 @click.argument("command")
-@click.option("--timeout", default=30, type=int, help="Max seconds to wait for results (Python commands only).")
-@click.option("--no-save", "no_save", is_flag=True, default=False, help="Skip auto-saving dirty packages after Python script execution.")
 @handle_error
 @click.pass_obj
-def editor_exec(state: AppState, command, timeout, no_save):
+def editor_exec(state: AppState, command):
     """Execute a console command in the editor.
 
-    When the command starts with ``py `` the CLI automatically switches to
-    a reliable script-execution mode: the Python code is written to a temp
-    file, executed via ``exec_python_file``, and the result is captured as
-    structured JSON.
-
-    By default, dirty packages are saved after Python script execution.
-    Use --no-save to skip this.
+    Sends a UE console command directly (e.g. stat unit, renderdoc.captureframe).
+    For Python execution, use ``editor run-script -c "code"`` instead.
     """
     api = require_editor(state)
 
-    if command.strip().startswith("py "):
-        py_code = command.strip()[3:].strip().strip('"').strip("'")
-        from cli_anything.unreal.core.script_runner import run_python_code
-        result = run_python_code(
-            api, py_code,
-            project_dir=state.session.project_dir,
-            timeout=timeout,
-            save=not no_save,
+    result = api.exec_console(command)
+    if "error" in result and "400" in str(result["error"]):
+        result["hint"] = (
+            "Console command execution may be disabled in Remote Control settings. "
+            "Run: cli-anything-unreal editor enable-remote"
         )
-    else:
-        result = api.exec_console(command)
-        if "error" in result and "400" in str(result["error"]):
-            result["hint"] = (
-                "Console command execution may be disabled in Remote Control settings. "
-                "Run: cli-anything-unreal editor enable-remote"
-            )
-        elif not result or result == {}:
-            result = {
-                "status": "executed",
-                "command": command,
-                "note": "Command executed. Console output is not captured by Remote Control API. "
-                        "Check editor Output Log for results.",
-            }
+    elif not result or result == {}:
+        result = {
+            "status": "executed",
+            "command": command,
+            "note": "Command executed. Console output is not captured by Remote Control API. "
+                    "Check editor Output Log for results.",
+        }
     output(result, state)
 
 
 @editor_group.command("run-script")
-@click.argument("script_path", type=click.Path(exists=True))
+@click.argument("script_path", type=click.Path(exists=True), required=False, default=None)
+@click.option("-c", "--code", default=None, help="Inline Python code to execute (alternative to script file).")
 @click.option("--timeout", default=30, type=int, help="Max seconds to wait for results.")
 @click.option("--no-save", "no_save", is_flag=True, default=False, help="Skip auto-saving dirty packages after script execution.")
 @handle_error
 @click.pass_obj
-def editor_run_script(state: AppState, script_path, timeout, no_save):
-    """Execute a Python script file in the editor with result capture.
+def editor_run_script(state: AppState, script_path, code, timeout, no_save):
+    """Execute Python in the editor with structured result capture.
+
+    Provide either a script file path OR inline code via -c:
+
+    \b
+        editor run-script myscript.py
+        editor run-script -c "result = {'hello': 'world'}"
 
     The script should set a ``result`` dict variable.  It will be
     automatically captured and returned as structured JSON output.
@@ -455,14 +445,29 @@ def editor_run_script(state: AppState, script_path, timeout, no_save):
     By default, dirty packages are saved after execution.
     Use --no-save to skip this.
     """
-    from cli_anything.unreal.core.script_runner import run_python_script
+    if not script_path and not code:
+        raise AppError("MISSING_INPUT", "Provide a script file path or use -c for inline code.",
+                       suggestion="editor run-script myscript.py  OR  editor run-script -c \"code\"")
+    if script_path and code:
+        raise AppError("AMBIGUOUS_INPUT", "Provide either a script file path or -c, not both.")
+
+    from cli_anything.unreal.core.script_runner import run_python_code, run_python_script
     api = require_editor(state)
-    result = run_python_script(
-        api, script_path,
-        project_dir=state.session.project_dir,
-        timeout=timeout,
-        save=not no_save,
-    )
+
+    if code:
+        result = run_python_code(
+            api, code,
+            project_dir=state.session.project_dir,
+            timeout=timeout,
+            save=not no_save,
+        )
+    else:
+        result = run_python_script(
+            api, script_path,
+            project_dir=state.session.project_dir,
+            timeout=timeout,
+            save=not no_save,
+        )
     output(result, state)
 
 

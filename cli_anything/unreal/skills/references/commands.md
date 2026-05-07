@@ -15,8 +15,8 @@ For workflows and examples, see the workflow files in this directory.
 | `editor close` | Gracefully close the editor | No |
 | `editor new-level PATH [--template PATH]` | Create and open a new level safely | Yes |
 | `editor save-level` | Save the current level safely | Yes |
-| `editor exec COMMAND [--timeout N] [--no-save]` | Execute console command (py prefix = Python mode) | Yes |
-| `editor run-script PATH [--timeout N] [--no-save]` | Execute .py script with result capture | Yes |
+| `editor exec COMMAND` | Execute a UE console command (e.g. `stat unit`, `renderdoc.captureframe`) | Yes |
+| `editor run-script [PATH] [-c CODE] [--timeout N] [--no-save]` | Execute Python (file or inline -c) with result capture | Yes |
 | `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable | Yes |
 | `editor enable-remote` | Enable Remote Control in project config | No |
 | `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover API surface of a UE class. TARGET can be class name, asset path (/Game/...), or actor path (auto-detects class) | Yes |

@@ -59,7 +59,7 @@ if can_create:
 Some UE operations fail at the C++ level without raising a Python exception. If a script completes "successfully" but the result is wrong, check recent engine errors:
 
 ```bash
-cli-anything-unreal editor exec "py import unreal; result = list(unreal.CliAnythingBridgeLibrary.get_recent_engine_errors(10))"
+cli-anything-unreal editor run-script -c "import unreal; result = list(unreal.CliAnythingBridgeLibrary.get_recent_engine_errors(10))"
 ```
 
 ## Test Agent — Asset Validation Requirements
