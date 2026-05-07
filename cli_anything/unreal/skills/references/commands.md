@@ -8,7 +8,7 @@ For workflows and examples, see the workflow files in this directory.
 
 | Command | Description | Requires Editor |
 |---------|-------------|:-:|
-| `editor status [TASK_ID] [--port PORT]` | Check editor state or async task progress. Returns `online`/`starting`/`zombie`/`not_running` | - |
+| `editor status [TASK_ID]` | Check editor state or async task progress. Returns `online`/`starting`/`zombie`/`not_running` | - |
 | `editor list [--scan-range START-END]` | Discover all running editor instances | - |
 | `editor preflight` | Check engine/project build compatibility | No |
 | `editor launch [--map MAP] [--no-wait] [--timeout N]` | Launch editor (blocks until ready; auto-kills zombie processes) | No |
