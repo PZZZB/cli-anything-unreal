@@ -50,7 +50,7 @@ When the user asks you to do something in Unreal:
 
 1. **Is the editor running?** Run `editor status`. If not reachable, read `references/workflows-editor.md` and follow the Editor Lifecycle flow.
 2. **Do you know the asset path?** If not, discover it with `material list`, `blueprint list`, `scene list`, or `asset list`. These return class names too.
-3. **Do you know what properties/functions this object has?** Use `editor api-discover <target>` for an overview, then `-d Name1,Name2` for details. TARGET can be a class name, asset path, actor path, or component subobject path. For actors, the response includes a `components` tree; drill into `components[].path` when the functional property lives on a component (e.g. `DirectionalLight.Intensity` is on `LightComponent0`).
+3. **Do you know what properties/functions this object has?** Use `editor api-discover <target>` for an overview, then `-d Name1,Name2` for details. TARGET can be a class name, asset path, actor path, or component subobject path. For actors, the response includes a `components` tree; drill into `components[].path` when the functional property lives on a component (e.g. `DirectionalLight.Intensity` is on `LightComponent0`). **Don't know which class to query?** See "UE Python API — Class Lookup" in `references/workflows-editor.md`.
 4. **Does a CLI subcommand exist for this?** Check `references/commands.md`. If not listed, go to step 5.
 5. **No subcommand?** Write a Python script and run it with `editor run-script`. Use the reflection data from step 3 for correct property names and types. See `references/workflows-editor.md` for scripting patterns. Delete the script afterwards.
 6. **Need visual verification?** Use `screenshot capture` and review the image.
@@ -63,6 +63,7 @@ If a command fails, check the JSON `error` field. Common causes: connection refu
 |------|------|
 | Find the right CLI command or its arguments | `references/commands.md` |
 | Launch, close, or troubleshoot the editor; write Python scripts | `references/workflows-editor.md` |
+| Find which UE class has the function you need (API lookup) | `references/workflows-editor.md` § "UE Python API — Class Lookup" |
 | Edit materials, write HLSL, inspect shaders | `references/workflows-materials.md` |
 | Manipulate assets, query scenes, edit blueprints | `references/workflows-assets-scenes.md` |
 | Delete/overwrite assets, or before any destructive operation | `references/safety.md` |

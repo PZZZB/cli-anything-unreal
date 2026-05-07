@@ -115,6 +115,37 @@ cli-anything-unreal editor exec "renderdoc.captureframe"
 - Dirty packages are auto-saved after execution (use `--no-save` to skip).
 - If the script errors, the error message and traceback are returned (not a silent timeout).
 
+## UE Python API — Class Lookup
+
+UE's Python API is split across Library/Subsystem classes — functions live on static helpers, not the objects themselves. Use this table to find the right class, then `editor api-discover ClassName -q keyword` to locate the exact function.
+
+| I want to... | Start with |
+|--------------|-----------|
+| Spawn/delete/duplicate actors | `EditorActorSubsystem` |
+| Move/rotate/scale actors | `EditorLevelLibrary` |
+| Save packages, load maps | `EditorLoadingAndSavingUtils` |
+| Load/save/delete/rename assets | `EditorAssetLibrary` |
+| Create material nodes, connect pins | `MaterialEditingLibrary` |
+| Create a new asset from scratch | `AssetToolsHelpers.get_asset_tools()` → `create_asset()` |
+| Render targets, draw to texture | `KismetRenderingLibrary` |
+| Mesh LODs, collision | `StaticMeshEditorSubsystem` |
+| Viewport camera | `LevelEditorSubsystem` |
+| Sub-levels, streaming | `EditorLevelUtils` |
+| Sequencer playback/keys | `LevelSequenceEditorBlueprintLibrary` |
+
+**Pitfalls** — these don't exist where you'd guess:
+
+- `spawn_actor` → `EditorActorSubsystem.spawn_actor_from_class` (not `EditorLevelLibrary`)
+- `create_material` → `get_asset_tools().create_asset()` (not `MaterialEditingLibrary`)
+- `set_material(slot, mat)` → call on `MeshComponent`, not the `StaticMesh` asset
+- `set_location` → `Actor.set_actor_location(vector)` (UE uses `set_actor_*` prefix)
+- viewport realtime → not exposed to Python; use console CVars via `editor exec`
+
+**When you can't find the class**: pass a live actor/asset path to api-discover and it auto-detects:
+```bash
+cli-anything-unreal editor api-discover "/Game/Maps/L.L:PersistentLevel.MyActor_0"
+```
+
 ## Editor-Specific Error Patterns
 
 | Error | Cause | Fix |
