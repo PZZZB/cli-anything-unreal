@@ -139,11 +139,10 @@ class TestCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False):
-            result = runner.invoke(cli, [
-                "--output", "json",
-                "editor", "status",
-            ])
+        result = runner.invoke(cli, [
+            "--output", "json", "--port", "19999",
+            "editor", "status",
+        ])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["status"] == "success"
@@ -288,6 +287,19 @@ class TestCLI:
         assert data["result"]["project"] == "TestProject"
         assert data["result"]["has_binaries"] is True
 
+    def test_port_option(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "--output", "json", "--port", "30015",
+            "editor", "status",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"]["port"] == 30015
+
     def test_port_auto_detected_from_project_config(self, temp_project):
         """Port is automatically read from DefaultRemoteControl.ini when --project is specified."""
         from click.testing import CliRunner
@@ -326,6 +338,30 @@ class TestCLI:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["result"]["port"] == 30010
+
+    def test_port_explicit_overrides_config(self, temp_project):
+        """Explicit --port overrides the value from DefaultRemoteControl.ini."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        config_dir = Path(temp_project["dir"]) / "Config"
+        rc_ini = config_dir / "DefaultRemoteControl.ini"
+        rc_ini.write_text(
+            "[/Script/RemoteControlCommon.RemoteControlSettings]\n"
+            "RemoteControlHttpServerPort=30055\n",
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False):
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "--port", "30099",
+                "editor", "status",
+            ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"]["port"] == 30099
 
 
 # ═══════════════════════════════════════════════════════════════════════
