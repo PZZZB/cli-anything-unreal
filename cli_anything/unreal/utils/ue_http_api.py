@@ -474,16 +474,22 @@ class UEEditorAPI:
             return None
 
     def bring_to_foreground(self) -> bool:
-        """Expand the UE editor window to full screen for screenshot capture.
+        """Activate the UE editor window and expand to full monitor for screenshot.
 
-        Screenshot uses PrintWindow/GetWindowDC which can capture occluded
-        windows, so we don't need foreground focus. We use SetWindowPos with
-        SWP_NOZORDER | SWP_NOACTIVATE to resize without changing Z-order
-        or stealing keyboard focus. The caller should save/restore the
-        original window rect via ``get_window_rect`` / ``set_window_rect``.
+        UE viewports degrade rendering (skip post-process, reduce tick rate)
+        when FSlateApplication::IsActive() returns false — i.e. when the editor
+        window is not the foreground window. GDI capture (PrintWindow) can grab
+        pixels from occluded windows, but it captures the *degraded* frame.
+
+        This method truly activates the window via SetForegroundWindow so UE
+        renders at full quality. Uses AttachThreadInput to bypass Windows'
+        restriction on non-foreground processes calling SetForegroundWindow.
+
+        The caller should save/restore the original window rect via
+        ``get_window_rect`` / ``set_window_rect``.
 
         Returns:
-            True if successful, False otherwise.
+            True if the window was successfully activated, False otherwise.
         """
         import sys
 
@@ -492,17 +498,43 @@ class UEEditorAPI:
 
         try:
             import ctypes
+            import ctypes.wintypes
 
             user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
 
             found_hwnd = self.find_editor_window_hwnd()
             if not found_hwnd:
                 return False
 
             hwnd = ctypes.wintypes.HWND(found_hwnd)
-            # Get monitor rect for the window
+
+            # ── Step 1: Truly bring the window to foreground ──────────────
+            # Windows restricts SetForegroundWindow to the process that owns
+            # the current foreground window. AttachThreadInput temporarily
+            # merges our thread's input queue with the foreground thread's,
+            # granting us permission to call SetForegroundWindow.
+            fore_hwnd = user32.GetForegroundWindow()
+            fore_tid = user32.GetWindowThreadProcessId(fore_hwnd, None)
+            cur_tid = kernel32.GetCurrentThreadId()
+
+            attached = False
+            if fore_tid != cur_tid:
+                attached = bool(user32.AttachThreadInput(cur_tid, fore_tid, True))
+
+            # Restore if minimized (SW_RESTORE = 9)
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)
+
+            user32.SetForegroundWindow(hwnd)
+            user32.BringWindowToTop(hwnd)
+
+            if attached:
+                user32.AttachThreadInput(cur_tid, fore_tid, False)
+
+            # ── Step 2: Expand to full monitor bounds ─────────────────────
             monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
-            import ctypes.wintypes
+
             class MONITORINFO(ctypes.Structure):
                 _fields_ = [
                     ("cbSize", ctypes.wintypes.DWORD),
@@ -510,17 +542,21 @@ class UEEditorAPI:
                     ("rcWork", ctypes.wintypes.RECT),
                     ("dwFlags", ctypes.wintypes.DWORD),
                 ]
+
             mi = MONITORINFO()
             mi.cbSize = ctypes.sizeof(MONITORINFO)
             user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
             mr = mi.rcMonitor
-            # SWP_NOZORDER=0x0004, SWP_NOACTIVATE=0x0010
+
+            # SWP_NOZORDER=0x0004 — keep Z-order (already foreground now)
             user32.SetWindowPos(
                 hwnd, 0,
                 mr.left, mr.top, mr.right - mr.left, mr.bottom - mr.top,
-                0x0004 | 0x0010,
+                0x0004,
             )
-            return True
+
+            # ── Step 3: Verify activation ─────────────────────────────────
+            return user32.GetForegroundWindow() == found_hwnd
         except Exception:
             return False
 

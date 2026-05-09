@@ -141,7 +141,7 @@ def handle_error(f):
                 "EDITOR_UNREACHABLE",
                 str(e),
                 exit_code=4,
-                suggestion=f"Run 'editor status --port {state.session.port}' to verify editor connectivity.",
+                suggestion=f"Editor not reachable on port {state.session.port}. Launch with: editor launch --project <path-to-.uproject>",
             )
         except Exception as e:
             fail(
@@ -181,7 +181,7 @@ def require_editor(state: AppState):
             "EDITOR_UNREACHABLE",
             f"Editor HTTP API not responding on port {state.session.port}.",
             exit_code=4,
-            suggestion="Start the editor first or confirm the Remote Control port.",
+            suggestion="Launch the editor with: editor launch --project <path-to-.uproject>",
         )
     return api
 
