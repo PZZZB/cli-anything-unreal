@@ -115,6 +115,105 @@ def test_build_launch_cmd_with_map():
     assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-unattended", "/Game/Maps/Main"]
 
 
+def test_build_launch_cmd_with_extra_args():
+    from cli_anything.unreal.commands.editor import _build_launch_cmd
+
+    cmd = _build_launch_cmd(
+        "UnrealEditor.exe",
+        "MyProject.uproject",
+        None,
+        ["-vulkan", "-ResX=1280", "-ResY=720"],
+    )
+    assert cmd == [
+        "UnrealEditor.exe",
+        "MyProject.uproject",
+        "-nosplash",
+        "-unattended",
+        "-vulkan",
+        "-ResX=1280",
+        "-ResY=720",
+    ]
+
+
+def test_build_launch_cmd_with_map_and_extra_args():
+    from cli_anything.unreal.commands.editor import _build_launch_cmd
+
+    cmd = _build_launch_cmd(
+        "UnrealEditor.exe",
+        "MyProject.uproject",
+        "/Game/Maps/Main",
+        ["-vulkan"],
+    )
+    assert cmd == [
+        "UnrealEditor.exe",
+        "MyProject.uproject",
+        "-nosplash",
+        "-unattended",
+        "/Game/Maps/Main",
+        "-vulkan",
+    ]
+
+
+def test_build_launch_cmd_filters_empty_extra_args():
+    from cli_anything.unreal.commands.editor import _build_launch_cmd
+
+    cmd = _build_launch_cmd("UnrealEditor.exe", "MyProject.uproject", None, [None, "", "-server"])
+    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-unattended", "-server"]
+
+
+def test_editor_launch_extra_args_propagate_to_payload(mini_project):
+    """--extra-arg values must be persisted into the task payload so the worker forwards them."""
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["command"] = command
+        captured["payload"] = payload
+        return {"task_id": "task-xyz", "status": "submitted"}
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait",
+            "--extra-arg", "-vulkan",
+            "--extra-arg", "-ResX=1280",
+            "--extra-arg", "-ResY=720",
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert data["result"]["task_id"] == "task-xyz"
+    assert captured["command"] == "editor.launch"
+    assert captured["payload"]["extra_args"] == ["-vulkan", "-ResX=1280", "-ResY=720"]
+
+
+def test_editor_launch_no_extra_args_yields_empty_list(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["payload"] = payload
+        return {"task_id": "task-xyz", "status": "submitted"}
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["payload"]["extra_args"] == []
+
+
 # ── plugin-upgrade relaunch uses _build_launch_cmd ──────────────────
 
 

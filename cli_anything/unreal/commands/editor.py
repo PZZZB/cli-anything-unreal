@@ -175,10 +175,12 @@ def _deploy_bridge(session, state) -> dict:
     return ensure_plugin_deployed(session.project_dir)
 
 
-def _build_launch_cmd(editor_exe, project_path, map_path) -> list:
+def _build_launch_cmd(editor_exe, project_path, map_path, extra_args=None) -> list:
     cmd = [editor_exe, project_path, "-nosplash", "-unattended"]
     if map_path:
         cmd.append(map_path)
+    if extra_args:
+        cmd.extend(str(arg) for arg in extra_args if arg is not None and str(arg) != "")
     return cmd
 
 
@@ -307,9 +309,17 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 @click.option("--map", "map_path", default=None, help="Level/map to open (.umap path)")
 @click.option("--no-wait", is_flag=True, default=False)
 @click.option("--timeout", default=None, type=int, help="Max seconds to wait for editor startup")
+@click.option(
+    "--extra-arg",
+    "extra_args",
+    multiple=True,
+    metavar="ARG",
+    help="Extra UE command-line argument forwarded verbatim to UnrealEditor.exe "
+         "(repeat for multiple, e.g. --extra-arg -vulkan --extra-arg -ResX=1280).",
+)
 @handle_error
 @click.pass_obj
-def editor_launch(state: AppState, map_path, no_wait, timeout):
+def editor_launch(state: AppState, map_path, no_wait, timeout, extra_args):
     require_project(state)
     duplicate = _check_already_running(state.session, state)
     if duplicate is not None:
@@ -325,6 +335,7 @@ def editor_launch(state: AppState, map_path, no_wait, timeout):
         "port": state.session.port,
         "map_path": map_path,
         "timeout": timeout,
+        "extra_args": list(extra_args) if extra_args else [],
     }
     task = submit_task("editor.launch", payload)
     if no_wait:

@@ -300,7 +300,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
     _ensure_plugin_enabled(state.session.project_dir, "CliAnythingBridge")
 
-    cmd = _build_launch_cmd(editor_exe, state.session.project_path, payload.get("map_path"))
+    cmd = _build_launch_cmd(editor_exe, state.session.project_path, payload.get("map_path"), payload.get("extra_args"))
     proc = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
 
     task = load_task(task["task_id"]) or task
@@ -349,7 +349,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             return save_task(task)
 
         # Relaunch after successful compilation
-        cmd = _build_launch_cmd(editor_exe, state.session.project_path, payload.get("map_path"))
+        cmd = _build_launch_cmd(editor_exe, state.session.project_path, payload.get("map_path"), payload.get("extra_args"))
         proc = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
 
         task = load_task(task["task_id"]) or task
