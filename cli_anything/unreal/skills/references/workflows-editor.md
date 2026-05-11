@@ -97,8 +97,73 @@ Use `editor exec` for UE console commands (stat, renderdoc, cvars, etc.):
 
 ```bash
 cli-anything-unreal editor exec "stat unit"
+```
+
+## RenderDoc Frame Capture
+
+Capture a GPU frame for offline analysis (shader debugging, draw call inspection, etc.).
+
+### Prerequisites
+
+1. **RenderDoc plugin must be loaded in UE.** The project's `DefaultEngine.ini` must include:
+   ```ini
+   [Plugins]
+   +EnabledPlugins=RenderDoc
+   ```
+   Or enable it manually via the UE editor → Edit → Plugins → RenderDoc. Verify it's active:
+   ```bash
+   cli-anything-unreal editor exec "renderdoc.captureframe"
+   # If the plugin is missing, the command silently does nothing.
+   ```
+
+2. **Editor must be running in windowed mode** (not `-nullrhi`). RenderDoc requires a real RHI backend.
+
+### Capture a Frame
+
+```bash
+# 1. Ensure editor is online
+cli-anything-unreal editor status
+
+# 2. Capture the next frame
 cli-anything-unreal editor exec "renderdoc.captureframe"
 ```
+
+After execution, RenderDoc captures the next frame and saves it as a `.rdc` file. The capture is saved to `<ProjectDir>/Saved/RenderDocCaptures/` (e.g. `F:\MyProject\Saved\RenderDocCaptures\2026.05.11-11.01.53_capture.rdc`). If RenderDoc is installed, the UI may auto-launch to display the capture.
+
+### Typical Workflow
+
+```bash
+# 1. Open the target map
+cli-anything-unreal editor launch --map /Game/Maps/MyMap
+
+# 2. (Optional) Tweak rendering settings before capture
+cli-anything-unreal editor cvar set r.ShadowQuality 3
+cli-anything-unreal editor cvar set r.AntiAliasingMethod 2
+
+# 3. Capture a GPU frame
+cli-anything-unreal editor exec "renderdoc.captureframe"
+
+# 4. (Optional) Take a viewport screenshot for visual reference alongside the .rdc
+cli-anything-unreal screenshot capture --filename before_capture
+```
+
+### Analyzing the Capture
+
+The `.rdc` file can be analyzed with the `renderdoc-mcp` skill if available, or opened manually in the RenderDoc application. Common analysis tasks:
+
+- **Shader debugging**: Inspect pixel/vertex shader execution step by step.
+- **Draw call inspection**: Identify expensive draw calls, overdraw, or redundant state changes.
+- **Texture/RT verification**: Check intermediate render targets to diagnose visual artifacts.
+- **Performance profiling**: Review GPU timings per draw call or pass.
+
+### Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Command executes but no capture | RenderDoc plugin not loaded | Check `DefaultEngine.ini` has `+EnabledPlugins=RenderDoc`; restart editor |
+| Capture fails with D3D error | `-nullrhi` or headless mode | Remove `-nullrhi` from launch args; use windowed mode |
+| Can't find the .rdc file | Unknown capture directory | Check `<ProjectDir>/Saved/RenderDocCaptures/` — that's the default save location |
+| RenderDoc UI doesn't open | RenderDoc not installed | Install RenderDoc from [renderdoc.org](https://renderdoc.org) |
 
 ### Synchronous Execution — No Tick Callbacks
 

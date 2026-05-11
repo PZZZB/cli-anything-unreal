@@ -4,12 +4,14 @@ description: |
   Control Unreal Engine 5 editor via the cli-anything-unreal CLI tool.
   Use this skill whenever the user wants to interact with UE5 — launching the editor,
   editing materials, querying scenes/actors, managing blueprints, taking screenshots,
-  building/cooking/packaging, or running Python scripts inside the editor.
+  capturing GPU frames with RenderDoc, building/cooking/packaging, or running Python
+  scripts inside the editor.
   TRIGGER on any mention of Unreal Engine, UE5, UE editor, materials, blueprints,
-  levels, actors, meshes, shaders, HLSL, or game development workflows involving
-  an Unreal project — even if the user doesn't explicitly mention "CLI" or "cli-anything".
+  levels, actors, meshes, shaders, HLSL, RenderDoc, GPU frame capture, .rdc files,
+  or game development workflows involving an Unreal project — even if the user
+  doesn't explicitly mention "CLI" or "cli-anything".
   Also trigger on Chinese equivalents: 虚幻引擎, 材质, 蓝图, 关卡, 场景, 编译, 打包,
-  截图, actor, .uproject files, cook, compile, or any UE5 asset path like /Game/...
+  截图, 截帧, actor, .uproject files, cook, compile, or any UE5 asset path like /Game/...
 ---
 
 # Unreal Engine CLI Skill
@@ -54,6 +56,7 @@ When the user asks you to do something in Unreal:
 4. **Does a CLI subcommand exist for this?** Check `references/commands.md`. If not listed, go to step 5.
 5. **No subcommand?** Write a Python script and run it with `editor run-script`. Use the reflection data from step 3 for correct property names and types. See `references/workflows-editor.md` for scripting patterns. Delete the script afterwards.
 6. **Need visual verification?** Use `screenshot capture` and review the image.
+7. **Need GPU-level debugging?** Use `editor exec "renderdoc.captureframe"` to capture a GPU frame, then analyze the `.rdc` file. See `references/workflows-editor.md` § "RenderDoc Frame Capture".
 
 If a command fails, check the JSON `error` field. Common causes: connection refused (editor not running), timeout (editor busy — retry after 10-15s), asset not found (wrong path — use list commands to discover).
 
@@ -64,6 +67,7 @@ If a command fails, check the JSON `error` field. Common causes: connection refu
 | Find the right CLI command or its arguments | `references/commands.md` |
 | Launch, close, or troubleshoot the editor; write Python scripts | `references/workflows-editor.md` |
 | Find which UE class has the function you need (API lookup) | `references/workflows-editor.md` § "UE Python API — Class Lookup" |
+| Capture a RenderDoc GPU frame, debug shaders or draw calls | `references/workflows-editor.md` § "RenderDoc Frame Capture" |
 | Edit materials, write HLSL, inspect shaders | `references/workflows-materials.md` |
 | Manipulate assets, query scenes, edit blueprints | `references/workflows-assets-scenes.md` |
 | Delete/overwrite assets, or before any destructive operation | `references/safety.md` |

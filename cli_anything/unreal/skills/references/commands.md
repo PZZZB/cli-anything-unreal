@@ -15,7 +15,7 @@ For workflows and examples, see the workflow files in this directory.
 | `editor close` | Gracefully close the editor | No |
 | `editor new-level PATH [--template PATH]` | Create and open a new level safely | Yes |
 | `editor save-level` | Save the current level safely | Yes |
-| `editor exec COMMAND` | Execute a UE console command (e.g. `stat unit`, `renderdoc.captureframe`) | Yes |
+| `editor exec COMMAND` | Execute a UE console command (e.g. `stat unit`, `renderdoc.captureframe` — see RenderDoc workflow in workflows-editor.md) | Yes |
 | `editor run-script [PATH] [-c CODE] [--timeout N] [--no-save]` | Execute Python (file or inline -c) with result capture | Yes |
 | `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable | Yes |
 | `editor enable-remote` | Enable Remote Control in project config | No |
