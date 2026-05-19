@@ -14,6 +14,103 @@ from cli_anything.unreal.commands import AppError, AppState, handle_error, outpu
 from cli_anything.unreal.core.tasks import cancel_task, load_task, submit_task, task_progress, wait_for_task
 
 
+_VIEWPORT_CAMERA_SCRIPT = """\
+import unreal
+loc, rot = unreal.EditorLevelLibrary.get_level_viewport_camera_info()
+result = {
+    "loc": [loc.x, loc.y, loc.z],
+    "rot": [rot.roll, rot.pitch, rot.yaw],
+}
+"""
+
+
+def _get_viewport_camera(api, timeout: int) -> dict:
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    result = run_python_code(api, _VIEWPORT_CAMERA_SCRIPT, timeout=timeout, save=False)
+    if "error" in result:
+        raise AppError(
+            "VIEWPORT_CAMERA_FAILED",
+            f"Could not read Level Viewport camera: {result['error']}",
+            details=result,
+        )
+    if "loc" not in result or "rot" not in result:
+        raise AppError(
+            "VIEWPORT_CAMERA_FAILED",
+            "Could not read Level Viewport camera: script returned no loc/rot.",
+            details=result,
+        )
+    return {"loc": result["loc"], "rot": result["rot"]}
+
+
+def _camera_changed(before: dict, after: dict, tolerance: float = 1e-3) -> bool:
+    for key in ("loc", "rot"):
+        for a, b in zip(before.get(key, []), after.get(key, [])):
+            if abs(float(a) - float(b)) > tolerance:
+                return True
+    return False
+
+
+def _jump_viewport_bookmark_win32(project_title_hint: str, index: int) -> dict:
+    if sys.platform != "win32":
+        raise AppError(
+            "UNSUPPORTED_PLATFORM",
+            "Viewport bookmark keyboard simulation is only supported on Windows.",
+            exit_code=2,
+        )
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    found: list[tuple[int, str]] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def enum_proc(hwnd, _lparam):
+        if user32.IsWindowVisible(hwnd):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length:
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buffer, length + 1)
+                title = buffer.value
+                if "Unreal Editor" in title and (not project_title_hint or project_title_hint in title):
+                    found.append((int(hwnd), title))
+        return True
+
+    user32.EnumWindows(enum_proc, 0)
+    if not found:
+        raise AppError(
+            "EDITOR_WINDOW_NOT_FOUND",
+            f"Could not find a visible Unreal Editor window matching project title: {project_title_hint}",
+            exit_code=3,
+            suggestion="Make sure the editor window is visible and not minimized to another desktop.",
+        )
+
+    hwnd, title = found[0]
+    user32.ShowWindow(wintypes.HWND(hwnd), 9)  # SW_RESTORE
+    user32.SetForegroundWindow(wintypes.HWND(hwnd))
+    user32.BringWindowToTop(wintypes.HWND(hwnd))
+    time.sleep(0.2)
+
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+        raise AppError("EDITOR_WINDOW_RECT_FAILED", "Could not read Unreal Editor window bounds.", exit_code=3)
+
+    x = int(rect.left + (rect.right - rect.left) // 2)
+    y = int(rect.top + (rect.bottom - rect.top) // 2)
+    user32.SetCursorPos(x, y)
+    user32.mouse_event(0x0002, 0, 0, 0, 0)  # left down
+    user32.mouse_event(0x0004, 0, 0, 0, 0)  # left up
+    time.sleep(0.1)
+
+    vk = 0x30 + int(index)
+    user32.keybd_event(vk, 0, 0, 0)
+    user32.keybd_event(vk, 0, 0x0002, 0)
+    time.sleep(0.5)
+
+    return {"hwnd": hwnd, "title": title, "focus_point": [x, y]}
+
+
 @click.group("editor")
 def editor_group():
     """Editor control commands."""
@@ -107,6 +204,47 @@ def editor_preflight(state: AppState):
 
     require_project(state)
     output(preflight_check(state.session.project_path, state.session.engine_root), state)
+
+
+@editor_group.group("viewport")
+def viewport_group():
+    """Viewport commands."""
+
+
+@viewport_group.group("bookmark")
+def viewport_bookmark_group():
+    """Level Viewport bookmark commands."""
+
+
+@viewport_bookmark_group.command("jump")
+@click.option("--index", required=True, type=click.IntRange(0, 9), help="Bookmark index to jump to (0-9).")
+@click.option("--timeout", default=30, type=int, help="Seconds to wait when reading the viewport camera.")
+@handle_error
+@click.pass_obj
+def viewport_bookmark_jump(state: AppState, index, timeout):
+    """Jump to a Level Viewport bookmark using the editor's numeric shortcut."""
+    require_project(state)
+    if sys.platform != "win32":
+        raise AppError(
+            "UNSUPPORTED_PLATFORM",
+            "Viewport bookmark keyboard simulation is only supported on Windows.",
+            exit_code=2,
+        )
+    api = require_editor(state)
+    before = _get_viewport_camera(api, timeout)
+    window = _jump_viewport_bookmark_win32(state.session.project_name or "", index)
+    after = _get_viewport_camera(api, timeout)
+
+    if not _camera_changed(before, after):
+        raise AppError(
+            "BOOKMARK_JUMP_UNCHANGED",
+            "Viewport camera did not change after sending the bookmark shortcut.",
+            exit_code=3,
+            suggestion="Ensure the Level Viewport is focused, the bookmark exists, the numeric shortcut is unchanged, and the correct editor window was activated.",
+            details={"index": index, "window": window, "before": before, "after": after},
+        )
+
+    output({"status": "jumped", "index": index, "window": window, "before": before, "after": after}, state)
 
 
 def _summarize_startup_precheck(check: dict) -> dict:

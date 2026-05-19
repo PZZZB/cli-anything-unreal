@@ -66,6 +66,7 @@ If a command fails, check the JSON `error` field. Common causes: connection refu
 |------|------|
 | Find the right CLI command or its arguments | `references/commands.md` |
 | Launch, close, or troubleshoot the editor; write Python scripts | `references/workflows-editor.md` |
+| Jump Level Viewport bookmarks or verify viewport camera | `references/workflows-editor.md` § "Viewport Bookmarks" |
 | Find which UE class has the function you need (API lookup) | `references/workflows-editor.md` § "UE Python API — Class Lookup" |
 | Capture a RenderDoc GPU frame, debug shaders or draw calls | `references/workflows-editor.md` § "RenderDoc Frame Capture" |
 | Edit materials, write HLSL, inspect shaders | `references/workflows-materials.md` |

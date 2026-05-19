@@ -300,6 +300,63 @@ class TestCLI:
         data = json.loads(result.output)
         assert data["result"]["port"] == 30015
 
+    def test_viewport_bookmark_jump_cli(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        before = {"loc": [0, 0, 0], "rot": [0, 0, 0]}
+        after = {"loc": [1, 0, 0], "rot": [0, 0, 0]}
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.sys.platform", "win32"), \
+             patch("cli_anything.unreal.commands.editor.require_editor", return_value=MagicMock()), \
+             patch("cli_anything.unreal.commands.editor._get_viewport_camera", side_effect=[before, after]), \
+             patch("cli_anything.unreal.commands.editor._jump_viewport_bookmark_win32", return_value={"hwnd": 123, "title": "TestProject - Unreal Editor", "focus_point": [10, 10]}) as mock_jump:
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "editor", "viewport", "bookmark", "jump", "--index", "1",
+            ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["status"] == "jumped"
+        assert data["result"]["index"] == 1
+        mock_jump.assert_called_once_with("TestProject", 1)
+
+    def test_viewport_bookmark_jump_unchanged_errors(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        camera = {"loc": [0, 0, 0], "rot": [0, 0, 0]}
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.sys.platform", "win32"), \
+             patch("cli_anything.unreal.commands.editor.require_editor", return_value=MagicMock()), \
+             patch("cli_anything.unreal.commands.editor._get_viewport_camera", side_effect=[camera, camera]), \
+             patch("cli_anything.unreal.commands.editor._jump_viewport_bookmark_win32", return_value={"hwnd": 123, "title": "TestProject - Unreal Editor", "focus_point": [10, 10]}):
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "editor", "viewport", "bookmark", "jump", "--index", "1",
+            ])
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "BOOKMARK_JUMP_UNCHANGED"
+        assert "viewport" in data["suggestion"].lower()
+
+    def test_viewport_bookmark_jump_non_windows_errors(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.sys.platform", "linux"), \
+             patch("cli_anything.unreal.commands.editor.require_editor") as mock_require_editor:
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "editor", "viewport", "bookmark", "jump", "--index", "1",
+            ])
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "UNSUPPORTED_PLATFORM"
+        mock_require_editor.assert_not_called()
+
     def test_port_auto_detected_from_project_config(self, temp_project):
         """Port is automatically read from DefaultRemoteControl.ini when --project is specified."""
         from click.testing import CliRunner

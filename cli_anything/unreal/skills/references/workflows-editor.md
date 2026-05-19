@@ -99,6 +99,23 @@ Use `editor exec` for UE console commands (stat, renderdoc, cvars, etc.):
 cli-anything-unreal editor exec "stat unit"
 ```
 
+## Viewport Bookmarks
+
+Jumping Level Viewport bookmarks is not reliably exposed through `editor exec`. These console-command attempts have been observed to execute without changing the viewport camera:
+
+```bash
+cli-anything-unreal editor exec "BOOKMARK JUMPTO=1"
+cli-anything-unreal editor exec "JumpToBookmark1"
+```
+
+Use the dedicated CLI command. It is Windows-only because it uses host-side WinAPI input simulation: locate the UE main window for the project, restore/foreground it, click the window center so the Level Viewport receives focus, send the numeric shortcut key (`0`-`9`), then compare `get_level_viewport_camera_info()` before/after.
+
+```bash
+cli-anything-unreal --output json --project "F:/path/to/Project.uproject" editor viewport bookmark jump --index 1
+```
+
+On success it returns the bookmark index, matched window info, and before/after viewport camera. If the camera does not change, the command returns `BOOKMARK_JUMP_UNCHANGED`; likely causes are: viewport not focused, bookmark does not exist, shortcut was changed, or the wrong editor window was activated.
+
 ## RenderDoc Frame Capture
 
 Capture a GPU frame for offline analysis (shader debugging, draw call inspection, etc.).
