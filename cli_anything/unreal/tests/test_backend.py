@@ -453,6 +453,92 @@ class TestHTTPAPI:
         assert api.port == 30015
         assert api.base_url == "http://localhost:30015"
 
+    def test_get_pid_listening_on_port_decodes_cp936_netstat(self):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        output = (
+            "活动连接\r\n\r\n"
+            "  TCP    127.0.0.1:30020        0.0.0.0:0"
+            "              LISTENING       174352\r\n"
+        ).encode("cp936")
+        proc = subprocess.CompletedProcess(
+            ["netstat", "-ano", "-p", "tcp"],
+            0,
+            stdout=output,
+            stderr=b"",
+        )
+        with patch(
+            "cli_anything.unreal.utils.ue_http_api.subprocess.run",
+            return_value=proc,
+        ) as mock_run:
+            assert UEEditorAPI._get_pid_listening_on_port(30020) == 174352
+
+        assert mock_run.call_args.kwargs["text"] is False
+
+    def test_select_editor_window_prefers_main_unreal_editor_title(self):
+        from cli_anything.unreal.utils.ue_http_api import _select_editor_window_hwnd
+
+        candidates = [
+            {
+                "hwnd": 1,
+                "title": "Message Log",
+                "class_name": "UnrealWindow",
+                "visible": True,
+                "area": 2_000_000,
+                "pid_rank": 0,
+            },
+            {
+                "hwnd": 2,
+                "title": "TestProject - Unreal Editor",
+                "class_name": "UnrealWindow",
+                "visible": True,
+                "area": 100_000,
+                "pid_rank": 0,
+            },
+        ]
+
+        assert _select_editor_window_hwnd(candidates) == 2
+
+    def test_select_editor_window_accepts_visible_titleless_unreal_window(self):
+        from cli_anything.unreal.utils.ue_http_api import _select_editor_window_hwnd
+
+        candidates = [
+            {
+                "hwnd": 1,
+                "title": "TestProject - Unreal Editor",
+                "class_name": "UnrealWindow",
+                "visible": False,
+                "area": 2_000_000,
+                "pid_rank": 0,
+            },
+            {
+                "hwnd": 2,
+                "title": "",
+                "class_name": "Chrome_WidgetWin_0",
+                "visible": True,
+                "area": 1_000_000,
+                "pid_rank": 0,
+            },
+            {
+                "hwnd": 3,
+                "title": "",
+                "class_name": "UnrealWindow",
+                "visible": True,
+                "area": 100_000,
+                "pid_rank": 0,
+            },
+            {
+                "hwnd": 4,
+                "title": "Message Log",
+                "class_name": "UnrealWindow",
+                "visible": True,
+                "area": 80_000,
+                "pid_rank": 0,
+            },
+        ]
+
+        assert _select_editor_window_hwnd(candidates) == 3
+
     def test_is_alive_false(self):
         from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 

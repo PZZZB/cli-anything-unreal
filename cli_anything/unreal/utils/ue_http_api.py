@@ -15,6 +15,7 @@ Supports multi-instance scenarios via configurable port.
 """
 
 import json
+import locale
 import os
 import re
 import subprocess
@@ -26,6 +27,60 @@ try:
     import requests
 except ImportError:
     requests = None  # type: ignore
+
+
+def _decode_windows_command_output(data: bytes | str | None) -> str:
+    """Decode Windows command output without relying on UTF-8 locales."""
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+
+    preferred = locale.getpreferredencoding(False)
+    encodings = []
+    for encoding in (preferred, "mbcs", "utf-8", "cp936"):
+        if encoding and encoding not in encodings:
+            encodings.append(encoding)
+
+    for encoding in encodings:
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return data.decode(preferred or "utf-8", errors="replace")
+
+
+def _select_editor_window_hwnd(candidates: list[dict]) -> int | None:
+    """Pick the best Unreal Editor window from enumerated HWND candidates."""
+    eligible = []
+    for candidate in candidates:
+        class_name = str(candidate.get("class_name") or "")
+        title = str(candidate.get("title") or "")
+        area = int(candidate.get("area") or 0)
+        if not candidate.get("visible") or area <= 0:
+            continue
+        if not title and class_name != "UnrealWindow":
+            continue
+        eligible.append(candidate)
+
+    if not eligible:
+        return None
+
+    def _score(candidate: dict) -> tuple[int, int, int, int, int]:
+        class_name = str(candidate.get("class_name") or "")
+        title = str(candidate.get("title") or "")
+        pid_rank = int(candidate.get("pid_rank") or 0)
+        area = int(candidate.get("area") or 0)
+        return (
+            -pid_rank,
+            1 if "unreal editor" in title.lower() else 0,
+            1 if class_name == "UnrealWindow" else 0,
+            area,
+            1 if title else 0,
+        )
+
+    hwnd = max(eligible, key=_score).get("hwnd")
+    return int(hwnd) if hwnd else None
 
 
 class UEEditorAPI:
@@ -427,7 +482,8 @@ class UEEditorAPI:
             ue_pids: list[int] = []
             if kernel32.Process32First(snapshot, ctypes.byref(entry)):
                 while True:
-                    name = entry.szExeFile.decode("utf-8", errors="ignore")
+                    raw_name = bytes(entry.szExeFile).split(b"\0", 1)[0]
+                    name = _decode_windows_command_output(raw_name)
                     if "UnrealEditor" in name:
                         ue_pids.append(int(entry.th32ProcessID))
                     if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
@@ -437,39 +493,44 @@ class UEEditorAPI:
             if not ue_pids:
                 return None
 
-            ordered_pids: list[int] = []
-            if listening_pid and listening_pid in ue_pids:
-                ordered_pids.append(listening_pid)
-            ordered_pids.extend(pid for pid in ue_pids if pid not in ordered_pids)
-
-            found_hwnd = None
+            target_pids = set(ue_pids)
+            candidates: list[dict] = []
             WNDENUMPROC = ctypes.WINFUNCTYPE(
                 ctypes.c_bool, wintypes.HWND, wintypes.LPARAM
             )
 
-            ordered_set = set(ordered_pids)
-
             @WNDENUMPROC
             def _enum_cb(hwnd, _lparam):
-                nonlocal found_hwnd
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value in ordered_set:
-                    buf = ctypes.create_unicode_buffer(512)
-                    length = user32.GetWindowTextW(hwnd, buf, 512)
-                    if length > 0 and buf.value:
-                        style = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
-                        WS_VISIBLE = 0x10000000
-                        if style & WS_VISIBLE:
-                            found_hwnd = hwnd
-                            return False
+                if pid.value not in target_pids:
+                    return True
+
+                title_buf = ctypes.create_unicode_buffer(512)
+                user32.GetWindowTextW(hwnd, title_buf, 512)
+                class_buf = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, class_buf, 256)
+                rect = wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                width = max(0, int(rect.right - rect.left))
+                height = max(0, int(rect.bottom - rect.top))
+                candidates.append(
+                    {
+                        "hwnd": int(hwnd),
+                        "pid": int(pid.value),
+                        "pid_rank": (
+                            0 if listening_pid == pid.value else (1 if listening_pid else 0)
+                        ),
+                        "title": title_buf.value,
+                        "class_name": class_buf.value,
+                        "visible": bool(user32.IsWindowVisible(hwnd)),
+                        "area": width * height,
+                    }
+                )
                 return True
 
             user32.EnumWindows(_enum_cb, 0)
-
-            if not found_hwnd:
-                return None
-            return int(found_hwnd)
+            return _select_editor_window_hwnd(candidates)
         except Exception:
             return None
 
@@ -605,7 +666,7 @@ class UEEditorAPI:
             proc = subprocess.run(
                 ["netstat", "-ano", "-p", "tcp"],
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=3,
                 check=False,
             )
@@ -615,17 +676,20 @@ class UEEditorAPI:
         if proc.returncode != 0:
             return None
 
+        stdout = _decode_windows_command_output(proc.stdout)
         # Example line:
         # TCP    0.0.0.0:30010   0.0.0.0:0   LISTENING   12345
-        line_re = re.compile(r"^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$")
-        for line in proc.stdout.splitlines():
+        line_re = re.compile(r"^\s*TCP\s+\S+:(\d+)\s+\S+\s+(\S+)\s+(\d+)\s*$")
+        for line in stdout.splitlines():
             match = line_re.match(line)
             if not match:
                 continue
             found_port = int(match.group(1))
-            if found_port != int(port):
-                continue
-            return int(match.group(2))
+            state = match.group(2).upper()
+            if found_port == int(port) and (
+                state.startswith("LISTEN") or state == "侦听"
+            ):
+                return int(match.group(3))
 
         return None
 
