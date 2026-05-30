@@ -352,6 +352,11 @@ class TestBuildStopAndDetect:
             assert "/T" in call_args
             assert "/PID" in call_args
             assert "1234" in call_args
+            kwargs = mock_run.call_args.kwargs
+            assert kwargs["stdout"] is subprocess.DEVNULL
+            assert kwargs["stderr"] is subprocess.DEVNULL
+            assert "text" not in kwargs
+            assert "capture_output" not in kwargs
 
     def test_find_running_build_processes_no_match(self):
         """find_running_build_processes returns [] when no processes match."""

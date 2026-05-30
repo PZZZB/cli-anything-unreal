@@ -449,7 +449,7 @@ def _kill_process_tree(pid: int) -> bool:
     try:
         result = subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
-            capture_output=True, text=True, timeout=10,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
         )
         return result.returncode == 0
     except Exception:

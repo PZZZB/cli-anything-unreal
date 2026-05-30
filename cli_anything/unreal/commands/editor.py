@@ -259,18 +259,26 @@ def _summarize_startup_precheck(check: dict) -> dict:
     }
 
 
+def _same_project_path(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return Path(left).resolve().as_posix().lower() == Path(right).resolve().as_posix().lower()
+    except Exception:
+        return Path(left).as_posix().lower() == Path(right).as_posix().lower()
+
+
 def _check_already_running(session, state) -> dict | None:
     from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs, find_running_editors
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     running = find_running_editors()
-    project_path_norm = str(Path(session.project_path).resolve()).lower()
     api = UEEditorAPI(port=state.session.port)
     api_alive = api.is_alive()
     dialogs = detect_ue_dialogs() if sys.platform == "win32" else []
     for editor_proc in running:
         proc_project = editor_proc.get("project", "")
-        if proc_project and Path(proc_project).resolve().as_posix().lower() == Path(project_path_norm).as_posix().lower():
+        if _same_project_path(proc_project, session.project_path):
             if api_alive:
                 return {
                     "status": "already_running",
@@ -520,6 +528,44 @@ def editor_close(state: AppState):
 
     api = UEEditorAPI(port=state.session.port)
     if not api.is_alive():
+        if state.session.project_path:
+            from cli_anything.unreal.utils.ue_backend import _kill_process_tree, find_running_editors
+
+            matches = [
+                proc for proc in find_running_editors()
+                if _same_project_path(proc.get("project", ""), state.session.project_path)
+            ]
+            if matches:
+                closed = []
+                failed = []
+                for proc in matches:
+                    pid = int(proc.get("pid", 0))
+                    entry = {"pid": pid, "project": proc.get("project", "")}
+                    if pid and _kill_process_tree(pid):
+                        closed.append(entry)
+                    else:
+                        failed.append(entry)
+
+                if closed:
+                    result = {
+                        "status": "closed",
+                        "port": state.session.port,
+                        "method": "process_tree_kill",
+                        "message": "Remote Control API was offline; terminated matching UnrealEditor process.",
+                        "closed_processes": closed,
+                    }
+                    if failed:
+                        result["failed_processes"] = failed
+                    output(result, state)
+                else:
+                    output({
+                        "status": "failed",
+                        "port": state.session.port,
+                        "message": "Remote Control API was offline and matching UnrealEditor process could not be terminated.",
+                        "failed_processes": failed,
+                    }, state)
+                return
+
         output({"status": "offline", "port": state.session.port, "message": "No editor running on this port."}, state)
         return
 

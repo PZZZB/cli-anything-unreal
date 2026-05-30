@@ -45,6 +45,32 @@ def test_editor_status_offline_api_blocked_includes_log_error(mini_project):
     assert data["result"]["startup_precheck"]["errors"] == ["engine error", "project error"]
 
 
+def test_editor_close_kills_matching_zombie_project_process(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+             {"pid": 5678, "project": other_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True) as kill_process:
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    kill_process.assert_called_once_with(1234)
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert data["result"]["status"] == "closed"
+    assert data["result"]["method"] == "process_tree_kill"
+    assert data["result"]["closed_processes"] == [{"pid": 1234, "project": mini_project}]
+
+
 def test_editor_launch_preflight_failed_includes_startup_precheck(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
