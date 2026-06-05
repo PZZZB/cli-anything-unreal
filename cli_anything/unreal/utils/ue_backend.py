@@ -905,6 +905,19 @@ def _write_rc_port(project_dir: str, port: int) -> None:
     config_file.write_text(content, encoding="utf-8")
 
 
+def is_tcp_port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
+    """Return True when a local TCP listener accepts connections."""
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((host, port))
+            return True
+    except (ConnectionRefusedError, OSError, TimeoutError):
+        return False
+
+
 def resolve_available_port(project_dir: str, desired_port: int) -> int:
     """If *desired_port* is already occupied by another editor, find and persist an available one.
 
@@ -914,24 +927,13 @@ def resolve_available_port(project_dir: str, desired_port: int) -> int:
 
     Returns the port to use (may be the original if it's free).
     """
-    import socket
-
-    def _port_in_use(port: int) -> bool:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.5)
-                s.connect(("127.0.0.1", port))
-                return True
-        except (ConnectionRefusedError, OSError, TimeoutError):
-            return False
-
-    if not _port_in_use(desired_port):
+    if not is_tcp_port_in_use(desired_port):
         return desired_port
 
     # Find next free port
     for offset in range(1, 11):
         candidate = desired_port + offset
-        if not _port_in_use(candidate):
+        if not is_tcp_port_in_use(candidate):
             _write_rc_port(project_dir, candidate)
             return candidate
 

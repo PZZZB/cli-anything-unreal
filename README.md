@@ -10,6 +10,12 @@ Why use a CLI instead of giving the Agent direct access to the UE HTTP Remote Co
 * **Handling Common Stuck Points**: The CLI encapsulates multi-step workflows into robust single commands. It handles UE-specific nuances automatically (such as resolving references, auto-saving dirty packages, bypassing modal dialog blocks, and normalizing path mangling from terminals like MSYS2).
 * **Agent-Optimized Outputs**: Errors, engine crashes, and query results are specifically formatted as structured JSON or concise text for agents to easily parse and act upon.
 
+### Runner Output Contract
+
+In JSON mode, commands emit one final machine-readable JSON payload on stdout. Progress, heartbeats, and diagnostic text belong on stderr.
+
+Agent runners that stream command output should stream stderr live and display stdout once at command completion, or stream stdout live and skip the captured stdout replay. Streaming stdout and replaying the captured stdout will duplicate the final JSON payload in the UI.
+
 ### Requirements
 
 * Python 3.10 or newer

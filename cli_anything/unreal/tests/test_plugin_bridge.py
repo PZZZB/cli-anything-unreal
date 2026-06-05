@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -14,16 +15,42 @@ import pytest
 class TestPluginBridge:
     """Tests for core/plugin_bridge.py — deploy and detect logic."""
 
+    def test_bundled_descriptor_matches_cpp_reported_version(self):
+        """The descriptor VersionName must match GetPluginVersion()."""
+        plugin_dir = Path(__file__).resolve().parents[1] / "bridge_plugin" / "CliAnythingBridge"
+        descriptor = json.loads((plugin_dir / "CliAnythingBridge.uplugin").read_text(encoding="utf-8"))
+        cpp = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+        match = re.search(r"GetPluginVersion\(\)\s*\{[^}]*TEXT\(\"([^\"]+)\"\)", cpp, re.DOTALL)
+
+        assert match is not None
+        assert match.group(1) == descriptor["VersionName"]
+
+    def test_setup_includes_bundled_bridge_source(self):
+        """Packaged installs must include the bridge source used for deployment."""
+        setup_py = Path(__file__).resolve().parents[3] / "setup.py"
+        setup_text = setup_py.read_text(encoding="utf-8")
+
+        assert "bridge_plugin/CliAnythingBridge/*.uplugin" in setup_text
+        assert "bridge_plugin/CliAnythingBridge/Source/CliAnythingBridge/*.cs" in setup_text
+        assert "bridge_plugin/CliAnythingBridge/Source/CliAnythingBridge/Public/*.h" in setup_text
+        assert "bridge_plugin/CliAnythingBridge/Source/CliAnythingBridge/Private/*.cpp" in setup_text
+
     def test_ensure_plugin_deployed_fresh_install(self, tmp_path):
         """First deploy copies plugin source to project Plugins/."""
-        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed, get_bundled_version
 
         project_dir = str(tmp_path)
         result = ensure_plugin_deployed(project_dir)
 
         assert result["deployed"] is True
         assert result["action"] == "fresh_install"
-        assert result["version"] == "1.9"
+        assert result["version"] == get_bundled_version()
 
         plugin_dir = tmp_path / "Plugins" / "CliAnythingBridge"
         assert (plugin_dir / "CliAnythingBridge.uplugin").exists()
@@ -45,7 +72,7 @@ class TestPluginBridge:
 
     def test_ensure_plugin_deployed_version_update(self, tmp_path):
         """Plugin is updated when bundled version is newer."""
-        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed, get_bundled_version
 
         project_dir = str(tmp_path)
         ensure_plugin_deployed(project_dir)
@@ -59,7 +86,7 @@ class TestPluginBridge:
         result = ensure_plugin_deployed(project_dir)
         assert result["deployed"] is True
         assert "updated" in result["action"]
-        assert result["version"] == "1.9"
+        assert result["version"] == get_bundled_version()
 
     def test_is_plugin_loaded_true(self):
         """is_plugin_loaded returns True when probe script succeeds."""
@@ -94,7 +121,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.9"
+        assert version == "1.12"
 
     def test_get_loaded_plugin_version(self):
         """get_loaded_plugin_version queries the running editor."""
@@ -116,12 +143,12 @@ class TestPluginBridge:
 
     def test_check_plugin_version_match(self):
         """check_plugin_version returns match=True when versions agree."""
-        from cli_anything.unreal.core.plugin_bridge import check_plugin_version
+        from cli_anything.unreal.core.plugin_bridge import check_plugin_version, get_bundled_version
 
         mock_api = MagicMock()
         with patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version") as mock_loaded, \
              patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed") as mock_deploy:
-            mock_loaded.return_value = "1.9"
+            mock_loaded.return_value = get_bundled_version()
             mock_deploy.return_value = {"deployed": True, "action": "already_up_to_date"}
             result = check_plugin_version(mock_api, "/tmp/project")
             assert result["match"] is True
@@ -129,18 +156,22 @@ class TestPluginBridge:
 
     def test_check_plugin_version_mismatch(self):
         """check_plugin_version detects version mismatch."""
-        from cli_anything.unreal.core.plugin_bridge import check_plugin_version
+        from cli_anything.unreal.core.plugin_bridge import check_plugin_version, get_bundled_version
 
         mock_api = MagicMock()
         with patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version") as mock_loaded, \
              patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed") as mock_deploy:
             mock_loaded.return_value = "1.3"
-            mock_deploy.return_value = {"deployed": True, "action": "updated_1.3_to_1.9", "version": "1.9"}
+            mock_deploy.return_value = {
+                "deployed": True,
+                "action": f"updated_1.3_to_{get_bundled_version()}",
+                "version": get_bundled_version(),
+            }
             result = check_plugin_version(mock_api, "/tmp/project")
             assert result["match"] is False
             assert result["action_needed"] == "recompile"
             assert result["loaded_version"] == "1.3"
-            assert result["bundled_version"] == "1.9"
+            assert result["bundled_version"] == get_bundled_version()
 
 
 # ═══════════════════════════════════════════════════════════════════════

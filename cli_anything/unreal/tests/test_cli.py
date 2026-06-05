@@ -27,6 +27,20 @@ class TestCLI:
         assert "screenshot" in result.output
         assert "editor" in result.output
 
+    def test_version_option(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.core.plugin_bridge import get_bundled_version
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--version"])
+
+        assert result.exit_code == 0
+        assert "cli-anything-unreal" in result.output
+        assert "0.1.1" in result.output
+        assert "CliAnythingBridge bundled version" in result.output
+        assert get_bundled_version() in result.output
+
     def test_screenshot_dynamic_help_minimal_options(self):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli

@@ -475,6 +475,21 @@ class TestHTTPAPI:
 
         assert mock_run.call_args.kwargs["text"] is False
 
+    def test_scan_editor_ports_uses_short_http_timeout(self):
+        from cli_anything.unreal.utils.ue_http_api import scan_editor_ports
+
+        calls = []
+
+        def fake_get(_url, timeout):
+            calls.append(timeout)
+            raise TimeoutError("slow")
+
+        with patch("cli_anything.unreal.utils.ue_http_api.requests.get", side_effect=fake_get):
+            assert scan_editor_ports(port_range=(30010, 30012)) == []
+
+        assert calls
+        assert max(calls) <= 0.5
+
     def test_select_editor_window_prefers_main_unreal_editor_title(self):
         from cli_anything.unreal.utils.ue_http_api import _select_editor_window_hwnd
 

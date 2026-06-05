@@ -17,6 +17,97 @@ class TestScreenshot:
     def test_screenshot_cvar_test_mismatched_labels(self):
         pass
 
+    def test_screenshot_rejects_other_project_on_same_port(self, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        project_dir = tmp_path / "MiniProject"
+        project_dir.mkdir()
+        uproject = project_dir / "MiniProject.uproject"
+        uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+        other_project = str(project_dir / "Other.uproject")
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=True), \
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=5678), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+                 {"pid": 5678, "project": other_project},
+             ]), \
+             patch("cli_anything.unreal.core.screenshot.take_screenshot", return_value={"status": "ok"}) as capture:
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", str(uproject),
+                "screenshot", "capture",
+            ])
+
+        assert result.exit_code == 3
+        capture.assert_not_called()
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "EDITOR_PROJECT_NOT_RUNNING"
+        assert data["details"]["running_editors"] == [{"pid": 5678, "project": other_project}]
+
+    def test_capture_does_not_restore_minimized_window_rect(self, tmp_path):
+        from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw
+
+        api = MagicMock()
+        api.get_window_rect.return_value = (-32000, -32000, -31840, -31972)
+        api.bring_to_foreground.return_value = True
+        api.find_editor_window_hwnd.return_value = 123
+        api.exec_python.return_value = {"status": "ok"}
+        api.exec_console.return_value = {"status": "ok"}
+        api.exec_python_ex.return_value = {"LogOutput": []}
+
+        def fake_capture(_hwnd, output_path, crop_rect=None):
+            Path(output_path).write_bytes(b"png")
+            return True
+
+        with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
+             patch("cli_anything.unreal.core.screenshot.time.sleep"), \
+             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png", side_effect=fake_capture):
+            result = _capture_viewport_png_raw(
+                api,
+                "minimized_restore_guard",
+                str(tmp_path),
+                wait_timeout=15.0,
+                res_x=1920,
+                res_y=1080,
+                delay=0,
+            )
+
+        assert result["status"] == "ok"
+        api.set_window_rect.assert_not_called()
+
+    def test_capture_restores_normal_window_rect(self, tmp_path):
+        from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw
+
+        api = MagicMock()
+        api.get_window_rect.return_value = (100, 100, 1300, 900)
+        api.bring_to_foreground.return_value = True
+        api.find_editor_window_hwnd.return_value = 123
+        api.exec_python.return_value = {"status": "ok"}
+        api.exec_console.return_value = {"status": "ok"}
+        api.exec_python_ex.return_value = {"LogOutput": []}
+
+        def fake_capture(_hwnd, output_path, crop_rect=None):
+            Path(output_path).write_bytes(b"png")
+            return True
+
+        with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
+             patch("cli_anything.unreal.core.screenshot.time.sleep"), \
+             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png", side_effect=fake_capture):
+            result = _capture_viewport_png_raw(
+                api,
+                "normal_restore_guard",
+                str(tmp_path),
+                wait_timeout=15.0,
+                res_x=1920,
+                res_y=1080,
+                delay=0,
+            )
+
+        assert result["status"] == "ok"
+        api.set_window_rect.assert_called_once_with(100, 100, 1300, 900)
+
     def test_compress_for_agent_no_pillow(self, tmp_path):
         """Test graceful handling when Pillow is not available."""
         from cli_anything.unreal.core.screenshot import compress_for_agent

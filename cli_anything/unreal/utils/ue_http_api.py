@@ -792,6 +792,7 @@ class UEEditorAPI:
 def scan_editor_ports(
     host: str = "localhost",
     port_range: tuple[int, int] = (30010, 30020),
+    timeout: float = 0.35,
 ) -> list[dict]:
     """Scan for running UE editor instances by checking Remote Control API.
 
@@ -805,22 +806,37 @@ def scan_editor_ports(
     if requests is None:
         return []
 
-    instances = []
-    for port in range(port_range[0], port_range[1] + 1):
+    def _probe_port(port: int) -> dict | None:
         try:
-            resp = requests.get(f"http://{host}:{port}/remote/info", timeout=1.5)
+            resp = requests.get(f"http://{host}:{port}/remote/info", timeout=timeout)
             if resp.status_code == 200:
                 info = {}
                 try:
                     info = resp.json()
                 except Exception:
                     info = {"raw": resp.text[:200]}
-                instances.append({
+                return {
                     "port": port,
                     "alive": True,
                     "info": info,
-                })
+                }
         except Exception:
-            continue
+            pass
+        return None
 
-    return instances
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    ports = list(range(port_range[0], port_range[1] + 1))
+    if not ports:
+        return []
+
+    instances = []
+    max_workers = min(16, len(ports))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_probe_port, port) for port in ports]
+        for future in as_completed(futures):
+            instance = future.result()
+            if instance:
+                instances.append(instance)
+
+    return sorted(instances, key=lambda item: item["port"])

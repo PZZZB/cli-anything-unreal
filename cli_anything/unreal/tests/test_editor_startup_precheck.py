@@ -45,6 +45,79 @@ def test_editor_status_offline_api_blocked_includes_log_error(mini_project):
     assert data["result"]["startup_precheck"]["errors"] == ["engine error", "project error"]
 
 
+def test_editor_status_offline_ignores_other_project_processes(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 5678, "project": other_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+             "ready": True,
+             "engine": {"errors": [], "warnings": []},
+             "project": {"errors": [], "warnings": []},
+         }):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert data["result"]["status"] == "not_running"
+    assert data["result"]["running_editors"] == [{"pid": 5678, "project": other_project}]
+
+
+def test_editor_status_reports_project_mismatch_when_port_belongs_to_other_project(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=True), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.get_info", return_value={"ok": True}), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=5678), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 5678, "project": other_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+             "ready": True,
+             "engine": {"errors": [], "warnings": []},
+             "project": {"errors": [], "warnings": []},
+         }):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert data["result"]["status"] == "project_mismatch"
+    assert data["result"]["port_owner"] == {"pid": 5678, "project": other_project}
+    assert data["result"]["message"].startswith("Port belongs to another project")
+
+
+def test_check_port_in_use_detects_plain_tcp_listener():
+    from cli_anything.unreal.commands import AppState
+    from cli_anything.unreal.commands.editor import _check_port_in_use
+
+    state = AppState()
+    state.session.port = 30020
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+         patch("cli_anything.unreal.utils.ue_backend.is_tcp_port_in_use", return_value=True):
+        result = _check_port_in_use(30020, state)
+
+    assert result is not None
+    assert result["status"] == "port_in_use"
+    assert result["port"] == 30020
+
+
 def test_editor_close_kills_matching_zombie_project_process(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
@@ -69,6 +142,97 @@ def test_editor_close_kills_matching_zombie_project_process(mini_project):
     assert data["result"]["status"] == "closed"
     assert data["result"]["method"] == "process_tree_kill"
     assert data["result"]["closed_processes"] == [{"pid": 1234, "project": mini_project}]
+
+
+def test_editor_close_kills_matching_project_process_after_graceful_timeout(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    mock_api = MagicMock()
+    mock_api.is_alive.side_effect = [True, True]
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.commands.editor.time.time", side_effect=[0, 0, 31]), \
+         patch("cli_anything.unreal.commands.editor.time.sleep"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True) as kill_process:
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    mock_api.call_function.assert_called_once_with(
+        "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils",
+        "SaveDirtyPackages",
+        {"bSaveMapPackages": True, "bSaveContentPackages": True},
+    )
+    mock_api.exec_console.assert_called_once_with("QUIT_EDITOR")
+    kill_process.assert_called_once_with(1234)
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert data["result"]["status"] == "closed"
+    assert data["result"]["method"] == "process_tree_kill"
+    assert "did not close gracefully" in data["result"]["message"]
+
+
+def test_editor_close_timeout_without_matching_process_returns_error(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    mock_api = MagicMock()
+    mock_api.is_alive.side_effect = [True, True]
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.commands.editor.time.time", side_effect=[0, 0, 31]), \
+         patch("cli_anything.unreal.commands.editor.time.sleep"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", side_effect=[
+             [{"pid": 1234, "project": mini_project}],
+             [],
+         ]):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 3
+    data = json.loads(result.output)
+    assert data["status"] == "error"
+    assert data["code"] == "EDITOR_CLOSE_TIMEOUT"
+    assert "Editor did not close within 30s." in data["message"]
+    assert result.output.count('"status": "error"') == 1
+    assert result.output.count('"code": "EDITOR_CLOSE_TIMEOUT"') == 1
+    assert result.output.count("Editor did not close within 30s.") == 1
+
+
+def test_editor_close_does_not_quit_other_project_on_same_port(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    mock_api = MagicMock()
+    mock_api.is_alive.return_value = True
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 5678, "project": other_project},
+         ]):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 3
+    mock_api.exec_console.assert_not_called()
+    data = json.loads(result.output)
+    assert data["status"] == "error"
+    assert data["code"] == "EDITOR_PROJECT_NOT_RUNNING"
+    assert data["details"]["running_editors"] == [{"pid": 5678, "project": other_project}]
 
 
 def test_editor_launch_preflight_failed_includes_startup_precheck(mini_project):
@@ -316,7 +480,7 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
          patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
          patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
          patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
-             "deployed": True, "action": "fresh_install", "version": "1.9"
+             "deployed": True, "action": "fresh_install", "version": "1.12"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=True), \
          patch("cli_anything.unreal.core.build.compile_project", return_value={"status": "ok"}) as mock_compile, \

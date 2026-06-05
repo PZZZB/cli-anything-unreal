@@ -6,9 +6,11 @@ import functools
 import json
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import click
 
+from cli_anything.unreal._version import __version__
 from cli_anything.unreal.core.session import Session
 from cli_anything.unreal.utils.repl_skin import ReplSkin
 
@@ -28,7 +30,7 @@ class AppState:
     def __init__(self):
         self.json_output: bool = True
         self.session: Session = Session()
-        self.skin: ReplSkin = ReplSkin("unreal", version="0.2.0")
+        self.skin: ReplSkin = ReplSkin("unreal", version=__version__)
         self.in_repl: bool = False
         self.output_mode: str = "json"
 
@@ -172,6 +174,68 @@ def require_project(state: AppState):
         )
 
 
+def _same_project_path(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return Path(left).resolve().as_posix().lower() == Path(right).resolve().as_posix().lower()
+    except Exception:
+        return Path(left).as_posix().lower() == Path(right).as_posix().lower()
+
+
+def _project_mismatch_details(state: AppState, running: list[dict]) -> dict:
+    return {
+        "port": state.session.port,
+        "project": state.session.project_path,
+        "running_editors": [
+            {"pid": editor.get("pid"), "project": editor.get("project", "")}
+            for editor in running
+        ],
+    }
+
+
+def _guard_editor_project(state: AppState, api_cls) -> None:
+    if not state.session.project_path or sys.platform != "win32":
+        return
+
+    try:
+        from cli_anything.unreal.utils.ue_backend import find_running_editors
+
+        running = find_running_editors()
+    except Exception:
+        return
+
+    if not running:
+        return
+
+    try:
+        listening_pid = api_cls._get_pid_listening_on_port(state.session.port)
+    except Exception:
+        listening_pid = None
+
+    if listening_pid:
+        owner = next(
+            (editor for editor in running if int(editor.get("pid", 0)) == int(listening_pid)),
+            None,
+        )
+        if owner and not _same_project_path(owner.get("project", ""), state.session.project_path):
+            raise AppError(
+                "EDITOR_PROJECT_NOT_RUNNING",
+                f"Editor HTTP API on port {state.session.port} belongs to another project.",
+                exit_code=3,
+                details=_project_mismatch_details(state, running),
+            )
+        return
+
+    if not any(_same_project_path(editor.get("project", ""), state.session.project_path) for editor in running):
+        raise AppError(
+            "EDITOR_PROJECT_NOT_RUNNING",
+            f"Editor HTTP API is alive on port {state.session.port}, but no running UnrealEditor process matches this project.",
+            exit_code=3,
+            details=_project_mismatch_details(state, running),
+        )
+
+
 def require_editor(state: AppState):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
@@ -183,6 +247,7 @@ def require_editor(state: AppState):
             exit_code=4,
             suggestion="Launch the editor with: editor launch --project <path-to-.uproject>",
         )
+    _guard_editor_project(state, UEEditorAPI)
     return api
 
 

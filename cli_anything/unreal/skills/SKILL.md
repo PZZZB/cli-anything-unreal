@@ -39,6 +39,7 @@ Before running any commands, verify the CLI is installed: `cli-anything-unreal -
 - **JSON by default.** CLI output defaults to JSON for non-TTY callers (AI agents). If you ever need to force it explicitly, `--output json` is a top-level flag and must appear BEFORE the subcommand:
   - ✅ `cli-anything-unreal --output json editor launch`
   - ❌ `cli-anything-unreal editor launch --output json`
+- **Runner output contract.** In JSON mode, stdout is one final machine-readable payload. Progress/heartbeats belong on stderr. If your command runner streams stdout live, do not replay captured stdout at completion or the final JSON will appear twice.
 - **Specify `--project` on the first command.** Subsequent commands in the same shell session inherit it automatically.
 - **Use UE virtual paths** (`/Game/MyAsset`) when interacting with engine assets, not OS filesystem paths with `.uasset` extensions.
 - **Use `editor launch` for normal startup.** It blocks until the editor API is online (or timeout). For async launch, use `--no-wait` and poll with `editor status <task_id>` or generic `task status <task_id>`.

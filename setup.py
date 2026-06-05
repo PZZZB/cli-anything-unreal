@@ -17,12 +17,15 @@ from setuptools import setup, find_namespace_packages
 
 ROOT = Path(__file__).parent
 README = ROOT / "README.md"
+VERSION_FILE = ROOT / "cli_anything" / "unreal" / "_version.py"
 
 long_description = README.read_text(encoding="utf-8") if README.exists() else ""
+version_ns = {}
+exec(VERSION_FILE.read_text(encoding="utf-8"), version_ns)
 
 setup(
     name="cli-anything-unreal",
-    version="0.1.1",
+    version=version_ns["__version__"],
     description="CLI harness for Unreal Engine - control UE editor via CLI for AI Agent workflows",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -61,7 +64,14 @@ setup(
         ],
     },
     package_data={
-        "cli_anything.unreal": ["skills/*.md"],
+        "cli_anything.unreal": [
+            "skills/*.md",
+            "skills/references/*.md",
+            "bridge_plugin/CliAnythingBridge/*.uplugin",
+            "bridge_plugin/CliAnythingBridge/Source/CliAnythingBridge/*.cs",
+            "bridge_plugin/CliAnythingBridge/Source/CliAnythingBridge/Public/*.h",
+            "bridge_plugin/CliAnythingBridge/Source/CliAnythingBridge/Private/*.cpp",
+        ],
     },
     include_package_data=True,
     zip_safe=False,

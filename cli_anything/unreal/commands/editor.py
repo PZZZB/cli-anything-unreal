@@ -136,6 +136,10 @@ def editor_status(state: AppState, task_id):
 
     if alive:
         result = {"status": "online", "port": check_port, "info": api.get_info()}
+        if state.session.project_path and sys.platform == "win32":
+            mismatch = _detect_port_project_mismatch(check_port, state.session.project_path)
+            if mismatch:
+                result.update(mismatch)
     else:
         result = {"status": "not_running", "port": check_port}
         if sys.platform == "win32":
@@ -144,21 +148,28 @@ def editor_status(state: AppState, task_id):
 
                 running = find_running_editors()
                 if running:
-                    dialogs = detect_ue_dialogs()
                     result["running_editors"] = [
                         {"pid": editor["pid"], "project": editor.get("project")}
                         for editor in running
                     ]
-                    if dialogs:
-                        result["status"] = "starting"
-                        result["dialogs"] = [{"title": dialog["title"]} for dialog in dialogs]
-                    else:
-                        result["status"] = "zombie"
-                    if state.session.project_dir and state.session.project_name:
-                        log_file = Path(state.session.project_dir) / "Saved" / "Logs" / f"{state.session.project_name}.log"
-                        log_error = _check_log_errors(log_file)
-                        if log_error:
-                            result["log_error"] = log_error
+                    relevant = running
+                    if state.session.project_path:
+                        relevant = [
+                            editor for editor in running
+                            if _same_project_path(editor.get("project", ""), state.session.project_path)
+                        ]
+                    if relevant:
+                        dialogs = detect_ue_dialogs()
+                        if dialogs:
+                            result["status"] = "starting"
+                            result["dialogs"] = [{"title": dialog["title"]} for dialog in dialogs]
+                        else:
+                            result["status"] = "zombie"
+                        if state.session.project_dir and state.session.project_name:
+                            log_file = Path(state.session.project_dir) / "Saved" / "Logs" / f"{state.session.project_name}.log"
+                            log_error = _check_log_errors(log_file)
+                            if log_error:
+                                result["log_error"] = log_error
             except Exception:
                 pass
 
@@ -268,6 +279,96 @@ def _same_project_path(left: str | None, right: str | None) -> bool:
         return Path(left).as_posix().lower() == Path(right).as_posix().lower()
 
 
+def _find_matching_project_editors(project_path: str | None) -> tuple[list[dict], list[dict]]:
+    from cli_anything.unreal.utils.ue_backend import find_running_editors
+
+    running = find_running_editors()
+    matches = [
+        proc for proc in running
+        if _same_project_path(proc.get("project", ""), project_path)
+    ]
+    return running, matches
+
+
+def _detect_port_project_mismatch(port: int, project_path: str | None) -> dict | None:
+    if not project_path:
+        return None
+
+    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+    running, _ = _find_matching_project_editors(project_path)
+    owner_pid = UEEditorAPI._get_pid_listening_on_port(port)
+    if not owner_pid:
+        return None
+
+    owner = next((proc for proc in running if proc.get("pid") == owner_pid), None)
+    if not owner:
+        return None
+
+    owner_project = owner.get("project", "")
+    if _same_project_path(owner_project, project_path):
+        return None
+
+    return {
+        "status": "project_mismatch",
+        "message": f"Port belongs to another project: {owner_project}",
+        "port_owner": {"pid": owner_pid, "project": owner_project},
+        "running_editors": [
+            {"pid": editor.get("pid"), "project": editor.get("project", "")}
+            for editor in running
+        ],
+    }
+
+
+def _kill_matching_project_editors(
+    project_path: str | None,
+    port: int,
+    *,
+    success_message: str,
+    failure_message: str,
+) -> dict | None:
+    if not project_path:
+        return None
+
+    from cli_anything.unreal.utils.ue_backend import _kill_process_tree
+
+    _, matches = _find_matching_project_editors(project_path)
+    if not matches:
+        return None
+
+    closed = []
+    failed = []
+    for proc in matches:
+        try:
+            pid = int(proc.get("pid", 0))
+        except (TypeError, ValueError):
+            pid = 0
+        entry = {"pid": pid, "project": proc.get("project", "")}
+        if pid and _kill_process_tree(pid):
+            closed.append(entry)
+        else:
+            failed.append(entry)
+
+    if closed:
+        result = {
+            "status": "closed",
+            "port": port,
+            "method": "process_tree_kill",
+            "message": success_message,
+            "closed_processes": closed,
+        }
+        if failed:
+            result["failed_processes"] = failed
+        return result
+
+    return {
+        "status": "failed",
+        "port": port,
+        "message": failure_message,
+        "failed_processes": failed,
+    }
+
+
 def _check_already_running(session, state) -> dict | None:
     from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs, find_running_editors
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
@@ -311,6 +412,14 @@ def _check_port_in_use(poll_port, state) -> dict | None:
             "status": "already_running",
             "port": poll_port,
             "message": f"An editor is already responding on port {poll_port}.",
+        }
+    from cli_anything.unreal.utils.ue_backend import is_tcp_port_in_use
+
+    if is_tcp_port_in_use(poll_port):
+        return {
+            "status": "port_in_use",
+            "port": poll_port,
+            "message": f"TCP port {poll_port} is already in use.",
         }
     return None
 
@@ -528,58 +637,49 @@ def editor_close(state: AppState):
 
     api = UEEditorAPI(port=state.session.port)
     if not api.is_alive():
-        if state.session.project_path:
-            from cli_anything.unreal.utils.ue_backend import _kill_process_tree, find_running_editors
-
-            matches = [
-                proc for proc in find_running_editors()
-                if _same_project_path(proc.get("project", ""), state.session.project_path)
-            ]
-            if matches:
-                closed = []
-                failed = []
-                for proc in matches:
-                    pid = int(proc.get("pid", 0))
-                    entry = {"pid": pid, "project": proc.get("project", "")}
-                    if pid and _kill_process_tree(pid):
-                        closed.append(entry)
-                    else:
-                        failed.append(entry)
-
-                if closed:
-                    result = {
-                        "status": "closed",
-                        "port": state.session.port,
-                        "method": "process_tree_kill",
-                        "message": "Remote Control API was offline; terminated matching UnrealEditor process.",
-                        "closed_processes": closed,
-                    }
-                    if failed:
-                        result["failed_processes"] = failed
-                    output(result, state)
-                else:
-                    output({
-                        "status": "failed",
-                        "port": state.session.port,
-                        "message": "Remote Control API was offline and matching UnrealEditor process could not be terminated.",
-                        "failed_processes": failed,
-                    }, state)
+        kill_result = _kill_matching_project_editors(
+            state.session.project_path,
+            state.session.port,
+            success_message="Remote Control API was offline; terminated matching UnrealEditor process.",
+            failure_message="Remote Control API was offline and matching UnrealEditor process could not be terminated.",
+        )
+        if kill_result:
+            if kill_result.get("status") == "closed":
+                output(kill_result, state)
                 return
+            raise AppError("EDITOR_CLOSE_FAILED", kill_result["message"], exit_code=3, details=kill_result)
 
         output({"status": "offline", "port": state.session.port, "message": "No editor running on this port."}, state)
         return
 
+    if state.session.project_path and sys.platform == "win32":
+        running, matches = _find_matching_project_editors(state.session.project_path)
+        if not matches:
+            raise AppError(
+                "EDITOR_PROJECT_NOT_RUNNING",
+                f"Remote Control API is alive on port {state.session.port}, but no running UnrealEditor process matches this project.",
+                exit_code=3,
+                details={
+                    "port": state.session.port,
+                    "project": state.session.project_path,
+                    "running_editors": [
+                        {"pid": editor.get("pid"), "project": editor.get("project", "")}
+                        for editor in running
+                    ],
+                },
+            )
+
     try:
         api.call_function(
-            "/Script/EditorScriptingUtilities.Default__EditorLoadingAndSavingUtils",
+            "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils",
             "SaveDirtyPackages",
-            {"bPromptUserToSave": False, "bSaveMapPackages": True, "bSaveContentPackages": True},
+            {"bSaveMapPackages": True, "bSaveContentPackages": True},
         )
         time.sleep(1)
     except Exception:
         pass
 
-    api.exec_console("quit")
+    api.exec_console("QUIT_EDITOR")
     deadline = time.time() + 30
     while time.time() < deadline:
         if not api.is_alive():
@@ -587,7 +687,18 @@ def editor_close(state: AppState):
             return
         time.sleep(2)
 
-    output({"status": "timeout", "port": state.session.port, "message": "Editor did not close within 30s."}, state)
+    kill_result = _kill_matching_project_editors(
+        state.session.project_path,
+        state.session.port,
+        success_message="Editor did not close gracefully within 30s; terminated matching UnrealEditor process.",
+        failure_message="Editor did not close within 30s and matching UnrealEditor process could not be terminated.",
+    )
+    if kill_result and kill_result.get("status") == "closed":
+        output(kill_result, state)
+        return
+
+    details = kill_result or {"status": "timeout", "port": state.session.port}
+    raise AppError("EDITOR_CLOSE_TIMEOUT", "Editor did not close within 30s.", exit_code=3, details=details)
 
 
 @editor_group.command("exec")

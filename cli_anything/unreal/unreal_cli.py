@@ -14,8 +14,13 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 
 import click
 
+from cli_anything.unreal._version import __version__
 from cli_anything.unreal.commands import AppError, AppState, emit_json, error_payload, register_commands
+from cli_anything.unreal.core.plugin_bridge import get_bundled_version
 from cli_anything.unreal.core.tasks import cancel_task, load_task, run_task_worker, submit_task, task_progress, wait_for_task
+
+
+_BRIDGE_VERSION = get_bundled_version() or "unknown"
 
 
 COMMAND_SPECS = [
@@ -117,6 +122,11 @@ def _default_output_mode() -> str:
 
 
 @click.group(invoke_without_command=True)
+@click.version_option(
+    __version__,
+    prog_name="cli-anything-unreal",
+    message=f"%(prog)s, version %(version)s\nCliAnythingBridge bundled version {_BRIDGE_VERSION}",
+)
 @click.option("--output", "output_mode", type=click.Choice(["json", "text"]), default=None)
 @click.option("--project", "project_path", type=click.Path(), help="Path to .uproject file")
 @click.option("--port", type=int, default=None, help="Editor Remote Control API port (auto-detected from project config if omitted)")
