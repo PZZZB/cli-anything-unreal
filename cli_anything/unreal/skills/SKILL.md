@@ -40,7 +40,7 @@ Before running any commands, verify the CLI is installed: `cli-anything-unreal -
   - ✅ `cli-anything-unreal --output json editor launch`
   - ❌ `cli-anything-unreal editor launch --output json`
 - **Runner output contract.** In JSON mode, stdout is one final machine-readable payload. Progress/heartbeats belong on stderr. If your command runner streams stdout live, do not replay captured stdout at completion or the final JSON will appear twice.
-- **Specify `--project` on the first command.** Subsequent commands in the same shell session inherit it automatically.
+- **Discover running editors with `editor status`.** It returns a result array; each item has `status`, `pid`, `port`, and `project_path`. Use `--port` from an online item to target a specific running editor. If an item is `offline`, follow its `next_command`. Offline build commands still need `--project`.
 - **Use UE virtual paths** (`/Game/MyAsset`) when interacting with engine assets, not OS filesystem paths with `.uasset` extensions.
 - **Use `editor launch` for normal startup.** It blocks until the editor API is online (or timeout). For async launch, use `--no-wait` and poll with `editor status <task_id>` or generic `task status <task_id>`.
 - **`editor launch` auto-handles zombie processes.** Stale `UnrealEditor.exe` processes (no API response) are killed automatically. Only `ALREADY_RUNNING` (API alive) blocks the launch.
@@ -51,7 +51,7 @@ Before running any commands, verify the CLI is installed: `cli-anything-unreal -
 
 When the user asks you to do something in Unreal:
 
-1. **Is the editor running?** Run `editor status`. If not reachable, read `references/workflows-editor.md` and follow the Editor Lifecycle flow.
+1. **Is the editor running?** Run `editor status`. If the matching result item is not `online`, read `references/workflows-editor.md` and follow the Editor Lifecycle flow.
 2. **Do you know the asset path?** If not, discover it with `material list`, `blueprint list`, `scene list`, or `asset list`. These return class names too.
 3. **Do you know what properties/functions this object has?** Use `editor api-discover <target>` for an overview, then `-d Name1,Name2` for details. TARGET can be a class name, asset path, actor path, or component subobject path. For actors, the response includes a `components` tree; drill into `components[].path` when the functional property lives on a component (e.g. `DirectionalLight.Intensity` is on `LightComponent0`). **Don't know which class to query?** See "UE Python API — Class Lookup" in `references/workflows-editor.md`.
 4. **Does a CLI subcommand exist for this?** Check `references/commands.md`. If not listed, go to step 5.

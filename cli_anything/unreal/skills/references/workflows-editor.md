@@ -6,19 +6,19 @@ When you need the editor running, follow this sequence. Do not skip steps or imp
 
 ```
 Step 1: editor status
-  → Online? Proceed to your task.
-  → Offline? Continue to Step 2.
+  Matching instance online? Proceed to your task.
+  No matching online instance? Continue to Step 2.
 
 Step 2: editor preflight
-  → Ready? editor launch
-  → BuildId mismatch? Continue to Step 3.
+  Ready? editor launch
+  BuildId mismatch? Continue to Step 3.
 
-Step 3: editor close (if running) → build compile → editor launch
+Step 3: editor close (if running) -> build compile -> editor launch
   This is the ONLY correct way to fix module version mismatches.
 
 Step 4: editor status (verify)
-  → Online? Proceed.
-  → Still offline? Report the error to the user.
+  Matching instance online? Proceed.
+  Still offline? Report the error to the user.
 ```
 
 Key points:
@@ -26,6 +26,7 @@ Key points:
 - For async launch, use `--no-wait` and poll with `editor status <task_id>` or generic `task status <task_id>`.
 - If `build compile` fails because DLLs are locked, close the editor first with `editor close`.
 - If the user says the editor is already running, start at Step 1 to verify.
+- If `editor status` shows an `offline` result item, use its `next_command`. This runs `editor launch` for that project; launch handles stale matching editor processes and starts a reachable editor.
 - `editor launch` auto-handles zombie processes (stale `UnrealEditor.exe` with no API response) — it kills them and proceeds. Only `ALREADY_RUNNING` (API alive) blocks the launch.
 
 ### Example
@@ -60,11 +61,14 @@ cli-anything-unreal task cancel <task_id>
 
 ### Status Values
 
-`editor status` returns one of:
-- `online` — API reachable, editor fully running
-- `starting` — process exists, modal dialogs detected (startup in progress)
-- `zombie` — process exists but API unreachable, no dialogs (stale/hung process)
-- `not_running` — no editor process found
+`editor status` without a task id returns a result array. Each item has:
+- `status` - `online` when Remote Control is reachable, otherwise `offline`
+- `pid` - UnrealEditor process id when known
+- `port` - Remote Control port when known
+- `project_path` - uproject path when known
+- `message` / `suggestion` / `next_command` - present on offline items to show the recovery step
+
+`editor status <task_id>` returns async task progress.
 
 ## Close
 

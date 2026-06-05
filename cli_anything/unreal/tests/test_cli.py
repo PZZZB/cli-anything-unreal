@@ -153,27 +153,40 @@ class TestCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        result = runner.invoke(cli, [
-            "--output", "json", "--port", "19999",
-            "editor", "status",
-        ])
+        with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
+            result = runner.invoke(cli, [
+                "--output", "json", "--port", "19999",
+                "editor", "status",
+            ])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["status"] == "success"
-        # Empty port vs running-but-blocked API both resolve to non-online.
-        assert data["result"]["status"] in ("not_running", "zombie")
+        assert data["result"] == []
 
-    @patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False)
-    @patch("cli_anything.unreal.utils.ue_backend.preflight_check")
-    def test_editor_status_includes_startup_precheck(self, mock_preflight, _mock_alive, temp_project):
+    def test_editor_status_scans_extra_port_as_single_probe(self):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
-        mock_preflight.return_value = {
-            "ready": False,
-            "engine": {"errors": ["engine error"], "warnings": ["engine warning"]},
-            "project": {"errors": ["project error"], "warnings": []},
-        }
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]) as scan_ports, \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
+            result = runner.invoke(cli, [
+                "--output", "json", "--port", "19999",
+                "editor", "status",
+            ])
+
+        assert result.exit_code == 0
+        assert [call.kwargs["port_range"] for call in scan_ports.call_args_list] == [
+            (30010, 30020),
+            (19999, 19999),
+        ]
+
+    @patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[])
+    @patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[])
+    def test_editor_status_returns_empty_list_when_no_editors_for_project(self, _mock_scan, _mock_running, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
         result = runner.invoke(cli, [
@@ -184,19 +197,15 @@ class TestCLI:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["status"] == "success"
-        assert "startup_precheck" in data["result"]
-        assert data["result"]["startup_precheck"]["ready"] is False
-        assert data["result"]["startup_precheck"]["errors"] == ["engine error", "project error"]
-        assert data["result"]["startup_precheck"]["warnings"] == ["engine warning"]
+        assert data["result"] == []
 
     def test_editor_status_offline_api_blocked_includes_log_error(self, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+        with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
              patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[{"pid": 1234, "project": temp_project["uproject"]}]), \
-             patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
              patch("cli_anything.unreal.commands.editor._check_log_errors", return_value="Plugin 'libzstd' failed to load"), \
              patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
                  "ready": True,
@@ -211,10 +220,9 @@ class TestCLI:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["status"] == "success"
-        assert data["result"]["status"] == "zombie"
-        assert data["result"]["log_error"] == "Plugin 'libzstd' failed to load"
-        assert data["result"]["running_editors"][0]["pid"] == 1234
-        assert data["result"]["startup_precheck"]["ready"] is True
+        assert data["result"][0]["status"] == "offline"
+        assert data["result"][0]["pid"] == 1234
+        assert data["result"][0]["log_error"] == "Plugin 'libzstd' failed to load"
 
     @patch("cli_anything.unreal.utils.ue_backend.preflight_check")
     def test_editor_launch_preflight_failed_includes_startup_precheck(self, mock_preflight, temp_project):
@@ -306,13 +314,18 @@ class TestCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        result = runner.invoke(cli, [
-            "--output", "json", "--port", "30015",
-            "editor", "status",
-        ])
+        with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30015, "alive": True, "info": {"ok": True}},
+        ]), \
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
+            result = runner.invoke(cli, [
+                "--output", "json", "--port", "30015",
+                "editor", "status",
+            ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data["result"]["port"] == 30015
+        assert data["result"][0]["port"] == 30015
 
     def test_viewport_bookmark_jump_cli(self, temp_project):
         from click.testing import CliRunner
@@ -386,14 +399,19 @@ class TestCLI:
         )
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False):
+        with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", side_effect=[
+                [],
+                [{"port": 30055, "alive": True, "info": {"ok": True}}],
+             ]), \
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
             result = runner.invoke(cli, [
                 "--output", "json", "--project", temp_project["uproject"],
                 "editor", "status",
             ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data["result"]["port"] == 30055
+        assert data["result"][0]["port"] == 30055
 
     def test_port_defaults_to_30010_without_config(self, temp_project):
         """Port falls back to 30010 when no RemoteControl config exists."""
@@ -401,14 +419,18 @@ class TestCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False):
+        with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+                {"port": 30010, "alive": True, "info": {"ok": True}},
+             ]), \
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
             result = runner.invoke(cli, [
                 "--output", "json", "--project", temp_project["uproject"],
                 "editor", "status",
             ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data["result"]["port"] == 30010
+        assert data["result"][0]["port"] == 30010
 
     def test_port_explicit_overrides_config(self, temp_project):
         """Explicit --port overrides the value from DefaultRemoteControl.ini."""
@@ -424,7 +446,12 @@ class TestCLI:
         )
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False):
+        with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", side_effect=[
+                [],
+                [{"port": 30099, "alive": True, "info": {"ok": True}}],
+             ]), \
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
             result = runner.invoke(cli, [
                 "--output", "json", "--project", temp_project["uproject"],
                 "--port", "30099",
@@ -432,7 +459,7 @@ class TestCLI:
             ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data["result"]["port"] == 30099
+        assert data["result"][0]["port"] == 30099
 
 
 # ═══════════════════════════════════════════════════════════════════════

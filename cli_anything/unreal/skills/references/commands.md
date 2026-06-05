@@ -8,8 +8,7 @@ For workflows and examples, see the workflow files in this directory.
 
 | Command | Description | Requires Editor |
 |---------|-------------|:-:|
-| `editor status [TASK_ID]` | Check editor state or async task progress. Returns `online`/`starting`/`zombie`/`not_running` | - |
-| `editor list [--scan-range START-END]` | Discover all running editor instances | - |
+| `editor status [--scan-range START-END] [TASK_ID]` | Without TASK_ID, return all Unreal Editor processes as the result array. Offline entries include recovery hints. With TASK_ID, check async task progress | - |
 | `editor preflight` | Check engine/project build compatibility | No |
 | `editor launch [--map MAP] [--no-wait] [--timeout N]` | Launch editor (blocks until ready; auto-kills zombie processes) | No |
 | `editor close` | Gracefully close the editor | No |
@@ -205,10 +204,18 @@ Generic commands for polling or canceling any async task (build, editor launch, 
 
 ## Multi-Instance Support
 
-Multiple editors can run simultaneously on different ports. Use `editor list` to discover instances, then `--port` to target one:
+Multiple editors can run simultaneously on different ports. Use `editor status` to discover editors, then `--port` to target one:
 
 ```bash
-cli-anything-unreal editor list
+cli-anything-unreal editor status
 cli-anything-unreal --port 30010 editor status
 cli-anything-unreal --port 30011 material list
 ```
+
+If a result item is `offline`, its `next_command` shows the recovery command. For a stale editor process, run:
+
+```bash
+cli-anything-unreal --project "F:\MyGame\MyGame.uproject" editor launch
+```
+
+`editor launch` terminates stale matching editor processes and starts a reachable editor.

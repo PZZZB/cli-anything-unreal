@@ -116,11 +116,143 @@ def editor_group():
     """Editor control commands."""
 
 
+def _parse_scan_range(scan_range: str) -> tuple[int, int]:
+    parts = str(scan_range).split("-", 1)
+    start = int(parts[0])
+    end = int(parts[1]) if len(parts) > 1 else start
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
+def _project_config_port(project_path: str | None) -> int | None:
+    if not project_path:
+        return None
+    try:
+        from cli_anything.unreal.utils.ue_backend import read_rc_port
+
+        return read_rc_port(str(Path(project_path).parent))
+    except Exception:
+        return None
+
+
+def _editor_log_error(project_path: str | None) -> str | None:
+    if not project_path:
+        return None
+    try:
+        project = Path(project_path)
+        return _check_log_errors(project.parent / "Saved" / "Logs" / f"{project.stem}.log")
+    except Exception:
+        return None
+
+
+def _compact_editor_entry(status: str, pid: int | None, port: int | None, project_path: str | None) -> dict:
+    return {
+        "status": status,
+        "pid": pid,
+        "port": port,
+        "project_path": project_path or None,
+    }
+
+
+def _add_offline_recovery_hint(entry: dict) -> None:
+    entry["message"] = "UnrealEditor process is running, but the Remote Control API is not reachable."
+    project_path = entry.get("project_path")
+    if project_path:
+        entry["suggestion"] = (
+            "Run editor launch for this project. It will terminate a stale matching editor process "
+            "and start a fresh editor if needed."
+        )
+        entry["next_command"] = f'cli-anything-unreal --project "{project_path}" editor launch'
+    else:
+        entry["suggestion"] = "Run editor launch with --project <path-to.uproject> to start a reachable editor."
+
+
+def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict]:
+    from cli_anything.unreal.utils.ue_backend import find_running_editors
+    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI, scan_editor_ports
+
+    start, end = _parse_scan_range(scan_range)
+    extra_ports: set[int] = set()
+    if state.session.port:
+        extra_ports.add(int(state.session.port))
+    configured_port = _project_config_port(state.session.project_path)
+    if configured_port and int(configured_port) == int(state.session.port):
+        extra_ports.add(int(configured_port))
+
+    running = find_running_editors() if sys.platform == "win32" else []
+    for proc in running:
+        proc_port = _project_config_port(proc.get("project") or None)
+        if proc_port:
+            extra_ports.add(int(proc_port))
+
+    online_by_port: dict[int, dict] = {}
+    for item in scan_editor_ports(port_range=(start, end)):
+        online_by_port[int(item["port"])] = item
+    for port in sorted(extra_ports):
+        if start <= port <= end:
+            continue
+        for item in scan_editor_ports(port_range=(port, port)):
+            online_by_port[int(item["port"])] = item
+
+    process_by_pid: dict[int, dict] = {}
+    for proc in running:
+        try:
+            process_by_pid[int(proc.get("pid", 0))] = proc
+        except (TypeError, ValueError):
+            pass
+
+    pid_by_port: dict[int, int | None] = {}
+    port_by_pid: dict[int, int] = {}
+    for port in sorted(online_by_port):
+        owner_pid = UEEditorAPI._get_pid_listening_on_port(port)
+        pid_by_port[port] = owner_pid
+        if owner_pid:
+            port_by_pid[int(owner_pid)] = port
+
+    instances: list[dict] = []
+    used_ports: set[int] = set()
+    for proc in running:
+        try:
+            pid = int(proc.get("pid", 0))
+        except (TypeError, ValueError):
+            pid = None
+        project_path = proc.get("project") or None
+        port = port_by_pid.get(pid) if pid is not None else None
+        if port is not None:
+            used_ports.add(port)
+            entry = _compact_editor_entry("online", pid, port, project_path)
+        else:
+            entry = _compact_editor_entry("offline", pid, _project_config_port(project_path), project_path)
+            _add_offline_recovery_hint(entry)
+            log_error = _editor_log_error(project_path)
+            if log_error:
+                entry["log_error"] = log_error
+        instances.append(entry)
+
+    for port in sorted(online_by_port):
+        if port in used_ports:
+            continue
+        owner_pid = pid_by_port.get(port)
+        owner = process_by_pid.get(int(owner_pid)) if owner_pid else None
+        instances.append(
+            _compact_editor_entry(
+                "online",
+                int(owner_pid) if owner_pid else None,
+                port,
+                owner.get("project") if owner else None,
+            )
+        )
+
+    return instances
+
+
 @editor_group.command("status")
+@click.option("--scan-range", default="30010-30020", help="Port range to scan")
 @click.argument("task_id", required=False)
 @handle_error
 @click.pass_obj
-def editor_status(state: AppState, task_id):
+def editor_status(state: AppState, scan_range, task_id):
     if task_id:
         task = load_task(task_id)
         if task is None:
@@ -128,83 +260,7 @@ def editor_status(state: AppState, task_id):
         output(task_progress(task), state)
         return
 
-    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
-
-    check_port = state.session.port
-    api = UEEditorAPI(port=check_port)
-    alive = api.is_alive()
-
-    if alive:
-        result = {"status": "online", "port": check_port, "info": api.get_info()}
-        if state.session.project_path and sys.platform == "win32":
-            mismatch = _detect_port_project_mismatch(check_port, state.session.project_path)
-            if mismatch:
-                result.update(mismatch)
-    else:
-        result = {"status": "not_running", "port": check_port}
-        if sys.platform == "win32":
-            try:
-                from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs, find_running_editors
-
-                running = find_running_editors()
-                if running:
-                    result["running_editors"] = [
-                        {"pid": editor["pid"], "project": editor.get("project")}
-                        for editor in running
-                    ]
-                    relevant = running
-                    if state.session.project_path:
-                        relevant = [
-                            editor for editor in running
-                            if _same_project_path(editor.get("project", ""), state.session.project_path)
-                        ]
-                    if relevant:
-                        dialogs = detect_ue_dialogs()
-                        if dialogs:
-                            result["status"] = "starting"
-                            result["dialogs"] = [{"title": dialog["title"]} for dialog in dialogs]
-                        else:
-                            result["status"] = "zombie"
-                        if state.session.project_dir and state.session.project_name:
-                            log_file = Path(state.session.project_dir) / "Saved" / "Logs" / f"{state.session.project_name}.log"
-                            log_error = _check_log_errors(log_file)
-                            if log_error:
-                                result["log_error"] = log_error
-            except Exception:
-                pass
-
-    if state.session.project_path:
-        try:
-            from cli_anything.unreal.utils.ue_backend import preflight_check
-
-            preflight = preflight_check(state.session.project_path, state.session.engine_root)
-            result["startup_precheck"] = _summarize_startup_precheck(preflight)
-        except Exception:
-            pass
-
-    output(result, state)
-
-
-@editor_group.command("list")
-@click.option("--scan-range", default="30010-30020", help="Port range to scan")
-@handle_error
-@click.pass_obj
-def editor_list(state: AppState, scan_range):
-    from cli_anything.unreal.utils.ue_backend import find_running_editors
-    from cli_anything.unreal.utils.ue_http_api import scan_editor_ports
-
-    parts = scan_range.split("-")
-    start = int(parts[0])
-    end = int(parts[1]) if len(parts) > 1 else start
-    instances = scan_editor_ports(port_range=(start, end))
-    processes = find_running_editors()
-    output(
-        {
-            "http_instances": [{"port": item["port"], "alive": item.get("alive", True)} for item in instances],
-            "processes": [{"pid": proc["pid"], "project": proc.get("project", "")} for proc in processes],
-        },
-        state,
-    )
+    output(_scan_editor_status_instances(state, scan_range), state)
 
 
 @editor_group.command("preflight")
@@ -288,36 +344,6 @@ def _find_matching_project_editors(project_path: str | None) -> tuple[list[dict]
         if _same_project_path(proc.get("project", ""), project_path)
     ]
     return running, matches
-
-
-def _detect_port_project_mismatch(port: int, project_path: str | None) -> dict | None:
-    if not project_path:
-        return None
-
-    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
-
-    running, _ = _find_matching_project_editors(project_path)
-    owner_pid = UEEditorAPI._get_pid_listening_on_port(port)
-    if not owner_pid:
-        return None
-
-    owner = next((proc for proc in running if proc.get("pid") == owner_pid), None)
-    if not owner:
-        return None
-
-    owner_project = owner.get("project", "")
-    if _same_project_path(owner_project, project_path):
-        return None
-
-    return {
-        "status": "project_mismatch",
-        "message": f"Port belongs to another project: {owner_project}",
-        "port_owner": {"pid": owner_pid, "project": owner_project},
-        "running_editors": [
-            {"pid": editor.get("pid"), "project": editor.get("project", "")}
-            for editor in running
-        ],
-    }
 
 
 def _kill_matching_project_editors(

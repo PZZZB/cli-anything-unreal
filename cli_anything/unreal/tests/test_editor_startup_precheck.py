@@ -22,9 +22,8 @@ def test_editor_status_offline_api_blocked_includes_log_error(mini_project):
     from cli_anything.unreal.unreal_cli import cli
 
     runner = CliRunner()
-    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[{"pid": 1234, "project": mini_project}]), \
-         patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
          patch("cli_anything.unreal.commands.editor._check_log_errors", return_value="Plugin 'libzstd' failed to load"), \
          patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
              "ready": False,
@@ -39,10 +38,8 @@ def test_editor_status_offline_api_blocked_includes_log_error(mini_project):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["status"] == "success"
-    assert data["result"]["status"] == "zombie"
-    assert data["result"]["log_error"] == "Plugin 'libzstd' failed to load"
-    assert data["result"]["startup_precheck"]["ready"] is False
-    assert data["result"]["startup_precheck"]["errors"] == ["engine error", "project error"]
+    assert data["result"][0]["status"] == "offline"
+    assert data["result"][0]["log_error"] == "Plugin 'libzstd' failed to load"
 
 
 def test_editor_status_offline_ignores_other_project_processes(mini_project):
@@ -51,11 +48,10 @@ def test_editor_status_offline_ignores_other_project_processes(mini_project):
 
     runner = CliRunner()
     other_project = str(Path(mini_project).with_name("Other.uproject"))
-    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 5678, "project": other_project},
          ]), \
-         patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
          patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
              "ready": True,
              "engine": {"errors": [], "warnings": []},
@@ -69,18 +65,23 @@ def test_editor_status_offline_ignores_other_project_processes(mini_project):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["status"] == "success"
-    assert data["result"]["status"] == "not_running"
-    assert data["result"]["running_editors"] == [{"pid": 5678, "project": other_project}]
+    instance = data["result"][0]
+    assert instance["status"] == "offline"
+    assert instance["pid"] == 5678
+    assert instance["port"] is None
+    assert instance["project_path"] == other_project
+    assert "editor launch" in instance["suggestion"]
 
 
-def test_editor_status_reports_project_mismatch_when_port_belongs_to_other_project(mini_project):
+def test_editor_status_lists_online_port_owner_even_when_other_project(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
     runner = CliRunner()
     other_project = str(Path(mini_project).with_name("Other.uproject"))
-    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=True), \
-         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.get_info", return_value={"ok": True}), \
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+         ]), \
          patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=5678), \
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 5678, "project": other_project},
@@ -98,9 +99,92 @@ def test_editor_status_reports_project_mismatch_when_port_belongs_to_other_proje
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["status"] == "success"
-    assert data["result"]["status"] == "project_mismatch"
-    assert data["result"]["port_owner"] == {"pid": 5678, "project": other_project}
-    assert data["result"]["message"].startswith("Port belongs to another project")
+    assert data["result"] == [
+        {"status": "online", "pid": 5678, "port": 30020, "project_path": other_project},
+    ]
+
+
+def test_editor_status_lists_all_editor_processes(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+             {"pid": 5678, "project": other_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30030), \
+         patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+             "ready": True,
+             "engine": {"errors": [], "warnings": []},
+             "project": {"errors": [], "warnings": []},
+         }):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    online, offline = data["result"]
+    assert online == {"status": "online", "pid": 1234, "port": 30020, "project_path": mini_project}
+    assert offline["status"] == "offline"
+    assert offline["pid"] == 5678
+    assert offline["port"] == 30030
+    assert offline["project_path"] == other_project
+    assert "Remote Control API is not reachable" in offline["message"]
+    assert "editor launch" in offline["suggestion"]
+    assert offline["next_command"] == f'cli-anything-unreal --project "{other_project}" editor launch'
+
+
+def test_editor_status_scans_running_project_config_ports_outside_default_range(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", side_effect=[
+            [],
+            [{"port": 30023, "alive": True, "info": {"ok": True}}],
+         ]) as scan_ports, \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30023):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert data["result"] == [
+        {"status": "online", "pid": 1234, "port": 30023, "project_path": mini_project},
+    ]
+    assert [call.kwargs["port_range"] for call in scan_ports.call_args_list] == [
+        (30010, 30020),
+        (30023, 30023),
+    ]
+
+
+def test_editor_list_command_removed():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "--output", "json",
+        "editor", "list",
+    ])
+
+    assert result.exit_code != 0
 
 
 def test_check_port_in_use_detects_plain_tcp_listener():
