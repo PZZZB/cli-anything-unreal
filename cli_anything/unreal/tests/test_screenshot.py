@@ -75,9 +75,11 @@ class TestScreenshot:
             )
 
         assert result["status"] == "ok"
+        assert result["foreground_ok"] is True
+        api.bring_to_foreground.assert_called_once()
         api.set_window_rect.assert_not_called()
 
-    def test_capture_restores_normal_window_rect(self, tmp_path):
+    def test_capture_does_not_rewrite_normal_window_rect(self, tmp_path):
         from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw
 
         api = MagicMock()
@@ -106,7 +108,41 @@ class TestScreenshot:
             )
 
         assert result["status"] == "ok"
-        api.set_window_rect.assert_called_once_with(100, 100, 1300, 900)
+        assert result["foreground_ok"] is True
+        api.bring_to_foreground.assert_called_once()
+        api.set_window_rect.assert_not_called()
+
+    def test_capture_sequence_does_not_prefocus_between_frames(self, tmp_path):
+        from cli_anything.unreal.core.screenshot import capture_screenshot_atlas
+
+        api = MagicMock()
+
+        def fake_capture(_api, filename, project_dir, *_args):
+            path = Path(project_dir) / "Saved" / "Screenshots" / "WindowsEditor" / f"{filename}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+                b"\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04"
+                b"\x00\x01\xf6\x178U\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            return {"status": "ok", "path_raw": str(path), "size_raw": 3}
+
+        with patch("cli_anything.unreal.core.screenshot._refresh_editor_viewports", return_value={}), \
+             patch("cli_anything.unreal.core.screenshot._ensure_editor_viewport_realtime"), \
+             patch("cli_anything.unreal.core.screenshot._capture_viewport_png_raw", side_effect=fake_capture) as capture_mock, \
+             patch("cli_anything.unreal.core.screenshot.time.sleep"):
+            result = capture_screenshot_atlas(
+                api,
+                frame_count=3,
+                interval=0.1,
+                project_dir=str(tmp_path),
+                filename_prefix="seq_no_prefocus",
+            )
+
+        assert result["status"] == "ok"
+        assert capture_mock.call_count == 3
+        api.bring_to_foreground.assert_not_called()
 
     def test_compress_for_agent_no_pillow(self, tmp_path):
         """Test graceful handling when Pillow is not available."""

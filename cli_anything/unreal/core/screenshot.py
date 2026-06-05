@@ -22,28 +22,6 @@ from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 # Default screenshot delay to allow viewport to render
 _DEFAULT_RENDER_DELAY = 1.0
 
-
-def _is_restorable_window_rect(rect: tuple | None) -> bool:
-    if not rect or len(rect) != 4:
-        return False
-    try:
-        left, top, right, bottom = [int(v) for v in rect]
-    except (TypeError, ValueError):
-        return False
-
-    width = right - left
-    height = bottom - top
-    if width < 640 or height < 480:
-        return False
-
-    # Windows reports minimized windows around -32000; restoring that rect
-    # shrinks/moves the editor into an unusable icon-sized window.
-    if min(left, top, right, bottom) <= -30000:
-        return False
-
-    return True
-
-
 def _build_ensure_viewport_realtime_py() -> str:
     """Editor Python: clear Remote-Desktop realtime lock + subsystem override.
 
@@ -156,9 +134,6 @@ def _capture_viewport_png_raw(
             "refresh": {},
         }
 
-    # Save original window rect so we can restore after capture
-    _orig_rect = api.get_window_rect()
-
     foreground_ok = api.bring_to_foreground()
     refresh_result = _refresh_editor_viewports(api)
 
@@ -215,13 +190,6 @@ def _capture_viewport_png_raw(
             "foreground_ok": foreground_ok,
             "refresh": refresh_result,
         }
-
-    # Restore original window rect (position + size) without changing Z-order
-    if _is_restorable_window_rect(_orig_rect) and sys.platform == "win32":
-        try:
-            api.set_window_rect(*_orig_rect)
-        except Exception:
-            pass
 
     size = save_path.stat().st_size
     return {
@@ -455,14 +423,6 @@ def capture_screenshot_atlas(
         prep_refresh = _refresh_editor_viewports(api)
 
         for i in range(frame_count):
-            # Second+ frame: refocus and settle so the desktop compositor and viewport catch up.
-            if i > 0:
-                try:
-                    api.bring_to_foreground()
-                except Exception:
-                    pass
-                time.sleep(1.25)
-
             fname = f"{filename_prefix}_{i:03d}"
             shot = _capture_viewport_png_raw(
                 api,

@@ -1,6 +1,7 @@
 """Tests for test_backend.py — Uses synthetic data only, no UE editor required."""
 
 import json
+import inspect
 import os
 import subprocess
 import tempfile
@@ -489,6 +490,16 @@ class TestHTTPAPI:
 
         assert calls
         assert max(calls) <= 0.5
+
+    def test_bring_to_foreground_does_not_resize_window(self):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        source = inspect.getsource(UEEditorAPI.bring_to_foreground)
+
+        assert "SetForegroundWindow" in source
+        assert "BringWindowToTop" in source
+        assert "SetWindowPos" not in source
+        assert "MonitorFromWindow" not in source
 
     def test_select_editor_window_prefers_main_unreal_editor_title(self):
         from cli_anything.unreal.utils.ue_http_api import _select_editor_window_hwnd
