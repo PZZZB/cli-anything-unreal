@@ -456,6 +456,79 @@ def _kill_process_tree(pid: int) -> bool:
         return False
 
 
+def _windows_cmdline_to_argv(cmdline: str) -> list[str]:
+    """Parse a Windows command line using the same API as the CRT."""
+    if sys.platform != "win32" or not cmdline:
+        return []
+
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        argc = ctypes.c_int()
+        shell32 = ctypes.windll.shell32
+        kernel32 = ctypes.windll.kernel32
+        shell32.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+        shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        argv = shell32.CommandLineToArgvW(cmdline, ctypes.byref(argc))
+        if not argv:
+            return []
+        try:
+            return [argv[i] for i in range(argc.value)]
+        finally:
+            kernel32.LocalFree(argv)
+    except Exception:
+        return []
+
+
+def _strip_uproject_arg(value: str | None) -> str:
+    if not value:
+        return ""
+    value = value.strip().strip('"')
+    return value if value.lower().endswith(".uproject") else ""
+
+
+def _extract_uproject_from_cmdline(cmdline: str) -> str:
+    """Extract the .uproject path from an UnrealEditor command line."""
+    args = _windows_cmdline_to_argv(cmdline)
+    if args:
+        for index, arg in enumerate(args):
+            lowered = arg.lower().lstrip("-/")
+            if lowered.startswith("project="):
+                project = _strip_uproject_arg(arg.split("=", 1)[1])
+                if project:
+                    return project
+            if lowered == "project" and index + 1 < len(args):
+                project = _strip_uproject_arg(args[index + 1])
+                if project:
+                    return project
+
+            direct = _strip_uproject_arg(arg)
+            if direct:
+                return direct
+
+    quoted = re.search(r'"([^"]+?\.uproject)"', cmdline, flags=re.IGNORECASE)
+    if quoted:
+        return quoted.group(1)
+
+    project_arg = re.search(
+        r'[-/]Project=(?:"([^"]+?\.uproject)"|([^\s"]+?\.uproject))',
+        cmdline,
+        flags=re.IGNORECASE,
+    )
+    if project_arg:
+        return project_arg.group(1) or project_arg.group(2) or ""
+
+    direct = re.search(
+        r'([A-Za-z]:\\[^\s"]+?\.uproject|[^\s"]+?\.uproject)',
+        cmdline,
+        flags=re.IGNORECASE,
+    )
+    return direct.group(1) if direct else ""
+
+
 def _run_subprocess(
     cmd: list[str],
     log_file: str,
@@ -1292,11 +1365,7 @@ def find_running_editors() -> list[dict]:
             for proc in data:
                 cmdline = proc.get("CommandLine", "")
                 pid = proc.get("ProcessId", 0)
-                project = ""
-                for token in cmdline.split():
-                    if token.endswith(".uproject") or token.endswith('.uproject"'):
-                        project = token.strip('"')
-                        break
+                project = _extract_uproject_from_cmdline(cmdline)
                 editors.append({
                     "pid": int(pid),
                     "project": project,
@@ -1324,11 +1393,7 @@ def find_running_editors() -> list[dict]:
                 if len(parts) >= 3:
                     cmdline = ",".join(parts[1:-1])
                     pid = parts[-1].strip()
-                    project = ""
-                    for token in cmdline.split():
-                        if token.endswith(".uproject") or token.endswith('.uproject"'):
-                            project = token.strip('"')
-                            break
+                    project = _extract_uproject_from_cmdline(cmdline)
                     editors.append({
                         "pid": int(pid) if pid.isdigit() else 0,
                         "project": project,

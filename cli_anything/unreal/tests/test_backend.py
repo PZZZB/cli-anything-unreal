@@ -438,6 +438,26 @@ class TestSession:
         finally:
             sock.close()
 
+    def test_extract_uproject_from_quoted_editor_cmdline(self):
+        from cli_anything.unreal.utils.ue_backend import _extract_uproject_from_cmdline
+
+        cmdline = (
+            r'"C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" '
+            r'"F:\Projects\Space Game\Space Game.uproject" -log'
+        )
+
+        assert _extract_uproject_from_cmdline(cmdline) == r"F:\Projects\Space Game\Space Game.uproject"
+
+    def test_extract_uproject_from_project_arg_cmdline(self):
+        from cli_anything.unreal.utils.ue_backend import _extract_uproject_from_cmdline
+
+        cmdline = (
+            r'"C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" '
+            r'-Project="F:\Projects\Space Game\Space Game.uproject" -WaitMutex'
+        )
+
+        assert _extract_uproject_from_cmdline(cmdline) == r"F:\Projects\Space Game\Space Game.uproject"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Test build.py (command assembly, no real build)
