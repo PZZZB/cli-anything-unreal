@@ -1,0 +1,37 @@
+{
+  "eval_id": 3,
+  "eval_name": "renderdoc-shadow-pass-debug",
+  "prompt": "帮我截个RenderDoc的帧，项目在F:\\MyProject\\MyProject.uproject，我要看下shadow pass的drawcall",
+  "assertions": [
+    {
+      "name": "uses-editor-exec-renderdoc-captureframe",
+      "description": "Response mentions `editor exec renderdoc.captureframe` as the capture method",
+      "check_type": "contains",
+      "expected": "renderdoc.captureframe"
+    },
+    {
+      "name": "checks-editor-status-first",
+      "description": "Response includes checking editor status or launching the editor before capturing",
+      "check_type": "keyword",
+      "expected": ["editor status", "editor launch", "editor preflight"]
+    },
+    {
+      "name": "mentions-renderdoc-plugin-prerequisite",
+      "description": "Response mentions the RenderDoc plugin prerequisite",
+      "check_type": "keyword",
+      "expected": ["RenderDoc plugin", "RenderDoc插件", "+EnabledPlugins=RenderDoc"]
+    },
+    {
+      "name": "mentions-project-path",
+      "description": "Response uses --project with the user-specified project path",
+      "check_type": "contains",
+      "expected": "MyProject.uproject"
+    },
+    {
+      "name": "explains-shadow-pass-analysis",
+      "description": "Response mentions how to analyze shadow pass draw calls in the captured .rdc",
+      "check_type": "keyword",
+      "expected": ["shadow", "draw call", "drawcall", "shadow pass"]
+    }
+  ]
+}

@@ -9,9 +9,9 @@ from cli_anything.unreal.commands import AppState, handle_error, output
 
 
 SKILL_TARGETS = {
-    "claude_global": lambda: Path.home() / ".claude" / "skills" / "cli-anything-unreal",
-    "codebuddy_global": lambda: Path.home() / ".codebuddy" / "agents" / "cli-anything-unreal",
-    "gemini_global": lambda: Path.home() / ".gemini" / "skills" / "cli-anything-unreal",
+    "claude_global": lambda: Path.home() / ".claude" / "skills" / "ue-cli",
+    "codebuddy_global": lambda: Path.home() / ".codebuddy" / "agents" / "ue-cli",
+    "gemini_global": lambda: Path.home() / ".gemini" / "skills" / "ue-cli",
 }
 
 

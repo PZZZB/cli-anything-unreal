@@ -14,6 +14,15 @@ import pytest
 class TestInstallSkills:
     """Tests for commands/skills.py — install-skills CLI."""
 
+    def test_bundled_skill_metadata_uses_ue_cli_name(self):
+        """Skill name matches the new package/CLI name."""
+        source_dir = Path(__file__).parent.parent / "skills"
+        skill_md = (source_dir / "SKILL.md").read_text(encoding="utf-8")
+        evals = json.loads((source_dir / "evals" / "evals.json").read_text(encoding="utf-8"))
+
+        assert "name: ue-cli" in skill_md
+        assert evals["skill_name"] == "ue-cli"
+
     def test_install_to_custom_target(self, tmp_path):
         """--target writes the full skill tree to the given dir.
 
@@ -60,6 +69,27 @@ class TestInstallSkills:
         assert data["result"]["installed_count"] == 2
         assert (t1 / "SKILL.md").is_file()
         assert (t2 / "SKILL.md").is_file()
+
+    def test_default_targets_use_ue_cli_directory(self, tmp_path):
+        """Default skill installs use the package/CLI name as their leaf dir."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = CliRunner().invoke(cli, ["--output", "json", "install-skills"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["installed_count"] == 3
+        paths = {
+            name: Path(info["path"])
+            for name, info in data["result"]["targets"].items()
+        }
+        assert paths["claude_global"] == tmp_path / ".claude" / "skills" / "ue-cli"
+        assert paths["codebuddy_global"] == tmp_path / ".codebuddy" / "agents" / "ue-cli"
+        assert paths["gemini_global"] == tmp_path / ".gemini" / "skills" / "ue-cli"
+        assert all((path / "SKILL.md").is_file() for path in paths.values())
 
     def test_install_overwrites_existing_target(self, tmp_path):
         """If the target already exists it is replaced, not merged."""

@@ -1,4 +1,4 @@
-"""test_full_e2e.py — End-to-end tests for cli-anything-unreal.
+"""test_full_e2e.py — End-to-end tests for ue-cli.
 
 These tests require:
 1. A UE editor running with AutomationTestAPI plugin
@@ -119,7 +119,8 @@ class TestEditorConnection:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["status"] == "success"
-        assert data["result"]["status"] == "online"
+        online = [item for item in data["result"] if item["port"] == api_port and item["status"] == "online"]
+        assert online, data["result"]
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -1,4 +1,4 @@
-﻿"""Click CLI main entry point for cli-anything-unreal."""
+﻿"""Click CLI main entry point for ue-cli."""
 
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ def _default_output_mode() -> str:
 @click.group(invoke_without_command=True)
 @click.version_option(
     __version__,
-    prog_name="cli-anything-unreal",
+    prog_name="ue-cli",
     message=f"%(prog)s, version %(version)s\nCliAnythingBridge bundled version {_BRIDGE_VERSION}",
 )
 @click.option("--output", "output_mode", type=click.Choice(["json", "text"]), default=None)
@@ -159,7 +159,7 @@ def cli(ctx, output_mode, project_path, port, list_commands):
 
     if ctx.invoked_subcommand is None:
         if state.json_output:
-            emit_json({"name": "cli-anything-unreal", "commands": COMMAND_SPECS})
+            emit_json({"name": "ue-cli", "commands": COMMAND_SPECS})
         else:
             from cli_anything.unreal.commands.repl import repl_cmd
 

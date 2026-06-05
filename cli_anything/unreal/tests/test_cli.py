@@ -1,5 +1,6 @@
 """Tests for test_cli.py — Uses synthetic data only, no UE editor required."""
 
+import ast
 import json
 import os
 import subprocess
@@ -36,10 +37,47 @@ class TestCLI:
         result = runner.invoke(cli, ["--version"])
 
         assert result.exit_code == 0
-        assert "cli-anything-unreal" in result.output
+        assert "ue-cli" in result.output
         assert "0.1.1" in result.output
         assert "CliAnythingBridge bundled version" in result.output
         assert get_bundled_version() in result.output
+
+    def test_root_json_uses_cli_command_name(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--output", "json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["name"] == "ue-cli"
+
+    def test_setup_metadata_uses_ue_cli_name(self):
+        setup_py = Path(__file__).parents[3] / "setup.py"
+        tree = ast.parse(setup_py.read_text(encoding="utf-8"))
+        setup_call = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "setup"
+        )
+        entry_points = next(
+            kw.value
+            for kw in setup_call.keywords
+            if kw.arg == "entry_points"
+        )
+        entry_points_value = ast.literal_eval(entry_points)
+        package_name = next(
+            kw.value
+            for kw in setup_call.keywords
+            if kw.arg == "name"
+        )
+
+        assert ast.literal_eval(package_name) == "ue-cli"
+        assert entry_points_value["console_scripts"] == [
+            "ue-cli=cli_anything.unreal.unreal_cli:main",
+        ]
 
     def test_screenshot_dynamic_help_minimal_options(self):
         from click.testing import CliRunner

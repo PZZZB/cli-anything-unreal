@@ -421,7 +421,7 @@ def _allocate_log_path(project_dir: str | None, label: str) -> str:
         log_dir = Path(project_dir) / "Saved" / "Logs"
     else:
         import tempfile
-        log_dir = Path(tempfile.gettempdir()) / "cli_anything_unreal_logs"
+        log_dir = Path(tempfile.gettempdir()) / "ue_cli_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return str(log_dir / filename)
 
@@ -884,7 +884,7 @@ def check_remote_control_config(project_dir: str) -> dict:
             "issues": [
                 "DefaultRemoteControl.ini not found. "
                 "Remote console commands and Python execution will be blocked. "
-                "Run: cli-anything-unreal editor enable-remote"
+                "Run: ue-cli editor enable-remote"
             ],
             "file": None,
         }
@@ -1146,7 +1146,7 @@ def check_project_build(uproject_path: str, engine_build_id: str = "") -> dict:
                 f"BuildId MISMATCH: engine='{engine_build_id[:8]}...' vs project='{project_build_id[:8]}...'. "
                 f"Project was compiled with a different engine version. "
                 f"Launching will fail with 'modules built with a different engine version'. "
-                f"Recompile: cli-anything-unreal --project {uproject_path} build compile"
+                f"Recompile: ue-cli --project {uproject_path} build compile"
             )
             details["build_id_match"] = False
         else:
@@ -1187,7 +1187,7 @@ def check_project_build(uproject_path: str, engine_build_id: str = "") -> dict:
         errors.append(
             f"Binaries/Win64/ directory not found. "
             f"Project '{project_name}' has never been compiled. "
-            f"Run: cli-anything-unreal build compile --project {uproject_path}"
+            f"Run: ue-cli build compile --project {uproject_path}"
         )
         return {
             "ready": False,
@@ -1231,7 +1231,7 @@ def check_project_build(uproject_path: str, engine_build_id: str = "") -> dict:
         errors.append(
             f"Compiled modules not found: {', '.join(missing_modules)}. "
             f"Project C++ code has not been compiled. "
-            f"Run: cli-anything-unreal build compile --project {uproject_path}"
+            f"Run: ue-cli build compile --project {uproject_path}"
         )
 
     if stale_modules:

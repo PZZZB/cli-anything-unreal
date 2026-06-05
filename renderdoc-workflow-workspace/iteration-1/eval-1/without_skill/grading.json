@@ -1,0 +1,37 @@
+﻿{
+  "eval_id": 1,
+  "eval_name": "renderdoc-capture-chinese",
+  "config": "without_skill",
+  "assertions": [
+    {
+      "name": "uses-editor-exec-renderdoc-captureframe",
+      "text": "Response uses `editor exec renderdoc.captureframe` as the primary capture method",
+      "passed": false,
+      "evidence": "Response mentions `RenderDoc.CaptureFrame` as a console command (line 26-28) but does NOT use `ue-cli editor exec` syntax. It mentions the tool only in passing under 'Method 3: Command Line / Programmatic Capture' and suggests GUI/keyboard methods as primary."
+    },
+    {
+      "name": "mentions-renderdoc-plugin-prerequisite",
+      "text": "Response mentions that the RenderDoc plugin must be loaded/enabled",
+      "passed": true,
+      "evidence": "Line 14-17: 'Enable the plugin: Go to Edit > Plugins, search for RenderDoc, and enable it'"
+    },
+    {
+      "name": "mentions-windowed-mode",
+      "text": "Response mentions that windowed mode is required (not -nullrhi)",
+      "passed": false,
+      "evidence": "No mention of -nullrhi or windowed mode requirement anywhere in the response"
+    },
+    {
+      "name": "distinguishes-gpu-capture-from-screenshot",
+      "text": "Response does not suggest HighResShot or TakeScreenshot for GPU capture",
+      "passed": false,
+      "evidence": "Lines 40-46: Suggests `HighResShot 2` console command for screenshots alongside GPU capture, which could confuse the two concepts"
+    },
+    {
+      "name": "mentions-rdc-analysis",
+      "text": "Response mentions .rdc analysis for shader debugging or draw call inspection",
+      "passed": true,
+      "evidence": "Lines 54-63: Mentions Pixel History, Shader Viewer, Texture Viewer for shader debugging"
+    }
+  ]
+}

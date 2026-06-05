@@ -140,7 +140,7 @@ def test_editor_status_lists_all_editor_processes(mini_project):
     assert offline["project_path"] == other_project
     assert "Remote Control API is not reachable" in offline["message"]
     assert "editor launch" in offline["suggestion"]
-    assert offline["next_command"] == f'cli-anything-unreal --project "{other_project}" editor launch'
+    assert offline["next_command"] == f'ue-cli --project "{other_project}" editor launch'
 
 
 def test_editor_status_scans_running_project_config_ports_outside_default_range(mini_project):

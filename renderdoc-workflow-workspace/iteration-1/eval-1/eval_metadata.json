@@ -1,0 +1,37 @@
+{
+  "eval_id": 1,
+  "eval_name": "renderdoc-capture-chinese",
+  "prompt": "我的UE5项目里材质渲染结果不对，我想用RenderDoc截一帧GPU数据来调试，怎么用ue-cli做？",
+  "assertions": [
+    {
+      "name": "uses-editor-exec-renderdoc-captureframe",
+      "description": "Response mentions `editor exec renderdoc.captureframe` as the primary capture method",
+      "check_type": "contains",
+      "expected": "renderdoc.captureframe"
+    },
+    {
+      "name": "mentions-renderdoc-plugin-prerequisite",
+      "description": "Response mentions that the RenderDoc plugin must be loaded/enabled in the project",
+      "check_type": "keyword",
+      "expected": ["RenderDoc plugin", "RenderDoc插件", "+EnabledPlugins=RenderDoc"]
+    },
+    {
+      "name": "mentions-windowed-mode",
+      "description": "Response mentions that windowed mode is required (not -nullrhi)",
+      "check_type": "keyword",
+      "expected": ["windowed", "-nullrhi", "窗口模式"]
+    },
+    {
+      "name": "distinguishes-gpu-capture-from-screenshot",
+      "description": "Response clearly distinguishes GPU frame capture (.rdc) from viewport screenshot — does not suggest HighResShot or TakeScreenshot for the GPU capture purpose",
+      "check_type": "not_contains",
+      "expected": ["HighResShot", "TakeScreenshot"]
+    },
+    {
+      "name": "mentions-rdc-analysis",
+      "description": "Response mentions that the .rdc file can be analyzed for shader debugging or draw call inspection",
+      "check_type": "keyword",
+      "expected": ["shader", "draw call", "drawcall", ".rdc", "RenderDoc"]
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+[
+  {"query": "我想用RenderDoc截一帧GPU数据来调试shader，ue-cli能做吗", "should_trigger": true},
+  {"query": "帮我capture一个renderdoc frame看看shadow pass的draw call有多少", "should_trigger": true},
+  {"query": "UE5项目里材质渲染不正确，需要GPU frame capture来调试，怎么操作", "should_trigger": true},
+  {"query": "我需要在Unreal编辑器里用renderdoc截帧分析一个像素着色器的bug", "should_trigger": true},
+  {"query": "虚幻引擎5 renderdoc截帧 不会用 cli-anything", "should_trigger": true},
+  {"query": "如何用CLI工具在UE5里触发RenderDoc的captureframe", "should_trigger": true},
+  {"query": "UE5 GPU性能分析，我要看每帧的draw call和shader执行", "should_trigger": true},
+  {"query": "帮我截个RenderDoc的帧看看shadow pass的drawcall", "should_trigger": true},
+  {"query": "我用renderdoc拍了帧，想分析下这个rdc文件里的shadow pass", "should_trigger": false},
+  {"query": "RenderDoc怎么安装？从哪里下载？", "should_trigger": false},
+  {"query": "在Unity里怎么用RenderDoc截帧", "should_trigger": false},
+  {"query": "RenderDoc Python API怎么写脚本分析rdc文件", "should_trigger": false},
+  {"query": "Godot引擎怎么用renderdoc抓帧", "should_trigger": false},
+  {"query": "帮我用Python写一个RenderDoc replay脚本，不需要UE", "should_trigger": false},
+  {"query": "Vulkan渲染器中如何集成RenderDoc capture功能，纯C++代码", "should_trigger": false},
+  {"query": "RenderDoc capture文件太大了，怎么压缩rdc", "should_trigger": false}
+]

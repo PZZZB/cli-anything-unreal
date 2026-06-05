@@ -163,7 +163,7 @@ def _add_offline_recovery_hint(entry: dict) -> None:
             "Run editor launch for this project. It will terminate a stale matching editor process "
             "and start a fresh editor if needed."
         )
-        entry["next_command"] = f'cli-anything-unreal --project "{project_path}" editor launch'
+        entry["next_command"] = f'ue-cli --project "{project_path}" editor launch'
     else:
         entry["suggestion"] = "Run editor launch with --project <path-to.uproject> to start a reachable editor."
 
@@ -743,7 +743,7 @@ def editor_exec(state: AppState, command):
     if "error" in result and "400" in str(result["error"]):
         result["hint"] = (
             "Console command execution may be disabled in Remote Control settings. "
-            "Run: cli-anything-unreal editor enable-remote"
+            "Run: ue-cli editor enable-remote"
         )
     elif not result or result == {}:
         result = {
@@ -993,7 +993,7 @@ def cvar_set(state: AppState, name, value):
         raise AppError(
             "CVAR_SET_FAILED",
             "CVar set failed. Remote console command execution is disabled.",
-            suggestion="Run: cli-anything-unreal editor enable-remote, then restart editor.",
+            suggestion="Run: ue-cli editor enable-remote, then restart editor.",
             details={"name": name, "value": value},
         )
     output({"name": name, "value": value, "status": "ok", **result}, state)

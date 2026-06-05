@@ -2,137 +2,128 @@
 
 ## Universal Workflow: Query First, Then Set
 
-All UE object operations follow the same progressive disclosure pattern — the
-same path a human takes in the editor:
+All UE object ops use progressive disclosure, same as editor UI:
 
 ```
-1. Find the object     → scene list / asset list / material list (returns paths + class names)
-2. Discover its API    → editor api-discover <path-or-class> (property/function names)
-3. Drill into details  → editor api-discover <path-or-class> -d Prop1,Func2 (types, tooltips)
-4. Read runtime values → scene property / asset property
-5. Modify values       → scene property Prop=Value / asset property Prop=Value
+1. Find the object     -> scene list / asset list / material list (returns paths + class names)
+2. Discover its API    -> editor api-discover <path-or-class> (property/function names)
+3. Drill into details  -> editor api-discover <path-or-class> -d Prop1,Func2 (types, tooltips)
+4. Read runtime values -> scene property / asset property
+5. Modify values       -> scene property Prop=Value / asset property Prop=Value
 ```
 
-`api-discover` accepts a class name, an asset path, an actor path, or a
-**component subobject path** — it auto-detects the type.
+`api-discover` accepts class name, asset path, actor path, or **component subobject path**. It auto-detects type.
 
-## Scene Workflow: Actor → Component → Property
+## Scene Workflow: Actor -> Component -> Property
 
-The three commands map 1:1 to clicking Actor → Component → field in the editor.
-**Lights / cameras / most built-in actors hold their functional properties on a
-native component, not on the actor** — always check the components tree first.
+Commands map 1:1 to Actor -> Component -> field. Lights/cameras/many built-ins store functional props on native components, not actor. Check component tree first.
 
 ```bash
 # 1. Find actor
-cli-anything-unreal scene list --class DirectionalLight
+ue-cli scene list --class DirectionalLight
 
-# 2. api-discover <actor> — returns components tree (matches Details panel)
-cli-anything-unreal editor api-discover ".../DirectionalLight_0"
-# → components: [{ path: ".../DirectionalLight_0.LightComponent0",
+# 2. api-discover <actor> - returns components tree (matches Details panel)
+ue-cli editor api-discover ".../DirectionalLight_0"
+# -> components: [{ path: ".../DirectionalLight_0.LightComponent0",
 #                  class: "DirectionalLightComponent", is_root: true }]
 
-# 3. api-discover <component.path> — drill into it
-cli-anything-unreal editor api-discover ".../DirectionalLight_0.LightComponent0" -d Intensity
+# 3. api-discover <component.path> - drill into it
+ue-cli editor api-discover ".../DirectionalLight_0.LightComponent0" -d Intensity
 
-# 4. scene property — accepts actor OR component path
-cli-anything-unreal scene property ".../DirectionalLight_0.LightComponent0" Intensity=50.0
+# 4. scene property - accepts actor OR component path
+ue-cli scene property ".../DirectionalLight_0.LightComponent0" Intensity=50.0
 ```
 
-Editor-only visualizers (arrow gizmos, billboard icons) are filtered from the
-components tree by default to match the Details panel.
+Editor-only visualizers (gizmos/billboards) filtered by default to match Details panel.
 
 ## Asset Manipulation
 
 ```bash
 # Discover asset class and properties (auto-detects class from asset path)
-cli-anything-unreal editor api-discover /Game/MyAsset
-cli-anything-unreal editor api-discover /Game/MyAsset -d BlendMode,ShadingModel
+ue-cli editor api-discover /Game/MyAsset
+ue-cli editor api-discover /Game/MyAsset -d BlendMode,ShadingModel
 
 # Or use class name directly if you already know it
-cli-anything-unreal editor api-discover Material -d BlendMode,ShadingModel
+ue-cli editor api-discover Material -d BlendMode,ShadingModel
 
 # Get/Set property values
-cli-anything-unreal asset property /Game/MyAsset BlendMode
-cli-anything-unreal asset property /Game/MyAsset BlendMode=Translucent
+ue-cli asset property /Game/MyAsset BlendMode
+ue-cli asset property /Game/MyAsset BlendMode=Translucent
 
 # Rename and duplicate
-cli-anything-unreal asset rename /Game/Old /Game/New
-cli-anything-unreal asset duplicate /Game/Old /Game/New --force
-
-# Rename and duplicate
-cli-anything-unreal asset rename /Game/Old /Game/New
-cli-anything-unreal asset duplicate /Game/Old /Game/New --force
+ue-cli asset rename /Game/Old /Game/New
+ue-cli asset duplicate /Game/Old /Game/New --force
 ```
 
-See [Asset Deletion — Safe Workflow](#asset-deletion--safe-workflow) below for the full delete workflow with reference checks.
+See [Asset Deletion - Safe Workflow](#asset-deletion--safe-workflow) for reference checks.
 
-`asset delete` checks references before deleting, avoiding modal dialogs:
+`asset delete` checks references before deleting, avoiding modals:
 
 ```bash
 # 1. Check what references the asset
-cli-anything-unreal asset refs /Game/M_Old
-# → {"asset": "/Game/M_Old", "referencers": ["/Game/Maps/Level1"], "count": 1}
+ue-cli asset refs /Game/M_Old
+# -> {"asset": "/Game/M_Old", "referencers": ["/Game/Maps/Level1"], "count": 1}
 
-# 2. Delete without --force — blocked because of references
-cli-anything-unreal asset delete /Game/M_Old
-# → {"status": "has_references", "deleted": false, "hint": "Use --force to delete anyway"}
+# 2. Delete without --force - blocked because of references
+ue-cli asset delete /Game/M_Old
+# -> {"status": "has_references", "deleted": false, "hint": "Use --force to delete anyway"}
 
 # 3. Force delete (referencers will have broken references)
-cli-anything-unreal asset delete /Game/M_Old --force
-# → {"status": "ok", "deleted": true, "had_references": true}
+ue-cli asset delete /Game/M_Old --force
+# -> {"status": "ok", "deleted": true, "had_references": true}
 ```
 
-`asset duplicate --force` pre-deletes the destination before duplicating, avoiding the "overwrite?" dialog entirely.
+`asset duplicate --force` pre-deletes destination, avoiding overwrite dialog.
 
 ## Scene Manipulation
 
 ```bash
 # Discover actor class and properties (auto-detects class from actor path)
-cli-anything-unreal editor api-discover <actor_path>
-cli-anything-unreal editor api-discover <actor_path> -d Intensity,bVisible
+ue-cli editor api-discover <actor_path>
+ue-cli editor api-discover <actor_path> -d Intensity,bVisible
 
 # Search actors by name
-cli-anything-unreal scene list -q "DirectionalLight"
+ue-cli scene list -q "DirectionalLight"
 
 # Get/Set property
-cli-anything-unreal scene property <actor_path> Intensity
-cli-anything-unreal scene property <actor_path> Intensity=5.0
+ue-cli scene property <actor_path> Intensity
+ue-cli scene property <actor_path> Intensity=5.0
 
 # Check transform
-cli-anything-unreal scene get-transform <actor_path>
+ue-cli scene get-transform <actor_path>
 
 # List components
-cli-anything-unreal scene list-components <actor_path>
+ue-cli scene list-components <actor_path>
 
 # Find which material an actor uses
-cli-anything-unreal scene get-material <actor_path>
+ue-cli scene get-material <actor_path>
 ```
 
 ## Blueprint Editing
 
 ```bash
 # 1. Find the blueprint
-cli-anything-unreal blueprint list --path /Game/Blueprints/
+ue-cli blueprint list --path /Game/Blueprints/
 
 # 2. Inspect current state (graphs, nodes, variables)
-cli-anything-unreal blueprint info /Game/BP_Enemy
+ue-cli blueprint info /Game/BP_Enemy
 
 # 3. Add a variable
-cli-anything-unreal blueprint add-variable /Game/BP_Enemy --name Health --type float
+ue-cli blueprint add-variable /Game/BP_Enemy --name Health --type float
 
 # 4. Add a function
-cli-anything-unreal blueprint add-function /Game/BP_Enemy --name TakeDamage
+ue-cli blueprint add-function /Game/BP_Enemy --name TakeDamage
 
 # 5. Clean up unused variables
-cli-anything-unreal blueprint delete-unused-variables /Game/BP_Enemy
+ue-cli blueprint delete-unused-variables /Game/BP_Enemy
 
 # 6. Compile and verify
-cli-anything-unreal blueprint compile /Game/BP_Enemy
+ue-cli blueprint compile /Game/BP_Enemy
 ```
 
 ## Operations Without Dedicated Subcommands
 
-Some common operations (adding components to blueprints, spawning actors, setting default values on components) don't have dedicated CLI subcommands. Use `editor run-script` for these — don't spend time searching for a subcommand that doesn't exist.
+For adding Blueprint components, spawning actors, setting component defaults, etc., use `editor run-script`. Do not hunt for absent subcommands.
 
 **Add a component to a Blueprint:**
 ```python
@@ -142,7 +133,7 @@ bp_path = "/Game/Blueprints/BP_Enemy"
 bp = unreal.load_asset(bp_path)
 subsystem = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
 
-# Gather existing subobject handles — first one is the root
+# Gather existing subobject handles - first one is the root
 handles = subsystem.k2_gather_subobject_data_for_blueprint(bp)
 
 # Add a StaticMeshComponent under the root
@@ -178,12 +169,12 @@ result = {"status": "ok", "actor": actor.get_path_name()}
 
 ```bash
 # Create and open a new level
-cli-anything-unreal editor new-level /Game/Maps/NewLevel
+ue-cli editor new-level /Game/Maps/NewLevel
 
 # Save the current level
-cli-anything-unreal editor save-level
+ue-cli editor save-level
 ```
 
-If the level path already exists, the command refuses to avoid modal dialogs — use `asset delete` first or pick a different path.
+Existing level path -> command refuses to avoid modal. Use `asset delete` first or choose different path.
 
-**Known limitation:** If Python-based commands (scene list, api-discover with actor paths, run-script, etc.) were executed in this session, `new-level` may crash the editor due to a UE PythonScriptPlugin bug (retained UObject references cause `World Memory Leaks` assert). Workaround: relaunch the editor with `editor launch` before creating a new level, or create levels early before running queries.
+**Known limitation:** after Python-based commands in same session (`scene list`, actor-path `api-discover`, `run-script`), `new-level` may crash editor due UE PythonScriptPlugin retained UObject refs (`World Memory Leaks` assert). Workaround: relaunch editor before creating level, or create levels early.

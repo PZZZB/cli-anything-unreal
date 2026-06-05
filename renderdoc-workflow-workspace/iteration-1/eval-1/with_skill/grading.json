@@ -1,0 +1,37 @@
+﻿{
+  "eval_id": 1,
+  "eval_name": "renderdoc-capture-chinese",
+  "config": "with_skill",
+  "assertions": [
+    {
+      "name": "uses-editor-exec-renderdoc-captureframe",
+      "text": "Response uses `editor exec renderdoc.captureframe` as the primary capture method",
+      "passed": true,
+      "evidence": "Line 63: `ue-cli editor exec \"renderdoc.captureframe\"` is the core capture command"
+    },
+    {
+      "name": "mentions-renderdoc-plugin-prerequisite",
+      "text": "Response mentions that the RenderDoc plugin must be loaded/enabled",
+      "passed": true,
+      "evidence": "Lines 7-24: Mentions `+EnabledPlugins=RenderDoc` in DefaultEngine.ini, manual enable via Edit鈫扨lugins鈫扲enderDoc, and verification command"
+    },
+    {
+      "name": "mentions-windowed-mode",
+      "text": "Response mentions that windowed mode is required (not -nullrhi)",
+      "passed": true,
+      "evidence": "Line 28: 'RenderDoc 闇€瑕佺湡瀹炵殑 RHI 鍚庣锛屼笉鑳戒娇鐢?`-nullrhi` 妯″紡鍚姩'"
+    },
+    {
+      "name": "distinguishes-gpu-capture-from-screenshot",
+      "text": "Response does not suggest HighResShot or TakeScreenshot for GPU capture",
+      "passed": true,
+      "evidence": "Response clearly uses `editor exec renderdoc.captureframe` for GPU capture and `screenshot capture` for visual reference 鈥?no mention of HighResShot or TakeScreenshot"
+    },
+    {
+      "name": "mentions-rdc-analysis",
+      "text": "Response mentions .rdc analysis for shader debugging or draw call inspection",
+      "passed": true,
+      "evidence": "Lines 76-85: Lists shader debugging, draw call inspection, texture/RT verification, performance analysis as .rdc analysis tasks; also mentions renderdoc-mcp skill"
+    }
+  ]
+}

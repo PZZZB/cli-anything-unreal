@@ -1,0 +1,37 @@
+{
+  "eval_id": 2,
+  "eval_name": "renderdoc-capture-with-screenshot",
+  "prompt": "I need to capture a GPU frame in Unreal to debug a shader issue. The editor is already running on port 30010. I want to capture the frame and also save a screenshot for comparison.",
+  "assertions": [
+    {
+      "name": "uses-editor-exec-renderdoc-captureframe",
+      "description": "Response mentions `editor exec renderdoc.captureframe` as the GPU capture method",
+      "check_type": "contains",
+      "expected": "renderdoc.captureframe"
+    },
+    {
+      "name": "uses-screenshot-capture",
+      "description": "Response mentions `screenshot capture` for the visual reference screenshot",
+      "check_type": "contains",
+      "expected": "screenshot capture"
+    },
+    {
+      "name": "mentions-renderdoc-plugin-prerequisite",
+      "description": "Response mentions the RenderDoc plugin prerequisite",
+      "check_type": "keyword",
+      "expected": ["RenderDoc plugin", "+EnabledPlugins=RenderDoc"]
+    },
+    {
+      "name": "correct-port-usage",
+      "description": "Response uses --port 30010 since the user specified the editor is on that port",
+      "check_type": "contains",
+      "expected": "30010"
+    },
+    {
+      "name": "explains-rdc-output",
+      "description": "Response explains what the .rdc output is and where it goes",
+      "check_type": "keyword",
+      "expected": [".rdc", "RenderDoc", "capture"]
+    }
+  ]
+}

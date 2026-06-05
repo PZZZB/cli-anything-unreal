@@ -1,0 +1,23 @@
+﻿{
+  "skill_name": "ue-cli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "鎴戠殑UE5椤圭洰閲屾潗璐ㄦ覆鏌撶粨鏋滀笉瀵癸紝鎴戞兂鐢≧enderDoc鎴竴甯PU鏁版嵁鏉ヨ皟璇曪紝鎬庝箞鐢╟li-anything-unreal鍋氾紵",
+      "expected_output": "Should reference the RenderDoc frame capture workflow: check editor status, ensure RenderDoc plugin is loaded, use `editor exec renderdoc.captureframe` to capture, optionally take a screenshot for visual reference. Should mention prerequisites (plugin enabled in DefaultEngine.ini, windowed mode required).",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I need to capture a GPU frame in Unreal to debug a shader issue. The editor is already running on port 30010. I want to capture the frame and also save a screenshot for comparison.",
+      "expected_output": "Should use `editor exec renderdoc.captureframe` for the GPU capture and `screenshot capture` for the visual reference. Should mention the .rdc file location and that the RenderDoc plugin must be loaded. Should NOT suggest HighResShot or TakeScreenshot for the GPU frame capture (those are viewport screenshots, not GPU captures).",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "甯垜鎴釜RenderDoc鐨勫抚锛岄」鐩湪F:\\MyProject\\MyProject.uproject锛屾垜瑕佺湅涓媠hadow pass鐨刣rawcall",
+      "expected_output": "Should follow the RenderDoc capture workflow: (1) check editor status or launch if needed, (2) exec renderdoc.captureframe, (3) mention that the .rdc can be analyzed for shadow pass draw calls in RenderDoc. Should mention prerequisites like RenderDoc plugin being enabled.",
+      "files": []
+    }
+  ]
+}

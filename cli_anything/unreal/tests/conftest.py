@@ -1,4 +1,4 @@
-﻿"""conftest.py - Shared pytest configuration for cli-anything-unreal tests."""
+﻿"""conftest.py - Shared pytest configuration for ue-cli tests."""
 
 import json
 import uuid

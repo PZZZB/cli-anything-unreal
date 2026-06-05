@@ -1,4 +1,4 @@
-﻿# Test Guide
+# Test Guide
 
 ## Unit Tests
 
@@ -10,7 +10,7 @@ python -m pytest cli_anything/unreal/tests/test_core.py cli_anything/unreal/test
 
 ## Bounded E2E Smoke
 
-Use the F:\Test574 project by default, require JSON protocol, and either verify an already-running editor or auto-launch it with a hard timeout.
+Default project: `F:\Test574`. Requires JSON protocol. Verifies existing editor or auto-launches with hard timeout.
 
 ```bash
 set UE_TEST_PROJECT=F:\Test574\Test574.uproject
@@ -18,15 +18,15 @@ python -m pytest cli_anything/unreal/tests/test_full_e2e.py -q --e2e --e2e-smoke
 ```
 
 Behavior:
-- If the editor is already reachable, tests proceed immediately.
-- If it is not reachable and `--e2e-auto-launch` is absent, tests fail fast instead of hanging.
-- If `--e2e-auto-launch` is present, the suite runs `editor launch --timeout <N>` and fails clearly on launch error or timeout.
+- Reachable editor -> tests run.
+- Not reachable + no `--e2e-auto-launch` -> fail fast.
+- `--e2e-auto-launch` -> run `editor launch --timeout <N>`, fail clearly on launch error/timeout.
 
 ## Full E2E
 
-The current suite is intentionally reduced to a bounded smoke subset until the rest of the legacy E2E cases are migrated to the new `--output json` protocol and explicit launch gating.
+Suite stays bounded smoke until legacy E2E migrates to `--output json` protocol + explicit launch gating.
 
-
-Current environment note:
-- F:\Test574\Test574.uproject preflight passes, but auto-launch currently times out because the editor process starts without exposing the Remote Control API on port 30010. Smoke E2E therefore cannot be marked passing on this machine until that project-side startup issue is fixed.
-
+Current machine note:
+- `F:\Test574\Test574.uproject` preflight passes.
+- Auto-launch currently times out: editor starts but Remote Control API not exposed on port 30010.
+- Smoke E2E cannot be called passing here until project-side startup fixed.

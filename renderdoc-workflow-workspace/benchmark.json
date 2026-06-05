@@ -1,0 +1,101 @@
+﻿{
+  "evals": [
+    {
+      "eval_id": 1,
+      "eval_name": "renderdoc-capture-chinese",
+      "prompt": "鎴戠殑UE5椤圭洰閲屾潗璐ㄦ覆鏌撶粨鏋滀笉瀵癸紝鎴戞兂鐢≧enderDoc鎴竴甯PU鏁版嵁鏉ヨ皟璇曪紝鎬庝箞鐢╟li-anything-unreal鍋氾紵",
+      "with_skill": {
+        "output_path": "iteration-1/eval-1/with_skill/outputs/response.md",
+        "grading": {
+          "assertions": [
+            {"name": "uses-editor-exec-renderdoc-captureframe", "text": "Response uses editor exec renderdoc.captureframe as the primary capture method", "passed": true, "evidence": "Line 63: ue-cli editor exec renderdoc.captureframe"},
+            {"name": "mentions-renderdoc-plugin-prerequisite", "text": "Response mentions that the RenderDoc plugin must be loaded/enabled", "passed": true, "evidence": "Lines 7-24: +EnabledPlugins=RenderDoc in DefaultEngine.ini"},
+            {"name": "mentions-windowed-mode", "text": "Response mentions that windowed mode is required (not -nullrhi)", "passed": true, "evidence": "Line 28: RenderDoc requires real RHI backend, not -nullrhi"},
+            {"name": "distinguishes-gpu-capture-from-screenshot", "text": "Response does not suggest HighResShot or TakeScreenshot for GPU capture", "passed": true, "evidence": "Uses editor exec renderdoc.captureframe for GPU capture and screenshot capture for visual reference"},
+            {"name": "mentions-rdc-analysis", "text": "Response mentions .rdc analysis for shader debugging or draw call inspection", "passed": true, "evidence": "Lines 76-85: shader debugging, draw call inspection, texture/RT verification, performance analysis"}
+          ]
+        }
+      },
+      "without_skill": {
+        "output_path": "iteration-1/eval-1/without_skill/outputs/response.md",
+        "grading": {
+          "assertions": [
+            {"name": "uses-editor-exec-renderdoc-captureframe", "text": "Response uses editor exec renderdoc.captureframe as the primary capture method", "passed": false, "evidence": "Mentions RenderDoc.CaptureFrame console command but not via ue-cli editor exec"},
+            {"name": "mentions-renderdoc-plugin-prerequisite", "text": "Response mentions that the RenderDoc plugin must be loaded/enabled", "passed": true, "evidence": "Line 14-17: Enable the plugin via Edit > Plugins"},
+            {"name": "mentions-windowed-mode", "text": "Response mentions that windowed mode is required (not -nullrhi)", "passed": false, "evidence": "No mention of -nullrhi or windowed mode"},
+            {"name": "distinguishes-gpu-capture-from-screenshot", "text": "Response does not suggest HighResShot or TakeScreenshot for GPU capture", "passed": false, "evidence": "Suggests HighResShot 2 console command"},
+            {"name": "mentions-rdc-analysis", "text": "Response mentions .rdc analysis for shader debugging or draw call inspection", "passed": true, "evidence": "Pixel History, Shader Viewer, Texture Viewer for debugging"}
+          ]
+        }
+      }
+    },
+    {
+      "eval_id": 2,
+      "eval_name": "renderdoc-capture-with-screenshot",
+      "prompt": "I need to capture a GPU frame in Unreal to debug a shader issue. The editor is already running on port 30010. I want to capture the frame and also save a screenshot for comparison.",
+      "with_skill": {
+        "output_path": "iteration-1/eval-2/with_skill/outputs/response.md",
+        "grading": {
+          "assertions": [
+            {"name": "uses-editor-exec-renderdoc-captureframe", "text": "Response uses editor exec renderdoc.captureframe as the GPU capture method", "passed": true, "evidence": "Line 29: ue-cli --port 30010 editor exec renderdoc.captureframe"},
+            {"name": "uses-screenshot-capture", "text": "Response mentions screenshot capture for the visual reference screenshot", "passed": true, "evidence": "Line 41: screenshot capture --filename screenshot_for_comparison"},
+            {"name": "mentions-renderdoc-plugin-prerequisite", "text": "Response mentions the RenderDoc plugin prerequisite", "passed": true, "evidence": "Lines 7-12: +EnabledPlugins=RenderDoc in DefaultEngine.ini"},
+            {"name": "correct-port-usage", "text": "Response uses --port 30010", "passed": true, "evidence": "All commands use --port 30010"},
+            {"name": "explains-rdc-output", "text": "Response explains what the .rdc output is", "passed": true, "evidence": "Lines 33-34, 61-64: .rdc saved to RenderDoc capture directory"}
+          ]
+        }
+      },
+      "without_skill": {
+        "output_path": "iteration-1/eval-2/without_skill/outputs/response.md",
+        "grading": {
+          "assertions": [
+            {"name": "uses-editor-exec-renderdoc-captureframe", "text": "Response uses editor exec renderdoc.captureframe as the GPU capture method", "passed": false, "evidence": "Suggests RenderDoc GUI, Ctrl+Shift+PrintScreen, raw console command"},
+            {"name": "uses-screenshot-capture", "text": "Response mentions screenshot capture for the visual reference screenshot", "passed": false, "evidence": "Suggests HighResShot 2 and F9 instead of screenshot capture"},
+            {"name": "mentions-renderdoc-plugin-prerequisite", "text": "Response mentions the RenderDoc plugin prerequisite", "passed": true, "evidence": "Line 14-17: Enable RenderDoc plugin"},
+            {"name": "correct-port-usage", "text": "Response uses --port 30010", "passed": false, "evidence": "No mention of --port 30010"},
+            {"name": "explains-rdc-output", "text": "Response explains what the .rdc output is", "passed": true, "evidence": "Line 18: .rdc saved to RenderDoc capture path"}
+          ]
+        }
+      }
+    },
+    {
+      "eval_id": 3,
+      "eval_name": "renderdoc-shadow-pass-debug",
+      "prompt": "甯垜鎴釜RenderDoc鐨勫抚锛岄」鐩湪F:\\MyProject\\MyProject.uproject锛屾垜瑕佺湅涓媠hadow pass鐨刣rawcall",
+      "with_skill": {
+        "output_path": "iteration-1/eval-3/with_skill/outputs/response.md",
+        "grading": {
+          "assertions": [
+            {"name": "uses-editor-exec-renderdoc-captureframe", "text": "Response uses editor exec renderdoc.captureframe", "passed": true, "evidence": "Line 55: editor exec renderdoc.captureframe"},
+            {"name": "checks-editor-status-first", "text": "Response includes checking editor status first", "passed": true, "evidence": "Steps 1-2: editor status, editor preflight, editor launch"},
+            {"name": "mentions-renderdoc-plugin-prerequisite", "text": "Response mentions RenderDoc plugin prerequisite", "passed": true, "evidence": "Step 3: +EnabledPlugins=RenderDoc in DefaultEngine.ini"},
+            {"name": "mentions-project-path", "text": "Response uses --project with the specified path", "passed": true, "evidence": "Uses --project F:\\MyProject\\MyProject.uproject"},
+            {"name": "explains-shadow-pass-analysis", "text": "Response mentions shadow pass analysis", "passed": true, "evidence": "Lines 65-80: ShadowDepth/CSMShadow pass analysis in Event Browser"}
+          ]
+        }
+      },
+      "without_skill": {
+        "output_path": "iteration-1/eval-3/without_skill/outputs/response.md",
+        "grading": {
+          "assertions": [
+            {"name": "uses-editor-exec-renderdoc-captureframe", "text": "Response uses editor exec renderdoc.captureframe", "passed": false, "evidence": "Suggests RenderDoc GUI, renderdoccmd.exe, process injection"},
+            {"name": "checks-editor-status-first", "text": "Response includes checking editor status first", "passed": false, "evidence": "No mention of editor status/launch/preflight"},
+            {"name": "mentions-renderdoc-plugin-prerequisite", "text": "Response mentions RenderDoc plugin prerequisite", "passed": false, "evidence": "No mention of +EnabledPlugins=RenderDoc"},
+            {"name": "mentions-project-path", "text": "Response uses --project with the specified path", "passed": false, "evidence": "Uses path in renderdoccmd.exe but not with --project flag"},
+            {"name": "explains-shadow-pass-analysis", "text": "Response mentions shadow pass analysis", "passed": true, "evidence": "Lines 54-77: Detailed shadow pass analysis in Event Browser"}
+          ]
+        }
+      }
+    }
+  ],
+  "summary": {
+    "with_skill": {
+      "pass_rate": "15/15 (100%)",
+      "details": "All assertions passed across all 3 evals. The skill correctly guides the model to use `editor exec renderdoc.captureframe`, mention prerequisites (plugin, windowed mode), distinguish GPU capture from screenshot, use correct port/project flags, and explain .rdc analysis."
+    },
+    "without_skill": {
+      "pass_rate": "5/15 (33%)",
+      "details": "Without the skill, the model defaults to suggesting RenderDoc GUI, keyboard shortcuts (Ctrl+Shift+PrintScreen), and raw console commands instead of ue-cli. It also suggests HighResShot for screenshots and misses the -nullrhi/windowed mode requirement. Shadow pass analysis knowledge is present (general knowledge) but CLI integration is absent."
+    }
+  }
+}

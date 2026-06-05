@@ -1,26 +1,26 @@
-# cli-anything-unreal
+# ue-cli
 
-AI Agent CLI harness for Unreal Engine 5. Enables AI agents to control UE editor via command-line for material analysis, blueprint editing, screenshot verification, and build automation.
+AI-agent CLI harness for Unreal Engine 5. Agents control UE editor from shell: material analysis, Blueprint edits, screenshots, build/cook/package, JSON results.
 
 ### CLI vs Raw API
 
-Why use a CLI instead of giving the Agent direct access to the UE HTTP Remote Control API? If you are using **coding agents**, CLI is the best fit:
+For coding agents, CLI beats raw UE Remote Control:
 
-* **Token-efficient**: CLI invocations are significantly more token-efficient. They avoid loading verbose API schemas, massive raw JSON responses, and complex engine internals into the model context. This allows agents to act through concise, purpose-built commands.
-* **Handling Common Stuck Points**: The CLI encapsulates multi-step workflows into robust single commands. It handles UE-specific nuances automatically (such as resolving references, auto-saving dirty packages, bypassing modal dialog blocks, and normalizing path mangling from terminals like MSYS2).
-* **Agent-Optimized Outputs**: Errors, engine crashes, and query results are specifically formatted as structured JSON or concise text for agents to easily parse and act upon.
+* **Token-efficient**: short commands, no giant schemas/raw JSON/engine internals in context.
+* **Workflow-safe**: wraps UE traps: references, dirty-package saves, modal avoidance, MSYS2 path fix.
+* **Agent-shaped output**: errors/crashes/results become JSON or concise text agents can parse.
 
 ### Runner Output Contract
 
-In JSON mode, commands emit one final machine-readable JSON payload on stdout. Progress, heartbeats, and diagnostic text belong on stderr.
+JSON mode emits one final machine-readable payload on stdout. Progress, heartbeats, diagnostics go stderr.
 
-Agent runners that stream command output should stream stderr live and display stdout once at command completion, or stream stdout live and skip the captured stdout replay. Streaming stdout and replaying the captured stdout will duplicate the final JSON payload in the UI.
+Runners: stream stderr live. For stdout, either stream live or replay captured stdout once, not both, or final JSON duplicates.
 
 ### Requirements
 
-* Python 3.10 or newer
-* Unreal Engine 5.x (with Remote Control API plugin enabled)
-* Cursor, Claude Code, GitHub Copilot, or any other coding agent.
+* Python 3.10+
+* Unreal Engine 5.x with Remote Control API plugin
+* Cursor, Claude Code, GitHub Copilot, or any coding agent
 
 ## Getting Started
 
@@ -28,94 +28,86 @@ Agent runners that stream command output should stream stderr live and display s
 
 ```bash
 # Install the package
-pip install cli-anything-unreal
+pip install ue-cli
 # (Or for local development: pip install -e .)
 ```
 
 ### Installing Skills
 
-Cursor, Claude Code, and other coding agents can automatically use locally installed skills to understand how to interact with the project:
+Install agent skill docs:
 
 ```bash
-cli-anything-unreal install-skills
+ue-cli install-skills
 ```
 
 ## How to Prompt Your Agent (Demo)
 
-Your coding agent will be running the commands behind the scenes. Point your agent at the CLI and let it work:
+Agent runs commands behind scenes:
 
 ```text
-> Use cli-anything-unreal skills to analyze the material /Game/MyMaterial.
+> Use ue-cli skills to analyze the material /Game/MyMaterial.
   Fix any issues found and take a screenshot before and after.
 ```
 
 ### Skills-less operation
 
-Even if you don't install the skills explicitly, you can just tell your agent to figure it out using the built-in help:
+Without installed skills, point agent at built-in help:
 
 ```text
-> Use cli-anything-unreal to check the project status. 
-  Check cli-anything-unreal --help for available commands.
+> Use ue-cli to check the project status.
+  Check ue-cli --help for available commands.
 ```
 
 ## Features
 
-- **Project Management**: Parse `.uproject`, read/write `.ini` configs, list content assets
-- **Build System**: Compile, cook, and package via UAT/UBT subprocess calls
-- **Material Analysis**: List materials, inspect nodes/parameters/textures, auto-detect issues (requires running editor)
-- **Blueprint Management**: View graphs, edit variables/functions, recompile (requires running editor)
-- **Screenshot**: Capture viewport, compare screenshots, CVar A/B testing (requires running editor)
-- **Editor Control**: Execute console commands, get/set CVars, run Python scripts, check editor status
+- **Project Management**: parse `.uproject`, read/write `.ini`, list content assets
+- **Build System**: compile, cook, package via UAT/UBT
+- **Material Analysis**: list/inspect/analyze/edit materials
+- **Blueprint Management**: view graphs, edit variables/functions, compile
+- **Screenshot**: capture viewport, compare screenshots, CVar A/B
+- **Editor Control**: console commands, CVars, Python scripts, status
 
 ## Architecture
 
 Two backends:
-- **UAT/UBT** (subprocess): build, cook, package — no editor needed
-- **HTTP API** (localhost:30020): materials, blueprints, screenshots, console commands — requires running editor with AutomationTestAPI plugin
+- **UAT/UBT** subprocess: build/cook/package, no editor needed
+- **HTTP API** localhost:30010: materials, blueprints, screenshots, console, Python, editor required
 
 ## Multi-Instance Support
 
-Multiple UE editors can run simultaneously. Use `--port` to target a specific instance:
+Multiple UE editors can run on different ports:
 
 ```bash
-cli-anything-unreal --port 30020 editor status
-cli-anything-unreal --port 30021 material list
+ue-cli --port 30010 editor status
+ue-cli --port 30011 material list
 ```
 
-Use `editor list` to discover all running instances.
+Use `editor status` to discover running instances.
 
 ## Quick Start (Manual Usage)
 
-You can still use the CLI manually to inspect and control the editor:
-
 ```bash
 # Check CLI
-cli-anything-unreal --help
+ue-cli --help
 
 # Project info (no editor needed)
-cli-anything-unreal project info --project F:\path\to\MyProject.uproject
+ue-cli --project F:\path\to\MyProject.uproject project info
 
 # Check editor status
-cli-anything-unreal editor status
+ue-cli editor status
 
 # Material analysis workflow
-cli-anything-unreal --json material list
-cli-anything-unreal --json material analyze /Game/MyMaterial
-cli-anything-unreal --json screenshot static --filename material_check
-
-# Interactive mode
-cli-anything-unreal repl
+ue-cli --output json material list
+ue-cli --output json material analyze /Game/MyMaterial
+ue-cli --output json screenshot capture --filename material_check
 ```
 
 ## Known Engine Bugs
 
-The CLI relies on the UE Remote Control API and Python scripts executing inside the editor. There are some known Unreal Engine 5.7 bugs that developers and agents should be aware of. 
-
-See [ENGINE_BUGS.md](ENGINE_BUGS.md) for a full list of known engine issues, workarounds, and how to fix them in the UE source code.
+UE Remote Control + Python have UE 5.7 automation bugs. See [ENGINE_BUGS.md](ENGINE_BUGS.md) for issues, workarounds, engine-source fixes.
 
 ## Agent Workflow
 
 ```
-查材质 → 发现问题 → 改材质 → 截图验证
-list materials → analyze → fix → screenshot verify
+list materials -> analyze -> fix -> screenshot verify
 ```

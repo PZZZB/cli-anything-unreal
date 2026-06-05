@@ -1,81 +1,34 @@
-# Unreal Engine 5.7 — CLI-Anything Architecture & SOP
+# Unreal Engine 5.7 - ue-cli Architecture & SOP
 
 ## Architecture Summary
 
-Unreal Engine 5 is a C++ game engine with a modular editor built on Slate UI,
-a Blueprints visual scripting system, and a powerful material graph compiler.
-Unlike Blender (which offers `--background --python` headless mode), UE has no
-single headless scripting entry point. We therefore adopt a **dual-backend**
-strategy that routes each operation through the most suitable channel.
+UE5 has GUI editor, UObject reflection, Blueprint/material systems, Remote Control HTTP, and editor-only Python. No Blender-style single headless `--python` entry. `ue-cli` uses dual backend:
 
-```
-┌───────────────────────────────────────────────────────────────────┐
-│                     Unreal Editor (GUI)                          │
-│  ┌────────────┐ ┌────────────┐ ┌──────────┐ ┌───────────────┐   │
-│  │  Viewport  │ │  Material  │ │Blueprint │ │  World        │   │
-│  │  (Slate)   │ │  Editor    │ │  Editor  │ │  Outliner     │   │
-│  └─────┬──────┘ └─────┬──────┘ └────┬─────┘ └───────┬───────┘   │
-│        │              │             │               │            │
-│  ┌─────┴──────────────┴─────────────┴───────────────┴─────────┐  │
-│  │              UObject / Reflection System                   │  │
-│  │   All engine objects: Actors, Materials, Blueprints, ...   │  │
-│  └────────────────────────┬───────────────────────────────────┘  │
-│                           │                                      │
-│  ┌────────────────────────┴───────────────────────────────────┐  │
-│  │              Remote Control API Plugin                     │  │
-│  │   HTTP REST server exposing UObject call/property/search   │  │
-│  │   Default port: 30010                                      │  │
-│  └────────────────────────┬───────────────────────────────────┘  │
-│                           │                                      │
-│  ┌────────────────────────┴───────────────────────────────────┐  │
-│  │              Python Script Execution                       │  │
-│  │   PythonScriptPlugin + EditorScriptingUtilities            │  │
-│  │   Execute .py files inside the running editor              │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└───────────────────────────────────────────────────────────────────┘
-                            │
-              ┌─────────────┴──────────────┐
-              │                            │
-  ┌───────────▼───────────┐   ┌────────────▼────────────┐
-  │  Backend A: UAT/UBT   │   │  Backend B: HTTP API    │
-  │  (subprocess)         │   │  (localhost REST)       │
-  │                       │   │                         │
-  │  • Compile C++        │   │  • Actor queries        │
-  │  • Cook content       │   │  • Material editing     │
-  │  • Package project    │   │  • Blueprint editing    │
-  │  • Generate VS files  │   │  • Screenshots          │
-  │  • No editor needed   │   │  • Console commands     │
-  │                       │   │  • Python script exec   │
-  │  RunUAT.bat           │   │  • Requires running     │
-  │  Build.bat            │   │    editor               │
-  └───────────────────────┘   └─────────────────────────┘
+```text
+Agent -> ue-cli
+  -> UAT/UBT subprocess: compile, cook, package, generate project files
+  -> Running Unreal Editor:
+       Remote Control HTTP localhost:30010
+       PythonScriptPlugin execution
+       CliAnythingBridge C++ reflection/helpers
 ```
 
 ## CLI Strategy: Dual-Backend
 
 ### Why Two Backends?
 
-UE5's architecture splits cleanly into two categories of operations:
-
-1. **Build-time operations** — Compiling C++ code, cooking assets, packaging
-   builds, generating project files. These are handled by UAT (Unreal
-   Automation Tool) and UBT (Unreal Build Tool), invoked as subprocesses.
-   They do not require a running editor.
-
-2. **Editor-time operations** — Querying scenes, editing materials, modifying
-   Blueprints, taking screenshots. These require a live editor instance and
-   are performed via the **Remote Control API** (HTTP REST on localhost).
+1. **Build-time ops**: compile C++, cook, package, generate project files. Use UAT/UBT subprocess. No editor.
+2. **Editor-time ops**: query scene, edit materials/Blueprints/assets, screenshots. Need live editor. Use Remote Control + Python.
 
 ### Why Not a Single Backend?
 
-- UAT/UBT cannot query live scene data or manipulate materials in real-time.
-- The HTTP API cannot compile C++ or package builds.
-- Combining both gives full engine coverage without requiring the editor for
-  offline tasks (CI pipelines, batch builds).
+- UAT/UBT cannot query live scene/material data.
+- HTTP API cannot compile C++ or package.
+- Both together cover CI/offline tasks + live editor automation.
 
 ## Backend A: UAT / UBT (Subprocess)
 
-Invoked via `RunUAT.bat` and `Build.bat` in the engine install directory.
+Invokes `RunUAT.bat` / `Build.bat`.
 
 | Operation | Tool | Example |
 |-----------|------|---------|
@@ -83,45 +36,40 @@ Invoked via `RunUAT.bat` and `Build.bat` in the engine install directory.
 | Cook content | UAT `BuildCookRun -cook` | `build cook --platform Win64` |
 | Package | UAT `BuildCookRun -build -cook -stage -package -archive` | `build package` |
 | Stop build | `taskkill /F /T` process tree | `build stop` |
-| Check if building | Process scan (MSBuild/UBT) | `build is-building` |
+| Check building | Process scan | `build is-building` |
 | Generate VS files | `GenerateProjectFiles.bat` | `project generate` |
-| Build status | Filesystem scan of Binaries/ and Intermediate/ | `build status` |
+| Build status | Filesystem scan | `build status` |
 
-**Engine discovery** is multi-strategy:
-1. Parse `EngineAssociation` from `.uproject` JSON
-2. `UE_ENGINE_ROOT` environment variable
-3. Default install paths (`C:\Program Files\Epic Games\UE_*`, etc.)
-4. Windows registry (Epic Games Launcher)
+Engine discovery order:
+1. `.uproject` `EngineAssociation`
+2. `UE_ENGINE_ROOT`
+3. default installs (`C:\Program Files\Epic Games\UE_*`)
+4. Windows registry / Epic Launcher
 
 ## Backend B: HTTP Remote Control API
 
-Uses the built-in **Remote Control** plugin (enabled by default in UE5).
-All requests are HTTP REST to `localhost:<port>`.
+Built-in Remote Control plugin. HTTP REST to `localhost:<port>`; default 30010.
 
 ### Core Endpoints
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/remote/info` | GET | List available routes |
-| `/remote/object/call` | PUT | Call function on a UObject |
-| `/remote/object/property` | PUT | Get/set property on a UObject |
-| `/remote/object/describe` | PUT | Introspect a UObject |
-| `/remote/search/assets` | PUT | Search assets by class/path |
+| `/remote/info` | GET | Routes |
+| `/remote/object/call` | PUT | Call UObject function |
+| `/remote/object/property` | PUT | Get/set UObject property |
+| `/remote/object/describe` | PUT | Introspect UObject |
+| `/remote/search/assets` | PUT | Search assets |
 
 ### Python Script Injection Pattern
 
-For complex operations (materials, Blueprints) that require multi-step logic
-beyond what a single API call can express, we use an embedded script pattern:
+For multi-step operations beyond one HTTP call:
 
-1. Generate a Python script from a template with parameter substitution
-2. Write it to a temporary `.py` file
-3. Execute it in-editor via the Remote Control API (`exec_python_file`)
-4. The script writes structured results to a temp JSON file
-5. CLI polls for and reads the JSON output
-6. Temp files are cleaned up
-
-This avoids the limitations of single-line console commands and gives us
-full access to `unreal` Python API inside the editor.
+1. Generate Python script from template/params.
+2. Write temp `.py`.
+3. Execute in editor via Remote Control.
+4. Script emits structured JSON/result marker.
+5. CLI reads result.
+6. Temp files cleaned.
 
 ```python
 # Example: generated script to query material info
@@ -140,21 +88,21 @@ with open(output_path, "w") as f:
 
 ## Multi-Instance Support
 
-Multiple UE editors can run simultaneously, each on a different HTTP port.
+Multiple UE editors can run, each on separate port.
 
 | Feature | Detail |
 |---------|--------|
 | Default port | 30010 |
-| Port range | 30010 – 30030 (configurable) |
-| Discovery | `editor list` scans the port range |
-| Targeting | `--port` flag on any command |
-| Process enum | WMIC-based process listing (Windows) |
+| Port range | 30010-30030 configurable |
+| Discovery | `editor status` scans |
+| Targeting | `--port` |
+| Process enum | Windows process listing |
 
 ## Data Model
 
 ### Project (.uproject)
 
-The `.uproject` file is a JSON manifest at the project root:
+`.uproject` is JSON manifest:
 
 ```json
 {
@@ -176,124 +124,90 @@ The `.uproject` file is a JSON manifest at the project root:
 }
 ```
 
-We parse this directly — no binary formats involved.
+Parsed directly; no binary format.
 
 ### Config (.ini)
 
-UE config files use an extended INI format with:
-- Array-style keys: `+Key=Value` (append), `-Key=Value` (remove)
-- Duplicate key support (multiple values per key)
-- Hierarchical overrides: `Base*.ini` → `Default*.ini` → `Saved/*.ini`
+UE INI quirks:
+- array keys: `+Key=Value`, `-Key=Value`
+- duplicate keys
+- layered overrides: `Base*.ini` -> `Default*.ini` -> `Saved/*.ini`
 
-Our parser handles all these quirks for read/write operations.
+Parser handles read/write.
 
 ### Materials & Blueprints
 
-These are binary `.uasset` files — we do NOT parse them directly.
-Instead, all material/Blueprint operations go through the running editor
-via the HTTP API + Python script injection.
+Binary `.uasset`; never parse/write directly. Use editor via HTTP + Python.
 
 ## Core Modules
 
-| Module | Lines | Editor Required | Purpose |
-|--------|-------|-----------------|---------|
-| `unreal_cli.py` | 1,822 | — | Click CLI entry point, all commands |
-| `core/project.py` | 320 | No | .uproject parsing, config I/O, content listing |
-| `core/build.py` | 310 | No | Compile, cook, package, stop, is-building via UAT/UBT |
-| `core/session.py` | 204 | No | Session state, undo/redo (50 entries max) |
-| `core/scene.py` | 252 | Yes | Actor queries, property get/set, transforms |
-| `core/materials.py` | 1,293 | Yes | Material inspection, node editing, HLSL dump |
-| `core/blueprint.py` | 599 | Yes | Blueprint graphs, variables, compilation |
-| `core/screenshot.py` | 393 | Yes | Viewport capture, comparison, compression |
-| `core/script_runner.py` | 228 | Yes | Generic Python script execution in editor |
-| `utils/ue_http_api.py` | 552 | — | HTTP client for Remote Control API |
-| `utils/ue_backend.py` | 785 | — | Engine discovery, UAT/UBT invocation |
+| Module | Editor Required | Purpose |
+|--------|-----------------|---------|
+| `unreal_cli.py` | No | Click root, global flags, command specs |
+| `core/project.py` | No | `.uproject`, config I/O, content list |
+| `core/build.py` | No | compile/cook/package/stop/is-building |
+| `core/session.py` | No | session state, undo/redo |
+| `core/scene.py` | Yes | actors, properties, transforms |
+| `core/materials.py` | Yes | material inspect/edit/HLSL |
+| `core/blueprint.py` | Yes | Blueprint graphs/vars/compile |
+| `core/screenshot.py` | Yes | capture/compare/compress |
+| `core/script_runner.py` | Yes | Python in editor |
+| `utils/ue_http_api.py` | Yes | Remote Control client |
+| `utils/ue_backend.py` | Mixed | engine discovery, editor/UAT/UBT |
 
-**Total: ~7,100 lines of Python**
-
-## Command Map: GUI Action → CLI Command
+## Command Map: GUI Action -> CLI Command
 
 | UE Editor Action | CLI Command |
 |-----------------|-------------|
 | Open project | `project info --project path/to.uproject` |
-| Browse content | `project content [--ext .uasset] [--path /Game/Maps]` |
-| Edit config | `project config read DefaultEngine` / `project config write ...` |
+| Browse content | `asset list [--path /Game/Maps]` |
+| Edit config | `project config get DefaultEngine` / `project config set ...` |
 | Generate VS solution | `project generate` |
-| Build (Development) | `build compile --config Development` |
-| Cook for Windows | `build cook --platform Win64` |
-| Package project | `build package --platform Win64 --config Shipping` |
-| Stop running build | `build stop` |
-| Check if building | `build is-building` |
-| Check build artifacts | `build status` |
-| Check editor status | `editor status` |
-| Discover editors | `editor list` |
-| Run console command | `editor exec "stat fps"` |
-| Run Python in editor | `editor exec py "print('hello')"` |
-| Run .py script | `editor run-script myscript.py` |
+| Build Development | `build compile --config Development` |
+| Cook Windows | `build cook --platform Win64` |
+| Package | `build package --platform Win64 --config Shipping` |
+| Stop build | `build stop` |
+| Check building | `build is-building` |
+| Check artifacts | `build status` |
+| Check editor | `editor status` |
+| Run console | `editor exec "stat fps"` |
+| Run Python | `editor run-script script.py` |
 | Get/set CVar | `editor cvar get r.ScreenPercentage` / `editor cvar set ...` |
-| List scene actors | `scene actors [--class StaticMeshActor]` |
-| Find actor by name | `scene find "PlayerStart"` |
-| Inspect actor | `scene describe /Game/Maps/Level.Level:PersistentLevel.MyActor` |
-| Get actor property | `scene property get <path> <property>` |
+| List actors | `scene list [--class StaticMeshActor]` |
+| Find actor | `scene list -q "PlayerStart"` |
+| Inspect actor API | `editor api-discover /Game/Maps/Level.Level:PersistentLevel.MyActor` |
+| Get actor prop | `scene property <path> <property>` |
 | List materials | `material list [--path /Game/Materials]` |
 | Inspect material | `material info /Game/Materials/M_Base` |
 | Analyze material | `material analyze /Game/Materials/M_Base` |
-| Dump HLSL | `material hlsl /Game/Materials/M_Base --platform sm6` |
-| Add material node | `material add-node <path> MaterialExpressionTextureSample` |
-| Wire nodes | `material connect <path> --from Node_A --from-output 0 ...` |
+| Dump HLSL/source | `material hlsl-code /Game/Materials/M_Base` |
+| Add material node | `material add-node <path> --type MaterialExpressionTextureSample` |
+| Wire nodes | `material connect <path> --from Node_A --to Node_B --to-input Pin` |
 | Recompile material | `material recompile <path>` |
 | List blueprints | `blueprint list` |
 | Inspect blueprint | `blueprint info /Game/BP/BP_Player` |
-| Add BP function | `blueprint add-function <path> MyNewFunction` |
-| Add BP variable | `blueprint add-variable <path> Health float` |
+| Add BP function | `blueprint add-function <path> --name MyNewFunction` |
+| Add BP variable | `blueprint add-variable <path> --name Health --type float` |
 | Compile blueprint | `blueprint compile <path>` |
-| Take screenshot | `screenshot static --filename test_shot` |
-| Compare screenshots | `screenshot compare imageA.png imageB.png` |
+| Screenshot | `screenshot capture --filename test_shot` |
 | Undo/redo | `session undo` / `session redo` |
 
 ## Session & Undo/Redo
 
-The session module tracks:
-- Active project path, directory, and name
-- Auto-discovered engine root
-- Current editor HTTP port
-- State snapshots for undo/redo (max 50 entries)
-- Modified flag
-
-Session state can be persisted to and restored from JSON files.
+Session tracks active project, engine root, editor port, undo/redo snapshots (max 50), dirty flag. Can persist/restore JSON.
 
 ## Test Coverage Plan
 
-1. **Unit tests** (`test_core.py`): 112 tests, no editor or engine required
-   - Project parsing (.uproject JSON, .ini configs, content enumeration)
-   - Engine discovery logic (mock filesystem)
-   - Session management (undo/redo, snapshots, persistence)
-   - Build status parsing (filesystem scan)
-   - HTTP API client (mocked requests)
-   - Material/Blueprint operations (mocked API responses)
-   - CLI interface via Click test runner
-
-2. **E2E tests** (`test_full_e2e.py`): Requires running UE editor
-   - Editor connection and status
-   - Scene actor queries
-   - Material inspection and editing
-   - Screenshot capture and comparison
-   - Console command execution
-   - Blueprint operations
+1. **Unit tests**: no editor/engine. Cover project/config/session/build status/HTTP client/material/Blueprint/CLI with mocks.
+2. **E2E tests**: require UE editor. Cover connection, scene, material edit, screenshot, console, Blueprint.
 
 ## Rendering Gap Assessment: Low
 
-Most UE operations are delegated to the engine itself — we are a **thin CLI
-wrapper**, not a reimplementation. The main gaps are:
-
-- **No offline .uasset parsing or writing** — Material/Blueprint operations require a
-  running editor. This is by design; UE's binary asset format is proprietary
-  and version-dependent. **Never attempt to write or create .uasset files directly from text/code.** Always use `editor run-script` and UE Python API.
-- **Windows-only** — UAT/UBT and editor discovery are Windows-focused.
-  Linux/Mac support would require path adjustments.
-- **Plugin dependency** — Remote Control plugin must be enabled; Python
-  Script Plugin needed for advanced operations.
+CLI delegates to engine; not reimplementation. Gaps:
+- **No offline `.uasset` parsing/writing**. By design. Never create/write `.uasset` from text/code; use `editor run-script` + UE Python.
+- **Windows-focused**. Linux/Mac need path/discovery changes.
+- **Plugin dependency**. Remote Control + Python Script Plugin required; bridge plugin for advanced reflection/shader/viewport helpers.
 
 ## Known Engine Bugs
 
-There are known UE5 engine bugs that may affect automation (like the `delete_all_material_expressions` modify-while-iterating bug). Please refer to [ENGINE_BUGS.md](ENGINE_BUGS.md) for details, agent workarounds, and C++ engine fixes.
+UE5 automation bugs exist (`delete_all_material_expressions` modify-while-iterating, transform Remote Control 400). See [ENGINE_BUGS.md](ENGINE_BUGS.md).

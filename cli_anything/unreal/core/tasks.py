@@ -16,11 +16,11 @@ FINAL_TASK_STATUSES = {"completed", "failed", "timeout", "cancelled"}
 
 
 def _task_root() -> Path:
-    override = os.environ.get("CLI_ANYTHING_UNREAL_TASK_DIR")
+    override = os.environ.get("UE_CLI_TASK_DIR")
     if override:
         root = Path(override)
     else:
-        root = Path(tempfile.gettempdir()) / "cli_anything_unreal_tasks"
+        root = Path(tempfile.gettempdir()) / "ue_cli_tasks"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

@@ -1,0 +1,37 @@
+﻿{
+  "eval_id": 2,
+  "eval_name": "renderdoc-capture-with-screenshot",
+  "config": "with_skill",
+  "assertions": [
+    {
+      "name": "uses-editor-exec-renderdoc-captureframe",
+      "text": "Response uses `editor exec renderdoc.captureframe` as the GPU capture method",
+      "passed": true,
+      "evidence": "Line 29: `ue-cli --port 30010 editor exec \"renderdoc.captureframe\"`"
+    },
+    {
+      "name": "uses-screenshot-capture",
+      "text": "Response mentions `screenshot capture` for the visual reference screenshot",
+      "passed": true,
+      "evidence": "Line 41: `ue-cli --port 30010 screenshot capture --filename screenshot_for_comparison`"
+    },
+    {
+      "name": "mentions-renderdoc-plugin-prerequisite",
+      "text": "Response mentions the RenderDoc plugin prerequisite",
+      "passed": true,
+      "evidence": "Lines 7-12: Mentions `+EnabledPlugins=RenderDoc` in DefaultEngine.ini as prerequisite"
+    },
+    {
+      "name": "correct-port-usage",
+      "text": "Response uses --port 30010 since the user specified the editor is on that port",
+      "passed": true,
+      "evidence": "Lines 21, 29, 41, 51-53: All commands use `--port 30010`"
+    },
+    {
+      "name": "explains-rdc-output",
+      "text": "Response explains what the .rdc output is and where it goes",
+      "passed": true,
+      "evidence": "Lines 33-34: Explains .rdc file saved to RenderDoc capture directory, and lines 61-64: Analysis section mentions renderdoc-mcp skill and RenderDoc application"
+    }
+  ]
+}

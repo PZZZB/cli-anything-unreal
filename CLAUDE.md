@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Claude Code repo guide.
 
 ## What This Is
 
-`cli-anything-unreal` is a Python CLI tool that lets AI coding agents control Unreal Engine 5 editors. It wraps UE's Remote Control HTTP API and UAT/UBT build tools behind structured, token-efficient CLI commands with JSON output.
+`ue-cli` = Python CLI for AI agents controlling Unreal Engine 5 editors. Wraps UE Remote Control HTTP API + UAT/UBT behind structured, token-light JSON commands.
 
 ## Commands
 
@@ -37,66 +37,59 @@ python -m pytest cli_anything/unreal/tests/ -v --e2e --e2e-smoke
 
 ### Running the CLI
 ```bash
-cli-anything-unreal --help
-cli-anything-unreal --output json editor status
-cli-anything-unreal --project F:\path\to\Project.uproject editor launch
+ue-cli --help
+ue-cli --output json editor status
+ue-cli --project F:\path\to\Project.uproject editor launch
 ```
 
 ## Architecture
 
 ### Three Communication Tiers
 
-1. **Subprocess tier** (`core/build.py`): UAT/UBT for compile/cook/package. No editor needed.
-2. **HTTP REST tier** (`utils/ue_http_api.py`): Remote Control API on port 30010. Queries properties, searches assets, calls UObject functions.
-3. **Python script injection** (`core/script_runner.py`): For anything the HTTP API can't do. Wraps user code in a try/except template, executes via `PythonScriptLibrary.ExecutePythonCommandEx`, captures result via `unreal.log()` with a marker prefix (`__cli_result__:`).
+1. **Subprocess tier** (`core/build.py`): UAT/UBT compile/cook/package. No editor.
+2. **HTTP REST tier** (`utils/ue_http_api.py`): Remote Control API, default port 30010. Query props, search assets, call UObject funcs.
+3. **Python script injection** (`core/script_runner.py`): escape hatch for HTTP gaps. Runs via `PythonScriptLibrary.ExecutePythonCommandEx`, captures `unreal.log("__cli_result__:" + json.dumps(...))`.
 
 ### Code Layers
 
-- **`commands/`** — Click CLI layer. Thin: parses args, calls core, calls `output()` or `emit_json()`.
-- **`core/`** — Business logic. Each module (materials, blueprint, scene, etc.) orchestrates HTTP calls and script execution.
-- **`utils/ue_http_api.py`** — `UEEditorAPI` class: the single HTTP client all core modules use. Default port 30010.
-- **`utils/ue_backend.py`** — Editor process management (find exe, preflight checks, port resolution, kill zombies).
+- **`commands/`** - thin Click layer: parse args, call core, emit `output()`/`emit_json()`.
+- **`core/`** - business logic: materials, blueprint, scene, build, script runner.
+- **`utils/ue_http_api.py`** - single HTTP client: `UEEditorAPI`.
+- **`utils/ue_backend.py`** - editor exe/process/preflight/port/zombie management.
 
 ### Script Runner Pattern
 
-The central execution pattern (`core/script_runner.py`):
-- User code is wrapped in `_WRAPPER_TEMPLATE` which isolates it in a dedicated namespace (`_cli_user_ns`), captures stdout, catches exceptions with full tracebacks, and auto-saves dirty packages.
-- The wrapper emits result as `unreal.log("__cli_result__:" + json.dumps(...))`.
-- The CLI-side parses `LogOutput` from `ExecutePythonCommandEx` response, finds the marker, returns structured dict.
-- Scripts that assign a `result` variable get it merged into the response. No `result` → `{"status": "ok"}`.
+`core/script_runner.py` wraps user code in `_WRAPPER_TEMPLATE`: isolated `_cli_user_ns`, stdout capture, traceback capture, dirty-package auto-save. CLI parses `LogOutput`, finds `__cli_result__:`, returns dict. `result` dict merges into response; no `result` -> `{"status": "ok"}`.
 
 ### Bridge Plugin (`bridge_plugin/CliAnythingBridge/`)
 
-A C++ UE plugin that ships with the CLI package and is auto-deployed to the project's `Plugins/` directory. Exposes functions that Python/Blueprint can't access directly:
-- `GetClassInfo` — TFieldIterator-based reflection (same as Details panel)
-- `GetActorComponentTree` — Actor component hierarchy
-- `GetMaterialCompileErrors` — Direct FMaterialResource access
-- `GetMaterialHLSLCode` / `GetMaterialShaderSource` — Shader source extraction
-- `GetActiveViewportScreenBounds` — Viewport pixel coordinates for screenshot cropping
+Bundled C++ UE plugin auto-deployed to project `Plugins/`. Exposes:
+- `GetClassInfo` - `TFieldIterator` reflection, Details-panel parity
+- `GetActorComponentTree` - actor component hierarchy
+- `GetMaterialCompileErrors` - direct `FMaterialResource`
+- `GetMaterialHLSLCode` / `GetMaterialShaderSource` - shader source
+- `GetActiveViewportScreenBounds` - viewport crop bounds
 
 ### Async Task System (`core/tasks.py`)
 
-Long-running ops (compile, cook, package, editor launch) use a file-based task queue:
-- `submit_task()` creates a JSON file in temp dir and spawns a detached worker process.
-- Worker runs `cli-anything-unreal _task-worker run <task_id>` (hidden Click command).
-- CLI caller polls with `task status <task_id>`. Final statuses: `completed`, `failed`, `timeout`, `cancelled`.
+Long ops (compile/cook/package/editor launch) use file task queue. `submit_task()` writes task JSON in temp, spawns detached worker: `ue-cli _task-worker run <task_id>`. Poll `task status <task_id>`. Final: `completed`, `failed`, `timeout`, `cancelled`.
 
 ### Skill System (`skills/`)
 
-`SKILL.md` is the Claude Code skill definition — it tells the AI agent how to use the CLI. The `references/` directory contains per-domain docs loaded on demand to save context window. The `install-skills` command copies these into the user's Claude Code settings.
+`SKILL.md` tells agents how to use CLI. `references/` holds load-on-demand domain docs. `install-skills` copies docs into agent settings.
 
 ## Key Design Decisions
 
-- **JSON output by default** when stdout is not a TTY (i.e., when called by an agent). The `--output json` flag must come BEFORE subcommands.
-- **`--project` is sticky**: once passed, the session remembers it for subsequent commands.
-- **Port auto-detection**: reads from project's `Config/DefaultRemoteControl.ini` if `--port` is not specified.
-- **MSYS2 path fix**: `_fix_argv_msys2()` in `unreal_cli.py` handles Git Bash mangling `/Game/...` paths into Windows paths.
-- **Auto-save on script execution**: `script_runner` saves all dirty packages after each script run (disable with `save=False`).
-- **Namespace isolation**: Each `run_python_code` call executes in a fresh `_cli_user_ns` dict so variables don't leak between calls.
+- JSON default when stdout non-TTY. `--output json` must appear before subcommands.
+- `--project` sticky for session.
+- Port auto-detect from `Config/DefaultRemoteControl.ini` if not specified.
+- `_fix_argv_msys2()` repairs Git Bash `/Game/...` path mangling.
+- `script_runner` auto-saves dirty packages after each script run unless `save=False`.
+- Fresh `_cli_user_ns` per `run_python_code`; no variable leak.
 
 ## Testing Conventions
 
-- Unit tests mock `UEEditorAPI` — they never hit a real editor. Use `unittest.mock.patch` on the HTTP methods or `require_editor`.
-- The custom `tmp_path` fixture in `conftest.py` creates directories under `.tmp_pytest/` (not system temp) for easier debugging.
-- The `temp_project` fixture creates a full fake UE project structure (`.uproject`, Config, Content, Source, Binaries).
-- E2E tests are gated behind `--e2e` flag and require `UE_TEST_PROJECT` env var pointing to a real `.uproject`.
+- Unit tests mock `UEEditorAPI`; never require real editor.
+- `tmp_path` fixture writes under `.tmp_pytest/`.
+- `temp_project` builds fake UE project tree.
+- E2E gated behind `--e2e` + `UE_TEST_PROJECT`.

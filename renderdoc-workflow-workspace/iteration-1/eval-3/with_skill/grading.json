@@ -1,0 +1,37 @@
+﻿{
+  "eval_id": 3,
+  "eval_name": "renderdoc-shadow-pass-debug",
+  "config": "with_skill",
+  "assertions": [
+    {
+      "name": "uses-editor-exec-renderdoc-captureframe",
+      "text": "Response uses `editor exec renderdoc.captureframe` as the capture method",
+      "passed": true,
+      "evidence": "Line 55: `ue-cli editor exec \"renderdoc.captureframe\"`"
+    },
+    {
+      "name": "checks-editor-status-first",
+      "text": "Response includes checking editor status or launching the editor before capturing",
+      "passed": true,
+      "evidence": "Lines 7-22: Step 1 checks `editor status`, Step 2 does `editor preflight` then `editor launch` if needed"
+    },
+    {
+      "name": "mentions-renderdoc-plugin-prerequisite",
+      "text": "Response mentions the RenderDoc plugin prerequisite",
+      "passed": true,
+      "evidence": "Lines 26-39: Step 3 checks RenderDoc plugin in DefaultEngine.ini with `+EnabledPlugins=RenderDoc`, verification via `editor exec renderdoc.captureframe`"
+    },
+    {
+      "name": "mentions-project-path",
+      "text": "Response uses --project with the user-specified project path",
+      "passed": true,
+      "evidence": "Lines 8, 19, 21: `--project F:\\MyProject\\MyProject.uproject` used in editor status, preflight, and launch commands"
+    },
+    {
+      "name": "explains-shadow-pass-analysis",
+      "text": "Response mentions how to analyze shadow pass draw calls in the captured .rdc",
+      "passed": true,
+      "evidence": "Lines 65-80: Detailed shadow pass analysis 鈥?Event Browser with ShadowDepth/CSMShadow, draw call inspection, Pipeline State, Mesh Viewer, Texture Viewer, Timer Query, Overdraw analysis"
+    }
+  ]
+}

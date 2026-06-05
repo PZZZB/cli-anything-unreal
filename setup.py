@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Setup script for cli-anything-unreal
+Setup script for ue-cli
 
 Install (dev mode):
     pip install -e .
@@ -24,7 +24,7 @@ version_ns = {}
 exec(VERSION_FILE.read_text(encoding="utf-8"), version_ns)
 
 setup(
-    name="cli-anything-unreal",
+    name="ue-cli",
     version=version_ns["__version__"],
     description="CLI harness for Unreal Engine - control UE editor via CLI for AI Agent workflows",
     long_description=long_description,
@@ -60,7 +60,7 @@ setup(
 
     entry_points={
         "console_scripts": [
-            "cli-anything-unreal=cli_anything.unreal.unreal_cli:main",
+            "ue-cli=cli_anything.unreal.unreal_cli:main",
         ],
     },
     package_data={

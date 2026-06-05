@@ -1,0 +1,37 @@
+﻿{
+  "eval_id": 2,
+  "eval_name": "renderdoc-capture-with-screenshot",
+  "config": "without_skill",
+  "assertions": [
+    {
+      "name": "uses-editor-exec-renderdoc-captureframe",
+      "text": "Response uses `editor exec renderdoc.captureframe` as the GPU capture method",
+      "passed": false,
+      "evidence": "Response suggests RenderDoc GUI, Ctrl+Shift+PrintScreen, and `RenderDoc.CaptureFrame` console command but does NOT use `ue-cli editor exec` syntax. It mentions 'you can use the ue-cli tool or UE5's console commands' but only gives the raw UE console command `RenderDoc.CaptureFrame` not the CLI wrapper."
+    },
+    {
+      "name": "uses-screenshot-capture",
+      "text": "Response mentions `screenshot capture` for the visual reference screenshot",
+      "passed": false,
+      "evidence": "Response suggests High Resolution Screenshot tool, `HighResShot 2` console command, and F9 鈥?none of which use `ue-cli screenshot capture`"
+    },
+    {
+      "name": "mentions-renderdoc-plugin-prerequisite",
+      "text": "Response mentions the RenderDoc plugin prerequisite",
+      "passed": true,
+      "evidence": "Line 14-17: 'Enable the plugin: Go to Edit > Plugins, search for RenderDoc'"
+    },
+    {
+      "name": "correct-port-usage",
+      "text": "Response uses --port 30010 since the user specified the editor is on that port",
+      "passed": false,
+      "evidence": "No mention of --port 30010 anywhere. The user specified the editor is on port 30010 but the response does not use this information."
+    },
+    {
+      "name": "explains-rdc-output",
+      "text": "Response explains what the .rdc output is and where it goes",
+      "passed": true,
+      "evidence": "Line 18: 'The capture file (.rdc) will be saved to the RenderDoc capture path'; Lines 54-62: Debugging workflow explains how to use .rdc for analysis"
+    }
+  ]
+}

@@ -2,46 +2,44 @@
 
 ## AI Progressive Material Editing Workflow
 
-When editing a material, follow this progressive workflow to avoid context overflow and work in your comfort zone (HLSL).
+Edit materials progressively to avoid context overflow. Prefer HLSL Custom nodes when useful.
 
 ### 1. Locate or Create
 
-Find an existing material or create a new one:
 ```bash
-cli-anything-unreal material list --path /Game/Materials/
+ue-cli material list --path /Game/Materials/
 # Or create via Python script:
-cli-anything-unreal editor run-script create_mat.py
+ue-cli editor run-script create_mat.py
 ```
 
 ### 2. Inspect Properties & Topology
 
-Check material outputs and node connection graph before editing:
 ```bash
 # Full info: nodes, parameters, textures, connections, Custom node code
-cli-anything-unreal material info /Game/M_Water
+ue-cli material info /Game/M_Water
 
 # Lightweight connection graph with orphan detection
-cli-anything-unreal material get-graph /Game/M_Water
+ue-cli material get-graph /Game/M_Water
 ```
 
 ### 3. HLSL Custom Node (Preferred Approach)
 
-The visual node graph is difficult for AI to manipulate. Writing HLSL in a Custom node is easier and more robust:
+Visual graph is awkward for AI. HLSL in Custom node is often simpler/safer:
 
 ```bash
 # Add a Custom node with HLSL from a file
-cli-anything-unreal material add-node /Game/M_Water \
+ue-cli material add-node /Game/M_Water \
     --type MaterialExpressionCustom --code-file my_shader.hlsl
 
 # Connect to an output pin
-cli-anything-unreal material connect /Game/M_Water \
+ue-cli material connect /Game/M_Water \
     --from MaterialExpressionCustom_0 --to __material_output__ --to-input BaseColor
 
-# Recompile → {"status":"ok"} or {"status":"error","compile_errors":[...]}
-cli-anything-unreal material recompile /Game/M_Water
+# Recompile -> {"status":"ok"} or {"status":"error","compile_errors":[...]}
+ue-cli material recompile /Game/M_Water
 ```
 
-To update HLSL code on an existing Custom node, use `editor run-script`:
+Update HLSL on existing Custom node via `editor run-script`:
 ```python
 import unreal
 mat = unreal.load_asset("/Game/M_Water")
@@ -54,51 +52,51 @@ if node:
 
 Then recompile:
 ```bash
-cli-anything-unreal material recompile /Game/M_Water
+ue-cli material recompile /Game/M_Water
 ```
 
 ### 4. Alternative: Standard Nodes
 
-For simpler changes, use standard expression nodes:
+For simple changes:
 
 ```bash
 # Add a Constant3Vector node
-cli-anything-unreal material add-node /Game/M_Water \
+ue-cli material add-node /Game/M_Water \
     --type MaterialExpressionConstant3Vector --pos-x -200 --pos-y 0
 
 # Connect to BaseColor
-cli-anything-unreal material connect /Game/M_Water \
+ue-cli material connect /Game/M_Water \
     --from Constant3Vector_0 --to __material_output__ --to-input BaseColor
 
 # Set a scalar parameter on a MaterialInstance
-cli-anything-unreal material set-param /Game/MI_Water \
+ue-cli material set-param /Game/MI_Water \
     --name Roughness --value 0.5 --type scalar
 
 # Recompile
-cli-anything-unreal material recompile /Game/M_Water
+ue-cli material recompile /Game/M_Water
 ```
 
-**Connect to material output:** Use `--to __material_output__` with `--to-input` being the material property name: `BaseColor`, `Metallic`, `Roughness`, `Normal`, `Emissive`, `Opacity`, `WorldPositionOffset`, etc.
+**Connect to material output:** `--to __material_output__` + `--to-input` material property: `BaseColor`, `Metallic`, `Roughness`, `Normal`, `Emissive`, `Opacity`, `WorldPositionOffset`, etc.
 
 ### 5. Setting Node Properties
 
-Per the "Query First, Then Set" core principle, always use `editor api-discover` to check the node's property types before setting them:
+Always `editor api-discover` node type before setting props:
 
 ```bash
 # Step 1: Discover what properties the node type has
-cli-anything-unreal editor api-discover unreal.MaterialExpressionConstant3Vector
-# → Shows: constant (LinearColor), desc (str), etc.
+ue-cli editor api-discover unreal.MaterialExpressionConstant3Vector
+# -> Shows: constant (LinearColor), desc (str), etc.
 
 # Step 2: Use editor run-script with the correct type
 ```
 
-**For simple properties (int, float, str, enum)** on newly added nodes, `add-node --set` works:
+**Simple properties (int, float, str, enum)** on new nodes can use `add-node --set`:
 ```bash
-cli-anything-unreal material add-node /Game/M \
+ue-cli material add-node /Game/M \
     --type MaterialExpressionPanner --set speed_x=0.15
 ```
 
-**For any property on an existing node**, use `editor run-script` with `get_material_property_input_node`:
+**Any property on existing node**: use `editor run-script` + `get_material_property_input_node`:
 ```python
 import unreal
 mat = unreal.load_asset("/Game/M_Water")
@@ -108,7 +106,7 @@ if node:
     node.set_editor_property("constant", unreal.LinearColor(0.9, 0.3, 0.1, 1.0))
 ```
 
-**When creating a node with complex properties**, combine creation + setting in one script:
+**Complex properties at creation**: create + set in one script:
 ```python
 import unreal
 mat = unreal.load_asset("/Game/M_Water")
@@ -119,77 +117,78 @@ unreal.MaterialEditingLibrary.connect_material_property(
     expr, "", unreal.MaterialProperty.MP_BASE_COLOR)
 ```
 
-**Progressive Node Discovery:** There are 400+ `MaterialExpression` classes — do not try to list them all. Use a targeted Python search:
+**Progressive Node Discovery:** 400+ `MaterialExpression` classes; do targeted search:
 ```python
 import unreal
 # Search for nodes related to "Noise"
 print([cls for cls in dir(unreal) if "Noise" in cls and cls.startswith("MaterialExpression")])
 ```
-Then use `editor api-discover unreal.MaterialExpressionNoise` to see the node's properties before setting them.
+Then `editor api-discover unreal.MaterialExpressionNoise`.
 
 ## HLSL / Shader Source Discovery
 
-When writing Custom HLSL for UE5 materials, you need to know what cbuffer/struct resources are available (`cbuffer View`, `FPrimitiveConstants`, `FMaterialPixelParameters`, etc.). These vary by engine version and material configuration.
+For Custom HLSL, discover available cbuffers/structs (`cbuffer View`, `FPrimitiveConstants`, `FMaterialPixelParameters`). They vary by engine/material.
 
 **Two complementary commands:**
 
-### `material hlsl-code` — Lightweight, No Recompile
-Returns `/Engine/Generated/Material.ush` with `FMaterialPixelParameters` and material-specific structs. Does not include `cbuffer View`.
+### `material hlsl-code` - Lightweight, No Recompile
+
+Returns `/Engine/Generated/Material.ush` with `FMaterialPixelParameters` + material structs. No `cbuffer View`.
 
 ```bash
-cli-anything-unreal material hlsl-code /Game/M_Custom
-# → {"source": "plugin", "lines": 5250, "file": "F:/Project/Saved/CliAnything/M_Custom.ush"}
+ue-cli material hlsl-code /Game/M_Custom
+# -> {"source": "plugin", "lines": 5250, "file": "F:/Project/Saved/CliAnything/M_Custom.ush"}
 ```
 
-### `material shader-source` — Full Source with cbuffers
-Triggers synchronous recompile, returns all compiled `.usf` files with complete cbuffer/struct definitions including `cbuffer View`, `FPrimitiveConstants`, etc.
+### `material shader-source` - Full Source with cbuffers
+
+Triggers sync recompile, returns compiled `.usf` files with cbuffers/structs including `cbuffer View`, `FPrimitiveConstants`.
 
 ```bash
-cli-anything-unreal material shader-source /Game/M_Custom
-# → {"source": "plugin", "shader_count": 12, "shaders": [...], "output_dir": "..."}
+ue-cli material shader-source /Game/M_Custom
+# -> {"source": "plugin", "shader_count": 12, "shaders": [...], "output_dir": "..."}
 ```
 
 ### Typical Shader Development Workflow
 
 ```bash
 # 1. Get lightweight HLSL context (fast)
-cli-anything-unreal material hlsl-code /Game/M_Custom
+ue-cli material hlsl-code /Game/M_Custom
 
 # 2. Get full shader source with cbuffers (triggers recompile)
-cli-anything-unreal material shader-source /Game/M_Custom
+ue-cli material shader-source /Game/M_Custom
 
 # 3. Read shader files to discover available resources (cbuffer View members, etc.)
 
 # 4. Write Custom HLSL code using discovered resources
 
 # 5. Recompile and verify
-cli-anything-unreal material recompile /Game/M_Custom
+ue-cli material recompile /Game/M_Custom
 ```
 
-## Actor → Material → Shader Investigation
+## Actor -> Material -> Shader Investigation
 
-When you need to trace from a visible actor back to its shader code:
+Trace visible actor to shader:
 
 ```bash
-cli-anything-unreal scene list -q "MyActor"
-cli-anything-unreal scene get-material "<actor_path>"
-cli-anything-unreal material info /Game/SomeMaterial
-cli-anything-unreal material hlsl-code /Game/SomeMaterial
+ue-cli scene list -q "MyActor"
+ue-cli scene get-material "<actor_path>"
+ue-cli material info /Game/SomeMaterial
+ue-cli material hlsl-code /Game/SomeMaterial
 ```
 
 ## Diagnostics
 
-To check an existing material for compile errors or common issues:
 ```bash
-cli-anything-unreal material get-errors /Game/M_Water
-cli-anything-unreal material analyze /Game/M_Water
+ue-cli material get-errors /Game/M_Water
+ue-cli material analyze /Game/M_Water
 ```
 
-Full command reference: see `commands.md` → `material` section.
+Full command reference: `commands.md` -> `material`.
 
 ## Material-Specific Notes
 
-- **`MEL.recompile_material()` is void** — cannot detect compile failures. Always verify with CLI `material recompile` or `material get-errors` (checks without recompiling). Never assume success just because no exception was raised.
-- `Material.expressions` is protected in UE5.7+ — use `material info` to read nodes, and CLI commands (`add-node`, `connect`, `delete-node`) to edit them. Do not access `expressions` directly in Python.
-- To find existing nodes for property modification, use `MaterialEditingLibrary.get_material_property_input_node()` — do not try `find_object` (unreliable) or access `expressions` (protected).
-- `material shader-source` always recompiles synchronously to guarantee the latest source. It may take a moment for complex materials.
+- **`MEL.recompile_material()` is void** - cannot detect compile failures. Verify with `material recompile` or `material get-errors`. No exception != success.
+- `Material.expressions` protected in UE5.7+. Read nodes with `material info`; edit via `add-node`, `connect`, `delete-node`.
+- Existing node prop edits: use `MaterialEditingLibrary.get_material_property_input_node()`; avoid `find_object` and direct `expressions`.
+- `material shader-source` always sync recompiles to guarantee latest source; complex materials may take time.
