@@ -166,12 +166,18 @@ cli-anything-unreal screenshot capture --filename before_capture
 
 ### Analyzing the Capture
 
-The `.rdc` file can be analyzed with the `renderdoc-mcp` skill if available, or opened manually in the RenderDoc application. Common analysis tasks:
+The `.rdc` file can be analyzed with the `rdc-cli` skill if available, or opened manually in the RenderDoc application. Common analysis tasks:
 
 - **Shader debugging**: Inspect pixel/vertex shader execution step by step.
 - **Draw call inspection**: Identify expensive draw calls, overdraw, or redundant state changes.
 - **Texture/RT verification**: Check intermediate render targets to diagnose visual artifacts.
 - **Performance profiling**: Review GPU timings per draw call or pass.
+
+### Android Packaged Apps
+
+For UE Android packaged-app captures, use the `rdc-cli` skill's Android loader workflow instead of editor-only `renderdoc.captureframe`.
+
+Known UE-specific failure: Adreno + RenderDoc Android loader + `VK_KHR_buffer_device_address` can fail at `vkAllocateMemory` with `VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS`. This is not an RDG/subpass crash. The verified UE-side workaround is to comment out the user-identified `ADD_CUSTOM_EXTENSION` block in `Engine/Source/Runtime/VulkanRHI/Private/VulkanExtensions.cpp` (`FVulkanKHRBufferDeviceAddressExtension` through the related ray-tracing/vendor diagnostic extensions), then rebuild/package Development. Keep the full capture flow, evidence, and Android GPU debug cleanup in `rdc-cli`'s `references/android-loader-and-ue5.md`.
 
 ### Troubleshooting
 
