@@ -148,6 +148,7 @@ def _capture_viewport_png_raw(
     rc_timeout: float | None = None,
     viewport_rect: tuple[int, int, int, int] | None = None,
     use_viewport_bounds: bool = True,
+    output_path: str | None = None,
 ) -> dict:
     """Capture the main editor window to PNG from the CLI host (Windows GDI + Pillow).
 
@@ -167,13 +168,22 @@ def _capture_viewport_png_raw(
 
     time.sleep(delay)
 
-    save_dir = (
-        Path(project_dir) / "Saved" / "Screenshots" / "WindowsEditor"
-        if project_dir
-        else Path.cwd()
-    )
-    save_dir.mkdir(parents=True, exist_ok=True)
-    save_path = save_dir / f"{filename}.png"
+    if output_path:
+        requested_path = Path(output_path).expanduser()
+        if requested_path.suffix.lower() in {".jpg", ".jpeg"}:
+            save_path = requested_path.with_suffix(".png")
+        elif not requested_path.suffix:
+            save_path = requested_path.with_suffix(".png")
+        else:
+            save_path = requested_path
+    else:
+        save_dir = (
+            Path(project_dir) / "Saved" / "Screenshots" / "WindowsEditor"
+            if project_dir
+            else Path.cwd()
+        )
+        save_path = save_dir / f"{filename}.png"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
 
     hwnd = api.find_editor_window_hwnd()
     if not hwnd:
@@ -218,6 +228,7 @@ def take_screenshot(
     res_x: int = 1920,
     res_y: int = 1080,
     delay: float = _DEFAULT_RENDER_DELAY,
+    output_path: str | None = None,
 ) -> dict:
     """Capture the main Unreal Editor window to PNG (then optional JPEG for agents).
 
@@ -229,17 +240,24 @@ def take_screenshot(
         res_x: Unused; capture uses the live editor window size.
         res_y: Unused; capture uses the live editor window size.
         delay: Seconds for viewport to render before capture.
+        output_path: Optional full path for the requested PNG/JPG output.
 
     Returns:
         {"path": str, "size": int} or {"error": str}
     """
     raw = _capture_viewport_png_raw(
-        api, filename, project_dir, wait_timeout, res_x, res_y, delay
+        api, filename, project_dir, wait_timeout, res_x, res_y, delay, output_path=output_path
     )
     if raw.get("status") == "ok":
         screenshot_path = raw["path_raw"]
         size = raw["size_raw"]
-        compressed = compress_for_agent(screenshot_path)
+        requested_path = Path(output_path).expanduser() if output_path else None
+        compressed_target = (
+            str(requested_path)
+            if requested_path and requested_path.suffix.lower() in {".jpg", ".jpeg"}
+            else None
+        )
+        compressed = compress_for_agent(screenshot_path, output_path=compressed_target)
         response = {
             "status": "ok",
             "read_this": compressed or screenshot_path,
@@ -248,6 +266,8 @@ def take_screenshot(
             "capture_mode": raw["capture_mode"],
             "refresh": raw["refresh"],
         }
+        if requested_path:
+            response["requested_path"] = str(requested_path)
         if compressed:
             response["compressed"] = compressed
             response["size_compressed"] = Path(compressed).stat().st_size

@@ -166,6 +166,61 @@ class TestScreenshot:
         assert kwargs["wait_timeout"] <= 5.0
         assert kwargs["delay"] <= 0.25
 
+    def test_capture_path_passes_full_output_path(self, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        target = tmp_path / "custom" / "shot.png"
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.screenshot.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.screenshot.take_screenshot") as mock_capture:
+            mock_editor.return_value = MagicMock()
+            mock_capture.return_value = {"status": "ok", "path_raw": str(target)}
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "screenshot", "capture",
+                "--path", str(target),
+            ])
+
+        assert result.exit_code == 0
+        assert mock_capture.call_args.kwargs["output_path"] == str(target)
+        data = json.loads(result.output)
+        assert data["result"]["default_path"] == str(target)
+
+    def test_capture_png_raw_writes_exact_output_path(self, tmp_path):
+        from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw
+
+        api = MagicMock()
+        api.bring_to_foreground.return_value = True
+        api.find_editor_window_hwnd.return_value = 123
+        api.exec_python.return_value = {"status": "ok"}
+        api.exec_console.return_value = {"status": "ok"}
+        api.exec_python_ex.return_value = {"LogOutput": []}
+        target = tmp_path / "requested" / "exact.png"
+
+        def fake_capture(_hwnd, output_path, crop_rect=None):
+            Path(output_path).write_bytes(b"png")
+            return True
+
+        with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
+             patch("cli_anything.unreal.core.screenshot.time.sleep"), \
+             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png", side_effect=fake_capture):
+            result = _capture_viewport_png_raw(
+                api,
+                "ignored",
+                str(tmp_path / "Project"),
+                wait_timeout=15.0,
+                res_x=1920,
+                res_y=1080,
+                delay=0,
+                output_path=str(target),
+            )
+
+        assert result["status"] == "ok"
+        assert result["path_raw"] == str(target)
+        assert target.read_bytes() == b"png"
+
     def test_compress_for_agent_no_pillow(self, tmp_path):
         """Test graceful handling when Pillow is not available."""
         from cli_anything.unreal.core.screenshot import compress_for_agent

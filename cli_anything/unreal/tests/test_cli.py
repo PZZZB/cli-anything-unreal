@@ -131,6 +131,51 @@ class TestCLI:
         assert call_kw["jpeg_for_llm"] is True
         assert call_kw["max_atlas_edge"] == 1920
 
+    def test_msys2_argv_fix_preserves_windows_output_paths(self, tmp_path):
+        import sys
+        from cli_anything.unreal.unreal_cli import _fix_argv_msys2
+
+        target = str(tmp_path / "shots" / "missing.png")
+        original = list(sys.argv)
+        try:
+            sys.argv = ["ue-cli", "screenshot", "capture", "--path", target]
+            with patch.dict(os.environ, {}, clear=True):
+                _fix_argv_msys2()
+            assert sys.argv[-1] == target
+        finally:
+            sys.argv = original
+
+    def test_msys2_argv_fix_repairs_virtual_game_paths(self, tmp_path):
+        import sys
+        from cli_anything.unreal.unreal_cli import _fix_argv_msys2
+
+        git_root = tmp_path / "Git"
+        git_root.mkdir(parents=True)
+        mangled = str(git_root / "Game" / "Materials" / "M_Test")
+        original = list(sys.argv)
+        try:
+            sys.argv = ["ue-cli", "material", "info", mangled]
+            with patch.dict(os.environ, {"MSYSTEM": "MINGW64"}, clear=False):
+                _fix_argv_msys2()
+            assert sys.argv[-1] == "/Game/Materials/M_Test"
+        finally:
+            sys.argv = original
+
+    def test_msys2_argv_fix_skips_non_windows(self, tmp_path):
+        import sys
+        from cli_anything.unreal.unreal_cli import _fix_argv_msys2
+
+        target = str(tmp_path / "Git" / "Game" / "Materials" / "M_Test")
+        original = list(sys.argv)
+        try:
+            sys.argv = ["ue-cli", "material", "info", target]
+            with patch("cli_anything.unreal.unreal_cli.sys.platform", "linux"), \
+                 patch.dict(os.environ, {"MSYSTEM": "MINGW64"}, clear=False):
+                _fix_argv_msys2()
+            assert sys.argv[-1] == target
+        finally:
+            sys.argv = original
+
     def test_project_info(self, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli

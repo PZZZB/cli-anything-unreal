@@ -27,20 +27,17 @@ def screenshot_static(state: AppState, output_path, filename, no_compress):
     """
     from cli_anything.unreal.core.screenshot import take_screenshot
 
-    # If --path given, extract directory-safe filename prefix from it
     if output_path:
         import os
-        # Determine extension to set no_compress
         ext = os.path.splitext(output_path)[1].lower()
         if ext == ".png":
             no_compress = True
-        # Use full path stem as filename prefix (take_screenshot adds extension)
-        filename = os.path.splitext(output_path)[0]
 
     api = require_editor(state)
     result = take_screenshot(
         api, filename,
         project_dir=state.session.project_dir,
+        output_path=output_path,
     )
 
     # Default: same path agents read — JPG from compress_for_agent when not --no-compress

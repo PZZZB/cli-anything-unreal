@@ -170,7 +170,7 @@ All screenshot commands require editor.
 
 | Command | Description |
 |---------|-------------|
-| `screenshot capture [--path PATH] [--filename NAME] [--no-compress]` | Capture main editor window |
+| `screenshot capture [--path PATH] [--filename NAME] [--no-compress]` | Capture main editor window. `--path` is a full output path; `.png` writes the raw PNG there, `.jpg/.jpeg` writes the compressed image there and keeps raw PNG beside it |
 | `screenshot capture-sequence [-n N] [-i SEC] [--no-compress]` | Capture sequence with bounded per-frame waits |
 
 ## session - Undo/Redo

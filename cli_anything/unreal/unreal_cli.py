@@ -92,6 +92,10 @@ COMMAND_SPECS = [
 def _fix_argv_msys2():
     import os
 
+    if sys.platform != "win32" or not any(os.environ.get(name) for name in ("MSYSTEM", "MSYSTEM_PREFIX", "MSYS")):
+        return
+
+    virtual_roots = {"Game", "Engine", "Script"}
     fixed = []
     for arg in sys.argv:
         if (
@@ -111,7 +115,11 @@ def _fix_argv_msys2():
                     msys_prefix_len = i + 1
                 else:
                     break
-            fixed.append("/" + "/".join(parts[msys_prefix_len:]))
+            remaining = parts[msys_prefix_len:]
+            if remaining and remaining[0] in virtual_roots:
+                fixed.append("/" + "/".join(remaining))
+            else:
+                fixed.append(arg)
         else:
             fixed.append(arg)
     sys.argv = fixed
