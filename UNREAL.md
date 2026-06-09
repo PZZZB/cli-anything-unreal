@@ -174,7 +174,7 @@ Binary `.uasset`; never parse/write directly. Use editor via HTTP + Python.
 | Run Python | `editor run-script script.py` |
 | Get/set CVar | `editor cvar get r.ScreenPercentage` / `editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -4`; missing or unverified empty CVars return an error |
 | List actors | `scene list [--class StaticMeshActor]` |
-| Find actor | `scene list -q "PlayerStart"` |
+| Find actor | `scene list -q "PlayerStart"` searches UObject name, Outliner label, and path; use `--field name --exact` for precise name match |
 | Inspect actor API | `editor api-discover /Game/Maps/Level.Level:PersistentLevel.MyActor` |
 | Get actor prop | `scene property <path> <property>` |
 | List materials | `material list [--path /Game/Materials]` |

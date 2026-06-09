@@ -19,6 +19,8 @@ def list_actors(
     api: UEEditorAPI,
     actor_class: str | None = None,
     name_filter: str | None = None,
+    query_field: str = "all",
+    exact: bool = False,
 ) -> dict:
     """List actors in the current level with optional filtering.
 
@@ -33,17 +35,25 @@ def list_actors(
     actor_class:
         Optional class name to filter by (e.g., ``"StaticMeshActor"``).
     name_filter:
-        Optional name substring filter (case-insensitive).
+        Optional actor query filter (case-insensitive).
+    query_field:
+        Field searched by *name_filter*: ``"name"``, ``"label"``, ``"path"``,
+        or ``"all"`` for all three.
+    exact:
+        If True, compare the whole selected field case-insensitively instead
+        of treating *name_filter* as a regex partial match.
 
     Returns
     -------
     dict
-        ``{"actors": [{"path": str, "name": str, "class": str}, ...], "count": int}``
+        ``{"actors": [{"path": str, "name": str, "label": str, "class": str}, ...], "count": int}``
     """
     from cli_anything.unreal.core.script_runner import run_python_code
 
     class_repr = repr(actor_class) if actor_class else "None"
     name_repr = repr(name_filter) if name_filter else "None"
+    field_repr = repr(query_field or "all")
+    exact_repr = repr(bool(exact))
 
     script = f'''\
 import re as _re
@@ -51,11 +61,20 @@ import unreal as _u
 
 _actor_class = {class_repr}
 _name_filter = {name_repr}
+_query_field = {field_repr}
+_exact = {exact_repr}
+_valid_fields = {{"name", "label", "path", "all"}}
+result = None
 
 # Case-insensitive regex for the name filter (re.search — partial match OK).
 # Plain strings remain valid (they're degenerate regexes).
 _name_pat = None
-if _name_filter:
+if _query_field not in _valid_fields:
+    result = {{"error": "Invalid --field: " + str(_query_field),
+               "field": _query_field,
+               "valid_fields": sorted(_valid_fields)}}
+
+if result is None and _name_filter and not _exact:
     try:
         _name_pat = _re.compile(_name_filter, _re.IGNORECASE)
     except _re.error as _e:
@@ -63,7 +82,45 @@ if _name_filter:
                    "query": _name_filter}}
         _name_pat = False  # sentinel — skip the rest
 
-if _name_pat is False:
+def _cli_actor_label(_actor):
+    try:
+        return _actor.get_actor_label()
+    except Exception:
+        return _actor.get_name()
+
+def _actor_row(_actor):
+    _name = _actor.get_name()
+    _label = _cli_actor_label(_actor)
+    _path = _actor.get_path_name()
+    return {{
+        "path": _path,
+        "name": _name,
+        "label": _label,
+        "class": _actor.__class__.__name__,
+    }}
+
+def _values_for_query(_actor):
+    _row = _actor_row(_actor)
+    if _query_field == "all":
+        return [_row["name"], _row["label"], _row["path"]], _row
+    return [_row[_query_field]], _row
+
+def _matches_actor(_actor):
+    if not _name_filter:
+        return True, _actor_row(_actor)
+    _values, _row = _values_for_query(_actor)
+    if _exact:
+        _needle = _name_filter.lower()
+        for _value in _values:
+            if str(_value).lower() == _needle:
+                return True, _row
+        return False, _row
+    for _value in _values:
+        if _name_pat.search(str(_value)):
+            return True, _row
+    return False, _row
+
+if result is not None:
     pass
 elif _actor_class:
     _cls = getattr(_u, _actor_class, None)
@@ -74,27 +131,19 @@ elif _actor_class:
         _raw = _u.GameplayStatics.get_all_actors_of_class(_world, _cls)
         _actors = []
         for _a in _raw:
-            _name = _a.get_name()
-            if _name_pat is not None and not _name_pat.search(_name):
+            _matched, _row = _matches_actor(_a)
+            if not _matched:
                 continue
-            _actors.append({{
-                "path": _a.get_path_name(),
-                "name": _name,
-                "class": _a.__class__.__name__,
-            }})
+            _actors.append(_row)
         result = {{"actors": _actors, "count": len(_actors)}}
 else:
     _sub = _u.get_editor_subsystem(_u.EditorActorSubsystem)
     _actors = []
     for _a in _sub.get_all_level_actors():
-        _name = _a.get_name()
-        if _name_pat is not None and not _name_pat.search(_name):
+        _matched, _row = _matches_actor(_a)
+        if not _matched:
             continue
-        _actors.append({{
-            "path": _a.get_path_name(),
-            "name": _name,
-            "class": _a.__class__.__name__,
-        }})
+        _actors.append(_row)
     result = {{"actors": _actors, "count": len(_actors)}}
 '''
     return run_python_code(api, script)

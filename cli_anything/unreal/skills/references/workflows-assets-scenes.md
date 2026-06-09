@@ -82,8 +82,10 @@ ue-cli asset delete /Game/M_Old --force
 ue-cli editor api-discover <actor_path>
 ue-cli editor api-discover <actor_path> -d Intensity,bVisible
 
-# Search actors by name
+# Search actors by UObject name, World Outliner label, or path
 ue-cli scene list -q "DirectionalLight"
+ue-cli scene list -q "SM_Env_FmlBush17" --field label
+ue-cli scene list -q "StaticMeshActor_27" --field name --exact
 
 # Get/Set property
 ue-cli scene property <actor_path> Intensity

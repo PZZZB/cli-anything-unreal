@@ -15,24 +15,37 @@ def scene_group():
 @scene_group.command("list")
 @click.option("--class", "actor_class", default=None, help="Filter by class (e.g., StaticMeshActor)")
 @click.option("--query", "-q", default=None,
-              help="Case-insensitive regex for actor names (via re.search). "
+              help="Case-insensitive regex for actor name/label/path (via re.search). "
                    "Plain strings behave as substrings; anchors/alternation also work.")
+@click.option("--field", "query_field",
+              type=click.Choice(["all", "name", "label", "path"], case_sensitive=False),
+              default="all", show_default=True,
+              help="Actor field searched by --query.")
+@click.option("--exact", is_flag=True,
+              help="Treat --query as a case-insensitive whole-field match instead of regex partial match.")
 @handle_error
 @click.pass_obj
-def scene_list_actors(state: AppState, actor_class, query):
+def scene_list_actors(state: AppState, actor_class, query, query_field, exact):
     """List actors in the current level (like the World Outliner).
 
     \b
     Examples:
         scene list                              # all actors
         scene list --class StaticMeshActor      # filter by class
-        scene list -q Light                     # search by name
+        scene list -q Light                     # search name/label/path
+        scene list -q SM_Env_FmlBush17 --field label --exact
         scene list --class PointLight -q Fill   # combine filters
     """
     from cli_anything.unreal.core.scene import list_actors
 
     api = require_editor(state)
-    result = list_actors(api, actor_class=actor_class, name_filter=query)
+    result = list_actors(
+        api,
+        actor_class=actor_class,
+        name_filter=query,
+        query_field=query_field,
+        exact=exact,
+    )
     output(result, state)
 
 

@@ -83,6 +83,51 @@ class TestScene:
             result = list_actors_of_class(api, "BadClass")
         assert "error" in result
 
+    def test_list_actors_query_checks_label_and_path(self):
+        from cli_anything.unreal.core.scene import list_actors
+
+        api = self._mock_api()
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"actors": [], "count": 0}
+            list_actors(api, name_filter="FmlBush17")
+
+        script = mock_run.call_args.args[1]
+        assert "get_actor_label" in script
+        assert "get_path_name" in script
+        assert '"label": _label' in script
+        assert "_query_field = 'all'" in script
+
+    def test_list_actors_class_filter_query_checks_label_and_path(self):
+        from cli_anything.unreal.core.scene import list_actors
+
+        api = self._mock_api()
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"actors": [], "count": 0}
+            list_actors(api, actor_class="StaticMeshActor", name_filter="FmlBush17")
+
+        script = mock_run.call_args.args[1]
+        assert "_u.GameplayStatics.get_all_actors_of_class" in script
+        assert "get_actor_label" in script
+        assert "_matches_actor(_a)" in script
+
+    def test_list_actors_exact_field_options(self):
+        from cli_anything.unreal.core.scene import list_actors
+
+        api = self._mock_api()
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"actors": [], "count": 0}
+            list_actors(
+                api,
+                name_filter="StaticMeshActor_27",
+                query_field="name",
+                exact=True,
+            )
+
+        script = mock_run.call_args.args[1]
+        assert "_query_field = 'name'" in script
+        assert "_exact = True" in script
+        assert "str(_value).lower() == _needle" in script
+
     def test_get_actor_property(self):
         from cli_anything.unreal.core.scene import get_actor_property
 
@@ -314,6 +359,34 @@ class TestSceneCLI:
             assert data["status"] == "success"
             assert data["result"]["count"] == 1
             assert data["result"]["query"] == "Cube"
+
+    def test_scene_find_cli_exact_label_field(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.list_actors") as mock_list:
+            mock_api = MagicMock()
+            mock_editor.return_value = mock_api
+            mock_list.return_value = {"actors": [], "count": 0}
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "scene", "list",
+                "-q", "SM_Env_FmlBush17",
+                "--field", "label",
+                "--exact",
+            ])
+
+        assert result.exit_code == 0
+        mock_list.assert_called_once_with(
+            mock_api,
+            actor_class=None,
+            name_filter="SM_Env_FmlBush17",
+            query_field="label",
+            exact=True,
+        )
 
     def test_scene_property_get_cli(self):
         from click.testing import CliRunner

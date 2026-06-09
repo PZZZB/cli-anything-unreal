@@ -1141,6 +1141,56 @@ class TestSceneE2E:
         assert "actors" in data["result"]
 
 
+    def test_find_actor_cli_matches_outliner_label(self, cli_runner, api_port, api):
+        from cli_anything.unreal.core.script_runner import run_python_code
+        from cli_anything.unreal.unreal_cli import cli
+
+        label = "UE_CLI_E2E_LabelOnly_Search"
+        spawn = run_python_code(api, f"""
+import unreal
+sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+actor = sub.spawn_actor_from_class(unreal.Actor, unreal.Vector(0, 0, 0))
+actor.set_actor_label({label!r})
+result = {{"path": actor.get_path_name(), "name": actor.get_name(), "label": actor.get_actor_label()}}
+""", save=False)
+        if "error" in spawn:
+            pytest.skip(f"Could not spawn label-search actor: {spawn['error']}")
+
+        try:
+            result = cli_runner.invoke(cli, [
+                "--output", "json", "--port", str(api_port),
+                "scene", "list", "-q", "LabelOnly_Search",
+            ])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["status"] == "success"
+            actors = data["result"].get("actors") or []
+            matches = [actor for actor in actors if actor.get("label") == label]
+            assert matches, data["result"]
+            assert matches[0]["name"] != label
+
+            exact = cli_runner.invoke(cli, [
+                "--output", "json", "--port", str(api_port),
+                "scene", "list", "-q", label, "--field", "label", "--exact",
+            ])
+            assert exact.exit_code == 0
+            exact_data = json.loads(exact.output)
+            exact_actors = exact_data["result"].get("actors") or []
+            assert any(actor.get("label") == label for actor in exact_actors)
+        finally:
+            path = spawn.get("path")
+            if path:
+                run_python_code(api, f"""
+import unreal
+sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+for actor in sub.get_all_level_actors():
+    if actor.get_path_name() == {path!r}:
+        sub.destroy_actor(actor)
+        break
+result = {{"status": "cleanup"}}
+""", save=False)
+
+
     def test_get_actor_transform(self, api):
         from cli_anything.unreal.core.scene import list_actors, get_actor_transform
 

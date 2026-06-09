@@ -113,7 +113,7 @@ All scene commands require editor.
 
 | Command | Description |
 |---------|-------------|
-| `scene list [--class CLASS] [-q QUERY]` | List actors in current level |
+| `scene list [--class CLASS] [-q QUERY] [--field name\|label\|path\|all] [--exact]` | List actors in current level; outputs `name`, World Outliner `label`, `path`, `class`; `-q` searches name/label/path by default |
 | `scene property ACTOR_PATH PROP[=VALUE]` | Get/set property |
 | `scene get-transform ACTOR_PATH` | Get transform |
 | `scene list-components ACTOR_PATH` | List actor components |
