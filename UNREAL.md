@@ -172,7 +172,7 @@ Binary `.uasset`; never parse/write directly. Use editor via HTTP + Python.
 | Check editor | `editor status` |
 | Run console | `editor exec "stat fps"`; returns `log_text` for captured Output Log lines |
 | Run Python | `editor run-script script.py` |
-| Get/set CVar | `editor cvar get r.ScreenPercentage` / `editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -4` |
+| Get/set CVar | `editor cvar get r.ScreenPercentage` / `editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -4`; missing or unverified empty CVars return an error |
 | List actors | `scene list [--class StaticMeshActor]` |
 | Find actor | `scene list -q "PlayerStart"` |
 | Inspect actor API | `editor api-discover /Game/Maps/Level.Level:PersistentLevel.MyActor` |

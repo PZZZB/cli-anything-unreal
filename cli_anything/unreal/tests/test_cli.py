@@ -416,6 +416,83 @@ class TestCLI:
             "-4",
         )
 
+    def test_cvar_get_errors_when_bridge_reports_missing(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            api = MagicMock()
+            api.get_cvar_info.return_value = {
+                "name": "r.__missing__",
+                "exists": False,
+                "value": "",
+            }
+            mock_editor.return_value = api
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "cvar", "get",
+                "r.__missing__",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "CVAR_NOT_FOUND"
+
+    def test_cvar_get_errors_when_empty_value_cannot_be_verified(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            api = MagicMock()
+            api.get_cvar_info.return_value = {
+                "name": "r.__maybe_missing__",
+                "exists": None,
+                "value": "",
+                "verification": "unavailable",
+            }
+            mock_editor.return_value = api
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "cvar", "get",
+                "r.__maybe_missing__",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "CVAR_GET_AMBIGUOUS_EMPTY"
+
+    def test_cvar_get_allows_verified_empty_value(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            api = MagicMock()
+            api.get_cvar_info.return_value = {
+                "name": "r.EmptyButReal",
+                "exists": True,
+                "value": "",
+            }
+            mock_editor.return_value = api
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "cvar", "get",
+                "r.EmptyButReal",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"]["name"] == "r.EmptyButReal"
+        assert data["result"]["value"] == ""
+        assert data["result"]["exists"] is True
+
     def test_viewport_bookmark_jump_cli(self, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli

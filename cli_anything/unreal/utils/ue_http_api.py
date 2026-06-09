@@ -427,6 +427,55 @@ class UEEditorAPI:
             return str(result["ReturnValue"])
         return str(result)
 
+    def get_cvar_info(self, name: str, *, timeout: int | float | None = None) -> dict:
+        """Get a console variable value plus best-effort existence metadata."""
+        marker = f"__ue_cli_cvar_info__:{time.time_ns()}:"
+        script = f"""
+import json
+import unreal
+_name = {json.dumps(name)}
+_marker = {json.dumps(marker)}
+try:
+    _info = unreal.CliAnythingBridgeLibrary.get_console_variable_info(_name)
+    unreal.log(_marker + _info)
+except Exception as _e:
+    unreal.log(_marker + json.dumps({{
+        "name": _name,
+        "exists": None,
+        "value": "",
+        "verification": "bridge_unavailable",
+        "error": str(_e),
+    }}))
+"""
+        result = self.exec_python_ex(script, timeout=timeout)
+        bridge_error: str | None = None
+        for item in result.get("LogOutput", []) or []:
+            line = str(item.get("Output", ""))
+            if marker not in line:
+                continue
+            raw = line.split(marker, 1)[1]
+            try:
+                info = json.loads(raw)
+            except json.JSONDecodeError:
+                break
+            info.setdefault("name", name)
+            info.setdefault("value", "")
+            if info.get("exists") is None and info.get("verification") == "bridge_unavailable":
+                bridge_error = str(info.get("error", ""))
+                break
+            return info
+
+        value = self.get_cvar(name)
+        fallback = {
+            "name": name,
+            "value": value,
+            "exists": True if value != "" else None,
+            "verification": "kismet_only",
+        }
+        if bridge_error:
+            fallback["bridge_error"] = bridge_error
+        return fallback
+
     def set_cvar(self, name: str, value: str) -> dict:
         """Set a console variable via console command.
 

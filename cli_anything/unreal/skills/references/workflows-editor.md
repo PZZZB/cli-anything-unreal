@@ -113,6 +113,12 @@ ue-cli editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -4
 ue-cli editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -- -4
 ```
 
+`editor cvar get NAME` fails instead of returning a misleading success when UE returns an empty value for a missing or unverified CVar. If the bridge plugin is old and the value is empty, upgrade it:
+
+```bash
+ue-cli editor plugin-upgrade
+```
+
 ## Viewport Bookmarks
 
 Console attempts have executed without moving camera:

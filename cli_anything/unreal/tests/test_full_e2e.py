@@ -392,6 +392,18 @@ class TestConsoleE2E:
         ])
         assert result.exit_code == 0
 
+    def test_cvar_get_missing_cli_errors(self, cli_runner, api_port):
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = cli_runner.invoke(cli, [
+            "--output", "json", "--port", str(api_port),
+            "editor", "cvar", "get", "r.__ue_cli_missing_cvar_probe__",
+        ])
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] in {"CVAR_NOT_FOUND", "CVAR_GET_AMBIGUOUS_EMPTY"}
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  E2E: Material Node Editing (MaterialEditingLibrary)

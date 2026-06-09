@@ -12,6 +12,7 @@
 #include "Modules/ModuleManager.h"
 #include "Framework/Application/SlateApplication.h"
 #include "HAL/CriticalSection.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -22,6 +23,8 @@
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/TextProperty.h"
+
+static FString JsonEscape(const FString& Input);
 
 class FMaterialResourceExtractSource : public FMaterialResource
 {
@@ -86,7 +89,24 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.12");
+	return TEXT("1.13");
+}
+
+FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)
+{
+	IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(*Name);
+	FString Json = TEXT("{\"name\":\"") + JsonEscape(Name) + TEXT("\"");
+	if (!Var)
+	{
+		Json += TEXT(",\"exists\":false,\"value\":\"\"}");
+		return Json;
+	}
+
+	Json += TEXT(",\"exists\":true");
+	Json += TEXT(",\"value\":\"") + JsonEscape(Var->GetString()) + TEXT("\"");
+	Json += FString::Printf(TEXT(",\"flags\":%d"), Var->GetFlags());
+	Json += TEXT("}");
+	return Json;
 }
 
 TArray<FString> UCliAnythingBridgeLibrary::GetMaterialHLSLCode(UMaterialInterface* Material, const FString& OutputPath)

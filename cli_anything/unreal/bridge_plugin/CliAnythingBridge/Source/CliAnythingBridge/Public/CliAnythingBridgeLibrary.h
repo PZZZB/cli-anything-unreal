@@ -41,6 +41,13 @@ public:
 	static FString GetPluginVersion();
 
 	/**
+	 * Returns JSON metadata for a console variable, including whether it exists.
+	 * This disambiguates missing CVars from real string CVars with empty values.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString GetConsoleVariableInfo(const FString& Name);
+
+	/**
 	 * Writes the material's translated HLSL code to a file (equivalent to Window > HLSL Code).
 	 * Calls FMaterial::GetMaterialExpressionSource() which triggers the material translator.
 	 * This is lightweight — no shader dump or RecompileShaders needed.

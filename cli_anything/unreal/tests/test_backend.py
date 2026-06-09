@@ -629,6 +629,89 @@ class TestHTTPAPI:
         val = api.get_cvar("r.VSync")
         assert val == "1"
 
+    def test_get_cvar_info_uses_bridge_metadata(self):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        api = UEEditorAPI()
+        with patch.object(api, "exec_python_ex") as mock_exec:
+            def fake_exec(script, *, timeout=None):
+                import re
+
+                marker = re.search(r'_marker = "([^"]+)"', script).group(1)
+                return {
+                    "LogOutput": [
+                        {
+                            "Output": (
+                                f'{marker}{{"name":"r.Test",'
+                                '"exists":false,"value":""}'
+                            )
+                        }
+                    ]
+                }
+
+            mock_exec.side_effect = fake_exec
+            info = api.get_cvar_info("r.Test")
+
+        assert info["name"] == "r.Test"
+        assert info["exists"] is False
+        assert info["value"] == ""
+
+    def test_get_cvar_info_marks_empty_fallback_unverified(self):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        api = UEEditorAPI()
+        with patch.object(api, "exec_python_ex", return_value={"LogOutput": []}), \
+             patch.object(api, "get_cvar", return_value=""):
+            info = api.get_cvar_info("r.MaybeMissing")
+
+        assert info["name"] == "r.MaybeMissing"
+        assert info["exists"] is None
+        assert info["value"] == ""
+        assert info["verification"] == "kismet_only"
+
+    def test_get_cvar_info_marks_nonempty_fallback_existing(self):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        api = UEEditorAPI()
+        with patch.object(api, "exec_python_ex", return_value={"LogOutput": []}), \
+             patch.object(api, "get_cvar", return_value="1"):
+            info = api.get_cvar_info("r.VSync")
+
+        assert info["name"] == "r.VSync"
+        assert info["exists"] is True
+        assert info["value"] == "1"
+        assert info["verification"] == "kismet_only"
+
+    def test_get_cvar_info_falls_back_when_bridge_is_old(self):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        api = UEEditorAPI()
+        with patch.object(api, "exec_python_ex") as mock_exec, \
+             patch.object(api, "get_cvar", return_value="1"):
+            def fake_exec(script, *, timeout=None):
+                import re
+
+                marker = re.search(r'_marker = "([^"]+)"', script).group(1)
+                return {
+                    "LogOutput": [
+                        {
+                            "Output": (
+                                f'{marker}{{"name":"r.VSync","exists":null,'
+                                '"value":"","verification":"bridge_unavailable",'
+                                '"error":"missing function"}'
+                            )
+                        }
+                    ]
+                }
+
+            mock_exec.side_effect = fake_exec
+            info = api.get_cvar_info("r.VSync")
+
+        assert info["name"] == "r.VSync"
+        assert info["exists"] is True
+        assert info["value"] == "1"
+        assert info["bridge_error"] == "missing function"
+
     def test_scan_editor_ports_empty(self):
         from cli_anything.unreal.utils.ue_http_api import scan_editor_ports
 

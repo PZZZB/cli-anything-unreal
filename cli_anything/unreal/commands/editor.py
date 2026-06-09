@@ -1173,8 +1173,31 @@ def cvar_group():
 def cvar_get(state: AppState, name):
     """Get a console variable value."""
     api = require_editor(state)
-    value = api.get_cvar(name)
-    output({"name": name, "value": value}, state)
+    info = api.get_cvar_info(name)
+    value = str(info.get("value", ""))
+    exists = info.get("exists")
+    if exists is False:
+        raise AppError(
+            "CVAR_NOT_FOUND",
+            f"CVar not found: {name}",
+            exit_code=2,
+            suggestion="Check the CVar name, or search with UE console command help.",
+            details=info,
+        )
+    if value == "" and exists is None:
+        raise AppError(
+            "CVAR_GET_AMBIGUOUS_EMPTY",
+            f"CVar returned an empty value, but existence could not be verified: {name}",
+            exit_code=2,
+            suggestion="Run: ue-cli editor plugin-upgrade, restart editor, then retry.",
+            details=info,
+        )
+    result = {"name": info.get("name", name), "value": value}
+    if exists is not None:
+        result["exists"] = exists
+    if info.get("verification"):
+        result["verification"] = info["verification"]
+    output(result, state)
 
 
 @cvar_group.command(

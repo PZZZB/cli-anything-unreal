@@ -121,7 +121,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.12"
+        assert version == "1.13"
 
     def test_get_loaded_plugin_version(self):
         """get_loaded_plugin_version queries the running editor."""

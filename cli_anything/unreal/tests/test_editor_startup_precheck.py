@@ -564,7 +564,7 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
          patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
          patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
          patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
-             "deployed": True, "action": "fresh_install", "version": "1.12"
+             "deployed": True, "action": "fresh_install", "version": "1.13"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=True), \
          patch("cli_anything.unreal.core.build.compile_project", return_value={"status": "ok"}) as mock_compile, \

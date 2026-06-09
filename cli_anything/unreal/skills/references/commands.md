@@ -17,7 +17,7 @@ Workflow examples live in sibling workflow docs.
 | `editor exec [--timeout SEC] [--log-wait SEC] COMMAND` | Run UE console command and return captured Output Log text when available (`stat unit`, `r.DumpRenderTargetPoolMemory`, `renderdoc.captureframe`) | Yes |
 | `editor viewport bookmark jump --index N [--timeout SEC]` | Jump Level Viewport bookmark 0-9; Windows only | Yes |
 | `editor run-script [PATH] [-c CODE] [--timeout N] [--no-save]` | Execute Python file/inline code with result capture | Yes |
-| `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable; negative values are supported (`... set r.X -4` or `... set r.X -- -4`) | Yes |
+| `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable; `get` errors on missing/unverified empty CVars, negative values are supported (`... set r.X -4` or `... set r.X -- -4`) | Yes |
 | `editor enable-remote` | Enable Remote Control config | No |
 | `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover UE class/API. TARGET: class, asset path, actor path | Yes |
 | `editor cancel TASK_ID` | Cancel async editor launch | - |
