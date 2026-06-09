@@ -169,6 +169,34 @@ def _add_offline_recovery_hint(entry: dict) -> None:
         entry["suggestion"] = "Run editor launch with --project <path-to.uproject> to start a reachable editor."
 
 
+def _add_online_bridge_status(entry: dict) -> None:
+    if entry.get("status") != "online" or not entry.get("port"):
+        return
+
+    from cli_anything.unreal.core.plugin_bridge import get_bundled_version, get_loaded_plugin_version
+    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+    bundled = get_bundled_version()
+    loaded = None
+    probe_failed = False
+    try:
+        loaded = get_loaded_plugin_version(UEEditorAPI(port=int(entry["port"])), timeout=5.0, raise_on_error=True)
+    except Exception:
+        probe_failed = True
+        loaded = None
+
+    entry["bridge_version"] = loaded
+    entry["bundled_version"] = bundled
+    if probe_failed:
+        entry["plugin_match"] = None
+        return
+
+    entry["plugin_match"] = loaded is not None and bundled is not None and loaded == bundled
+    if not entry["plugin_match"] and entry.get("project_path"):
+        entry["suggestion"] = "CliAnythingBridge plugin is missing or version-mismatched. Run editor plugin-upgrade for this project."
+        entry["next_command"] = f'ue-cli --project "{entry["project_path"]}" editor plugin-upgrade'
+
+
 def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict]:
     from cli_anything.unreal.utils.ue_backend import find_running_editors
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI, scan_editor_ports
@@ -223,6 +251,7 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
         if port is not None:
             used_ports.add(port)
             entry = _compact_editor_entry("online", pid, port, project_path)
+            _add_online_bridge_status(entry)
         else:
             entry = _compact_editor_entry("offline", pid, _project_config_port(project_path), project_path)
             _add_offline_recovery_hint(entry)
@@ -236,14 +265,14 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
             continue
         owner_pid = pid_by_port.get(port)
         owner = process_by_pid.get(int(owner_pid)) if owner_pid else None
-        instances.append(
-            _compact_editor_entry(
-                "online",
-                int(owner_pid) if owner_pid else None,
-                port,
-                owner.get("project") if owner else None,
-            )
+        entry = _compact_editor_entry(
+            "online",
+            int(owner_pid) if owner_pid else None,
+            port,
+            owner.get("project") if owner else None,
         )
+        _add_online_bridge_status(entry)
+        instances.append(entry)
 
     return instances
 

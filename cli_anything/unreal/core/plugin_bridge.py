@@ -105,7 +105,7 @@ def is_plugin_loaded(api) -> bool:
         return False
 
 
-def get_loaded_plugin_version(api) -> str | None:
+def get_loaded_plugin_version(api, timeout: float = 10.0, raise_on_error: bool = False) -> str | None:
     """Get the version of the plugin currently loaded in the running editor.
 
     Queries UCliAnythingBridgeLibrary::GetPluginVersion() via Python.
@@ -121,9 +121,11 @@ def get_loaded_plugin_version(api) -> str | None:
     )
 
     try:
-        result = run_python_code(api, script, timeout=10.0, save=False)
+        result = run_python_code(api, script, timeout=timeout, save=False)
         return result.get("version")
     except Exception:
+        if raise_on_error:
+            raise
         return None
 
 

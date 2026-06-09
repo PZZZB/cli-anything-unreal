@@ -86,6 +86,8 @@ def test_editor_status_lists_online_port_owner_even_when_other_project(mini_proj
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 5678, "project": other_project},
          ]), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.13"), \
          patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
              "ready": True,
              "engine": {"errors": [], "warnings": []},
@@ -100,8 +102,160 @@ def test_editor_status_lists_online_port_owner_even_when_other_project(mini_proj
     data = json.loads(result.output)
     assert data["status"] == "success"
     assert data["result"] == [
-        {"status": "online", "pid": 5678, "port": 30020, "project_path": other_project},
+        {
+            "status": "online",
+            "pid": 5678,
+            "port": 30020,
+            "project_path": other_project,
+            "bridge_version": "1.13",
+            "bundled_version": "1.13",
+            "plugin_match": True,
+        },
     ]
+
+
+def test_editor_status_online_includes_matching_bridge_versions(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.13"):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    item = data["result"][0]
+    assert item["bridge_version"] == "1.13"
+    assert item["bundled_version"] == "1.13"
+    assert item["plugin_match"] is True
+    assert "next_command" not in item
+
+
+def test_editor_status_online_suggests_plugin_upgrade_on_bridge_mismatch(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.14"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.13"):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    item = data["result"][0]
+    assert item["bridge_version"] == "1.13"
+    assert item["bundled_version"] == "1.14"
+    assert item["plugin_match"] is False
+    assert item["next_command"] == f'ue-cli --project "{mini_project}" editor plugin-upgrade'
+    assert "plugin-upgrade" in item["suggestion"]
+
+
+def test_editor_status_online_without_project_still_includes_bridge_versions():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.13"):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    item = data["result"][0]
+    assert item["project_path"] is None
+    assert item["bridge_version"] == "1.13"
+    assert item["bundled_version"] == "1.13"
+    assert item["plugin_match"] is True
+    assert "next_command" not in item
+
+
+def test_editor_status_online_bridge_probe_error_is_unknown_not_upgrade(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=TimeoutError("busy")):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    item = data["result"][0]
+    assert item["bridge_version"] is None
+    assert item["bundled_version"] == "1.13"
+    assert item["plugin_match"] is None
+    assert "next_command" not in item
+    assert "suggestion" not in item
+
+
+def test_editor_status_bridge_probe_uses_short_timeout(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    captured = {}
+
+    def fake_loaded(_api, timeout=10.0, raise_on_error=False):
+        captured["timeout"] = timeout
+        captured["raise_on_error"] = raise_on_error
+        return "1.13"
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=fake_loaded):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    assert captured["timeout"] <= 5.0
+    assert captured["raise_on_error"] is True
 
 
 def test_editor_status_lists_all_editor_processes(mini_project):
@@ -119,6 +273,8 @@ def test_editor_status_lists_all_editor_processes(mini_project):
              {"pid": 5678, "project": other_project},
          ]), \
          patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30030), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.13"), \
          patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
              "ready": True,
              "engine": {"errors": [], "warnings": []},
@@ -133,7 +289,15 @@ def test_editor_status_lists_all_editor_processes(mini_project):
     data = json.loads(result.output)
     assert data["status"] == "success"
     online, offline = data["result"]
-    assert online == {"status": "online", "pid": 1234, "port": 30020, "project_path": mini_project}
+    assert online == {
+        "status": "online",
+        "pid": 1234,
+        "port": 30020,
+        "project_path": mini_project,
+        "bridge_version": "1.13",
+        "bundled_version": "1.13",
+        "plugin_match": True,
+    }
     assert offline["status"] == "offline"
     assert offline["pid"] == 5678
     assert offline["port"] == 30030
@@ -156,7 +320,9 @@ def test_editor_status_scans_running_project_config_ports_outside_default_range(
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 1234, "project": mini_project},
          ]), \
-         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30023):
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30023), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.13"):
         result = runner.invoke(cli, [
             "--output", "json",
             "editor", "status",
@@ -166,7 +332,15 @@ def test_editor_status_scans_running_project_config_ports_outside_default_range(
     data = json.loads(result.output)
     assert data["status"] == "success"
     assert data["result"] == [
-        {"status": "online", "pid": 1234, "port": 30023, "project_path": mini_project},
+        {
+            "status": "online",
+            "pid": 1234,
+            "port": 30023,
+            "project_path": mini_project,
+            "bridge_version": "1.13",
+            "bundled_version": "1.13",
+            "plugin_match": True,
+        },
     ]
     assert [call.kwargs["port_range"] for call in scan_ports.call_args_list] == [
         (30010, 30020),

@@ -8,7 +8,7 @@ Workflow examples live in sibling workflow docs.
 
 | Command | Description | Requires Editor |
 |---------|-------------|:-:|
-| `editor status [--scan-range START-END] [TASK_ID]` | No TASK_ID: list Unreal Editor processes/result array. Offline entries include recovery hints. With TASK_ID: async progress | - |
+| `editor status [--scan-range START-END] [TASK_ID]` | No TASK_ID: list Unreal Editor processes/result array. Online entries include bridge plugin version fields; mismatch entries include `next_command` when project is known. Offline entries include recovery hints. With TASK_ID: async progress | - |
 | `editor preflight` | Check engine/project build compatibility | No |
 | `editor launch [--map MAP] [--no-wait] [--timeout N]` | Launch editor; waits until ready; kills zombies | No |
 | `editor close` | Gracefully close editor | No |
@@ -207,10 +207,16 @@ ue-cli --port 30010 editor status
 ue-cli --port 30011 material list
 ```
 
-Offline result item has `next_command`. For stale editor process:
+Online bridge mismatch and offline result items have `next_command`. For stale editor process:
 
 ```bash
 ue-cli --project "F:\MyGame\MyGame.uproject" editor launch
+```
+
+For online bridge mismatch:
+
+```bash
+ue-cli --project "F:\MyGame\MyGame.uproject" editor plugin-upgrade
 ```
 
 `editor launch` kills stale matching editors and starts reachable editor.
