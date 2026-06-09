@@ -101,6 +101,16 @@ Use `editor exec` for UE console commands:
 
 ```bash
 ue-cli editor exec "stat unit"
+ue-cli editor exec "r.DumpRenderTargetPoolMemory"
+```
+
+`editor exec` returns captured log text in `log_text` when Remote Control/Python can observe it. Some diagnostics, including render-target pool dumps, write to the project Output Log instead of the immediate Remote Control response; `ue-cli` reads the current editor log delta and returns it as `log_file_text`/`log_text`.
+
+Negative CVar values are valid:
+
+```bash
+ue-cli editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -4
+ue-cli editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -- -4
 ```
 
 ## Viewport Bookmarks
@@ -160,6 +170,7 @@ ue-cli editor launch --map /Game/Maps/MyMap
 # 2. (Optional) Tweak rendering settings before capture
 ue-cli editor cvar set r.ShadowQuality 3
 ue-cli editor cvar set r.AntiAliasingMethod 2
+ue-cli editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -4
 
 # 3. Capture a GPU frame
 ue-cli editor exec "renderdoc.captureframe"

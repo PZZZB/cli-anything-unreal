@@ -117,7 +117,7 @@ class TestScreenshot:
 
         api = MagicMock()
 
-        def fake_capture(_api, filename, project_dir, *_args):
+        def fake_capture(_api, filename, project_dir, *_args, **_kwargs):
             path = Path(project_dir) / "Saved" / "Screenshots" / "WindowsEditor" / f"{filename}.png"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(
@@ -143,6 +143,28 @@ class TestScreenshot:
         assert result["status"] == "ok"
         assert capture_mock.call_count == 3
         api.bring_to_foreground.assert_not_called()
+
+    def test_capture_sequence_command_uses_bounded_waits(self, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.screenshot.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.screenshot.capture_screenshot_atlas") as mock_capture:
+            mock_editor.return_value = MagicMock()
+            mock_capture.return_value = {"status": "ok", "atlas_path": str(tmp_path / "atlas.png")}
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "screenshot", "capture-sequence",
+                "-n", "3",
+                "-i", "0.05",
+            ])
+
+        assert result.exit_code == 0
+        kwargs = mock_capture.call_args.kwargs
+        assert kwargs["wait_timeout"] <= 5.0
+        assert kwargs["delay"] <= 0.25
 
     def test_compress_for_agent_no_pillow(self, tmp_path):
         """Test graceful handling when Pillow is not available."""

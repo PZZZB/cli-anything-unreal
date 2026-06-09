@@ -102,6 +102,8 @@ class UEEditorAPI:
         self.port = port
         self.timeout = timeout
         self.base_url = f"http://{host}:{port}"
+        self._cached_editor_hwnd: int | None = None
+        self._cached_listening_pid: int | None = None
 
         if requests is None:
             raise ImportError(
@@ -324,13 +326,14 @@ class UEEditorAPI:
 
     # ── Console Commands ────────────────────────────────────────────────
 
-    def exec_console(self, command: str) -> dict:
+    def exec_console(self, command: str, *, timeout: int | float | None = None) -> dict:
         """Execute a console command in the editor.
 
         Uses KismetSystemLibrary.ExecuteConsoleCommand via Remote Control.
 
         Args:
             command: Console command string (e.g., 'stat fps').
+            timeout: Optional HTTP request timeout override.
 
         Returns:
             API response dict.
@@ -341,19 +344,21 @@ class UEEditorAPI:
             {
                 "Command": command,
             },
+            timeout=timeout,
         )
 
-    def exec_python(self, python_code: str) -> dict:
+    def exec_python(self, python_code: str, *, timeout: int | float | None = None) -> dict:
         """Execute Python code in the editor via console command.
 
         Args:
             python_code: Python code string.
+            timeout: Optional HTTP request timeout override.
 
         Returns:
             API response dict.
         """
         escaped = python_code.replace('"', '\\"')
-        return self.exec_console(f'py "{escaped}"')
+        return self.exec_console(f'py "{escaped}"', timeout=timeout)
 
     def exec_python_file(self, script_path: str) -> dict:
         """Execute a Python script file in the editor.
@@ -457,7 +462,12 @@ class UEEditorAPI:
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
 
-            listening_pid = self._get_pid_listening_on_port(self.port)
+            if self._cached_editor_hwnd and user32.IsWindow(wintypes.HWND(self._cached_editor_hwnd)):
+                return self._cached_editor_hwnd
+
+            if self._cached_listening_pid is None:
+                self._cached_listening_pid = self._get_pid_listening_on_port(self.port)
+            listening_pid = self._cached_listening_pid
 
             TH32CS_SNAPPROCESS = 0x00000002
 
@@ -530,7 +540,9 @@ class UEEditorAPI:
                 return True
 
             user32.EnumWindows(_enum_cb, 0)
-            return _select_editor_window_hwnd(candidates)
+            hwnd = _select_editor_window_hwnd(candidates)
+            self._cached_editor_hwnd = hwnd
+            return hwnd
         except Exception:
             return None
 

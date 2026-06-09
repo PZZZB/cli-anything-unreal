@@ -946,14 +946,44 @@ class TestScriptRunner:
             assert data["result"]["actors"] == 42
             mock_run.assert_called_once()
 
-    def test_editor_exec_non_py_unchanged(self):
-        """Non-Python console commands still go through exec_console."""
+    def test_editor_exec_captures_console_log_output(self):
+        """Console commands should return log output captured by Python execution."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
         with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
             mock_api = MagicMock()
+            mock_api.exec_python_ex.return_value = {
+                "ReturnValue": True,
+                "LogOutput": [
+                    {"Type": "Info", "Output": "__ue_cli_exec_begin__:abc"},
+                    {"Type": "Info", "Output": "Render target pool dump line"},
+                    {"Type": "Info", "Output": "__ue_cli_exec_end__:abc"},
+                ],
+            }
+            mock_editor.return_value = mock_api
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "r.DumpRenderTargetPoolMemory",
+            ])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["result"]["status"] == "executed"
+            assert data["result"]["capture_mode"] == "python_log_output"
+            assert data["result"]["log_text"] == "Render target pool dump line"
+            mock_api.exec_python_ex.assert_called_once()
+            mock_api.exec_console.assert_not_called()
+
+    def test_editor_exec_falls_back_to_remote_console(self):
+        """If Python log capture is unavailable, keep old remote-console behavior."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.return_value = {"error": "python disabled"}
             mock_api.exec_console.return_value = {}
             mock_editor.return_value = mock_api
 
@@ -963,7 +993,43 @@ class TestScriptRunner:
             assert result.exit_code == 0
             data = json.loads(result.output)
             assert data["result"]["status"] == "executed"
+            assert data["result"]["capture_mode"] == "remote_console"
             mock_api.exec_console.assert_called_once_with("stat fps")
+
+    def test_editor_exec_uses_editor_log_delta_when_python_log_is_empty(self, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        log_file = tmp_path / "RXGame.log"
+        log_file.write_text("before\n", encoding="utf-8")
+
+        def fake_exec_python_ex(script, *, timeout=None):
+            import re
+
+            begin = re.search(r'_begin = "([^"]+)"', script).group(1)
+            end = re.search(r'_end = "([^"]+)"', script).group(1)
+            with log_file.open("a", encoding="utf-8") as fh:
+                fh.write(f"{begin}\n")
+                fh.write("LogRHI: Render target pool dump line\n")
+                fh.write(f"{end}\n")
+            return {"ReturnValue": True, "LogOutput": []}
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.commands.editor._resolve_editor_log_file", return_value=log_file):
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.side_effect = fake_exec_python_ex
+            mock_editor.return_value = mock_api
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "r.DumpRenderTargetPoolMemory",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"]["capture_mode"] == "editor_log_file"
+        assert data["result"]["log_text"] == "LogRHI: Render target pool dump line"
+        assert data["result"]["log_file"] == str(log_file)
 
     def test_editor_run_script_cli(self, tmp_path):
         """``editor run-script`` should call run_python_script."""

@@ -365,6 +365,57 @@ class TestCLI:
         data = json.loads(result.output)
         assert data["result"][0]["port"] == 30015
 
+    def test_cvar_set_accepts_bare_negative_value(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            api = MagicMock()
+            api.set_cvar.return_value = {}
+            mock_editor.return_value = api
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "cvar", "set",
+                "r.Shadow.Virtual.ResolutionLodBiasDirectional",
+                "-4",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"]["value"] == "-4"
+        api.set_cvar.assert_called_once_with(
+            "r.Shadow.Virtual.ResolutionLodBiasDirectional",
+            "-4",
+        )
+
+    def test_cvar_set_accepts_negative_value_after_separator(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            api = MagicMock()
+            api.set_cvar.return_value = {}
+            mock_editor.return_value = api
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "cvar", "set",
+                "r.Shadow.Virtual.ResolutionLodBiasDirectional",
+                "--",
+                "-4",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"]["value"] == "-4"
+        api.set_cvar.assert_called_once_with(
+            "r.Shadow.Virtual.ResolutionLodBiasDirectional",
+            "-4",
+        )
+
     def test_viewport_bookmark_jump_cli(self, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli

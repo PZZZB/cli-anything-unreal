@@ -76,26 +76,27 @@ except Exception:
     return f"import unreal; exec({inner!r})"
 
 
-def _ensure_editor_viewport_realtime(api: UEEditorAPI) -> bool:
+def _ensure_editor_viewport_realtime(api: UEEditorAPI, timeout: float = 3.0) -> bool:
     """Ensure level viewport ticks: clear Remote Desktop realtime override when possible, then subsystem toggle."""
     try:
-        py_result = api.exec_python(_build_ensure_viewport_realtime_py())
+        py_result = api.exec_python(_build_ensure_viewport_realtime_py(), timeout=timeout)
         return "error" not in py_result
     except Exception:
         return False
 
 
-def _refresh_editor_viewports(api: UEEditorAPI) -> dict:
+def _refresh_editor_viewports(api: UEEditorAPI, timeout: float = 3.0) -> dict:
     """Best-effort viewport refresh before screenshot capture."""
     steps = {"realtime": False, "invalidate": False, "redraw_console": False}
 
-    steps["realtime"] = _ensure_editor_viewport_realtime(api)
+    steps["realtime"] = _ensure_editor_viewport_realtime(api, timeout=timeout)
 
     # 1) Python API invalidate (editor-side viewport refresh hint)
     try:
         py_result = api.exec_python(
             "import unreal; "
-            "unreal.EditorLevelLibrary.editor_invalidate_viewports()"
+            "unreal.EditorLevelLibrary.editor_invalidate_viewports()",
+            timeout=timeout,
         )
         steps["invalidate"] = "error" not in py_result
     except Exception:
@@ -103,13 +104,35 @@ def _refresh_editor_viewports(api: UEEditorAPI) -> dict:
 
     # 2) Console redraw (forces redraw request)
     try:
-        redraw_result = api.exec_console("RedrawAllViewports")
+        redraw_result = api.exec_console("RedrawAllViewports", timeout=timeout)
         steps["redraw_console"] = "error" not in redraw_result
     except Exception:
         steps["redraw_console"] = False
 
     return steps
 
+
+def _get_active_viewport_rect(api: UEEditorAPI, timeout: float | None) -> tuple[int, int, int, int] | None:
+    bounds_script = (
+        "import unreal\n"
+        "try:\n"
+        "    bounds = unreal.CliAnythingBridgeLibrary.get_active_viewport_screen_bounds()\n"
+        "    unreal.log(f'VIEWPORT_BOUNDS:{bounds.x},{bounds.y},{bounds.z},{bounds.w}')\n"
+        "except Exception:\n"
+        "    pass"
+    )
+    bounds_res = api.exec_python_ex(bounds_script, timeout=timeout)
+    for log_item in bounds_res.get("LogOutput", []):
+        line = log_item.get("Output", "")
+        if line.startswith("VIEWPORT_BOUNDS:"):
+            parts = line.split(":", 1)[1].split(",")
+            try:
+                x, y, w, h = map(int, parts)
+                if w > 0 and h > 0:
+                    return (x, y, x + w, y + h)
+            except ValueError:
+                pass
+    return None
 
 
 def _capture_viewport_png_raw(
@@ -120,6 +143,11 @@ def _capture_viewport_png_raw(
     res_x: int,
     res_y: int,
     delay: float,
+    refresh: bool = True,
+    foreground: bool = True,
+    rc_timeout: float | None = None,
+    viewport_rect: tuple[int, int, int, int] | None = None,
+    use_viewport_bounds: bool = True,
 ) -> dict:
     """Capture the main editor window to PNG from the CLI host (Windows GDI + Pillow).
 
@@ -134,8 +162,8 @@ def _capture_viewport_png_raw(
             "refresh": {},
         }
 
-    foreground_ok = api.bring_to_foreground()
-    refresh_result = _refresh_editor_viewports(api)
+    foreground_ok = api.bring_to_foreground() if foreground else False
+    refresh_result = _refresh_editor_viewports(api, timeout=rc_timeout or 3.0) if refresh else {}
 
     time.sleep(delay)
 
@@ -156,28 +184,8 @@ def _capture_viewport_png_raw(
             "refresh": refresh_result,
         }
 
-    # 1) Get viewport bounds via CliAnythingBridge so we can crop the full window.
-    #    (If plugin is missing or returns 0, we'll keep the full window).
-    bounds_script = (
-        "import unreal\n"
-        "try:\n"
-        "    bounds = unreal.CliAnythingBridgeLibrary.get_active_viewport_screen_bounds()\n"
-        "    unreal.log(f'VIEWPORT_BOUNDS:{bounds.x},{bounds.y},{bounds.z},{bounds.w}')\n"
-        "except Exception:\n"
-        "    pass"
-    )
-    bounds_res = api.exec_python_ex(bounds_script)
-    viewport_rect = None
-    for log_item in bounds_res.get("LogOutput", []):
-        line = log_item.get("Output", "")
-        if line.startswith("VIEWPORT_BOUNDS:"):
-            parts = line.split(":", 1)[1].split(",")
-            try:
-                x, y, w, h = map(int, parts)
-                if w > 0 and h > 0:
-                    viewport_rect = (x, y, x + w, y + h)
-            except ValueError:
-                pass
+    if use_viewport_bounds and viewport_rect is None:
+        viewport_rect = _get_active_viewport_rect(api, timeout=rc_timeout)
 
     from cli_anything.unreal.core.win32_editor_capture import capture_hwnd_to_png
 
@@ -419,8 +427,10 @@ def capture_screenshot_atlas(
     prep_refresh: dict = {}
 
     try:
-        # Dynamic / multi-frame: Realtime must stay on so time advances between captures.
-        prep_refresh = _refresh_editor_viewports(api)
+        # Dynamic / multi-frame: keep realtime on but avoid repeated refresh calls
+        # and repeated viewport-bound queries, which can each wait on Remote Control.
+        prep_refresh = {"realtime": _ensure_editor_viewport_realtime(api, timeout=min(wait_timeout, 1.0))}
+        viewport_rect = _get_active_viewport_rect(api, timeout=min(wait_timeout, 1.0))
 
         for i in range(frame_count):
             fname = f"{filename_prefix}_{i:03d}"
@@ -432,6 +442,11 @@ def capture_screenshot_atlas(
                 res_x,
                 res_y,
                 delay,
+                refresh=False,
+                foreground=False,
+                rc_timeout=wait_timeout,
+                viewport_rect=viewport_rect,
+                use_viewport_bounds=False,
             )
             frame_results.append({"index": i, **shot})
             pr = shot.get("path_raw")
@@ -445,7 +460,7 @@ def capture_screenshot_atlas(
                     "frame_results": frame_results,
                 }
             if i < frame_count - 1 and interval > 0:
-                _ensure_editor_viewport_realtime(api)
+                _ensure_editor_viewport_realtime(api, timeout=wait_timeout)
                 time.sleep(interval)
 
     except Exception as e:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess as sp
 import sys
@@ -727,19 +728,197 @@ def editor_close(state: AppState):
     raise AppError("EDITOR_CLOSE_TIMEOUT", "Editor did not close within 30s.", exit_code=3, details=details)
 
 
+def _exec_console_with_log_capture(api, command: str, timeout: int = 15) -> dict:
+    """Run a console command through Python so ExecutePythonCommandEx returns logs."""
+    marker = f"{time.time_ns()}"
+    begin = f"__ue_cli_exec_begin__:{marker}"
+    end = f"__ue_cli_exec_end__:{marker}"
+    script = f"""
+import unreal
+_cmd = {json.dumps(command)}
+_begin = {json.dumps(begin)}
+_end = {json.dumps(end)}
+_world = None
+try:
+    _world = unreal.EditorLevelLibrary.get_editor_world()
+except Exception:
+    try:
+        _world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    except Exception:
+        _world = None
+unreal.log(_begin)
+try:
+    unreal.SystemLibrary.execute_console_command(_world, _cmd)
+finally:
+    unreal.log(_end)
+"""
+    result = api.exec_python_ex(script, timeout=timeout)
+    if result.get("error") or result.get("ReturnValue") is False:
+        return {"error": result.get("error") or "Python console execution failed", "raw": result}
+
+    captured: list[dict] = []
+    inside = False
+    saw_begin = False
+    saw_end = False
+    for item in result.get("LogOutput", []) or []:
+        line = str(item.get("Output", ""))
+        if "__ue_cli_exec_begin__:" in line:
+            inside = True
+            saw_begin = True
+            continue
+        if "__ue_cli_exec_end__:" in line:
+            inside = False
+            saw_end = True
+            continue
+        if inside:
+            captured.append(item)
+
+    if not saw_begin and not saw_end:
+        captured = list(result.get("LogOutput", []) or [])
+
+    log_text = "\n".join(str(item.get("Output", "")) for item in captured)
+    return {
+        "status": "executed",
+        "command": command,
+        "capture_mode": "python_log_output",
+        "log_output": captured,
+        "log_text": log_text,
+        "_log_begin_marker": begin,
+        "_log_end_marker": end,
+    }
+
+
+def _resolve_editor_log_file(state: AppState) -> Path | None:
+    """Find the active editor log file for the current project/port."""
+    project_dir = state.session.project_dir
+    if not project_dir:
+        try:
+            from cli_anything.unreal.utils.ue_backend import find_running_editors
+            from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+            pid = UEEditorAPI._get_pid_listening_on_port(state.session.port)
+            for editor in find_running_editors():
+                if pid and int(editor.get("pid", 0)) == int(pid):
+                    project = editor.get("project")
+                    if project:
+                        project_dir = str(Path(project).parent)
+                        break
+        except Exception:
+            project_dir = None
+
+    if not project_dir:
+        return None
+
+    log_dir = Path(project_dir) / "Saved" / "Logs"
+    if not log_dir.is_dir():
+        return None
+
+    project_log = log_dir / f"{Path(project_dir).name}.log"
+    if project_log.exists():
+        return project_log
+
+    logs = sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return logs[0] if logs else None
+
+
+def _read_log_delta(
+    log_file: Path | None,
+    start_pos: int,
+    wait_seconds: float = 1.0,
+    begin_marker: str | None = None,
+    end_marker: str | None = None,
+) -> str:
+    if not log_file:
+        return ""
+
+    from cli_anything.unreal.utils.ue_http_api import _decode_windows_command_output
+
+    deadline = time.time() + max(wait_seconds, 0.0)
+    data = b""
+    last_size: int | None = None
+    stable_since: float | None = None
+    while True:
+        try:
+            size = log_file.stat().st_size
+            offset = start_pos if size >= start_pos else 0
+            with log_file.open("rb") as fh:
+                fh.seek(offset)
+                data = fh.read(2 * 1024 * 1024)
+        except Exception:
+            data = b""
+            size = 0
+
+        now = time.time()
+        if data:
+            if size == last_size:
+                if stable_since is None:
+                    stable_since = now
+                if (now - stable_since) >= 0.2 or now >= deadline:
+                    break
+            else:
+                last_size = size
+                stable_since = now
+
+        if now >= deadline:
+            break
+        time.sleep(0.1)
+
+    text = _decode_windows_command_output(data)
+    lines = text.splitlines()
+    if begin_marker and end_marker:
+        captured: list[str] = []
+        inside = False
+        saw_begin = False
+        for line in lines:
+            if begin_marker in line:
+                inside = True
+                saw_begin = True
+                continue
+            if end_marker in line:
+                break
+            if inside:
+                captured.append(line)
+        if saw_begin:
+            lines = captured
+        else:
+            return ""
+    else:
+        lines = [
+            line
+            for line in lines
+            if "__ue_cli_exec_begin__:" not in line and "__ue_cli_exec_end__:" not in line
+        ]
+    return "\n".join(lines).strip()
+
+
 @editor_group.command("exec")
+@click.option("--timeout", default=15, type=int, help="Max seconds to wait for captured log output.")
+@click.option("--log-wait", default=1.0, type=float, help="Seconds to wait for Output Log lines after the command.")
 @click.argument("command")
 @handle_error
 @click.pass_obj
-def editor_exec(state: AppState, command):
+def editor_exec(state: AppState, timeout, log_wait, command):
     """Execute a console command in the editor.
 
     Sends a UE console command directly (e.g. stat unit, renderdoc.captureframe).
     For Python execution, use ``editor run-script -c "code"`` instead.
     """
     api = require_editor(state)
+    log_file = _resolve_editor_log_file(state)
+    log_start = log_file.stat().st_size if log_file and log_file.exists() else 0
 
-    result = api.exec_console(command)
+    result = _exec_console_with_log_capture(api, command, timeout=timeout)
+    log_begin_marker = result.pop("_log_begin_marker", None)
+    log_end_marker = result.pop("_log_end_marker", None)
+    if result.get("error"):
+        log_begin_marker = None
+        log_end_marker = None
+        result = api.exec_console(command)
+        if not isinstance(result, dict):
+            result = {"raw": result}
+        if result:
+            result.setdefault("capture_mode", "remote_console")
+
     if "error" in result and "400" in str(result["error"]):
         result["hint"] = (
             "Console command execution may be disabled in Remote Control settings. "
@@ -749,9 +928,27 @@ def editor_exec(state: AppState, command):
         result = {
             "status": "executed",
             "command": command,
+            "capture_mode": "remote_console",
             "note": "Command executed. Console output is not captured by Remote Control API. "
                     "Check editor Output Log for results.",
         }
+
+    file_log_text = ""
+    if log_begin_marker and log_end_marker:
+        file_log_text = _read_log_delta(
+            log_file,
+            log_start,
+            wait_seconds=log_wait,
+            begin_marker=log_begin_marker,
+            end_marker=log_end_marker,
+        )
+    if file_log_text:
+        result["log_file"] = str(log_file)
+        result["log_file_text"] = file_log_text
+        if not result.get("log_text"):
+            result["log_text"] = file_log_text
+            result["capture_mode"] = "editor_log_file"
+
     output(result, state)
 
 
@@ -980,13 +1177,24 @@ def cvar_get(state: AppState, name):
     output({"name": name, "value": value}, state)
 
 
-@cvar_group.command("set")
+@cvar_group.command(
+    "set",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
 @click.argument("name")
-@click.argument("value")
+@click.argument("value", nargs=-1, type=click.UNPROCESSED)
 @handle_error
 @click.pass_obj
 def cvar_set(state: AppState, name, value):
     """Set a console variable value."""
+    if not value:
+        raise AppError(
+            "MISSING_CVAR_VALUE",
+            "CVar set requires a value.",
+            exit_code=2,
+            suggestion="Use: ue-cli editor cvar set NAME VALUE",
+        )
+    value = " ".join(value)
     api = require_editor(state)
     result = api.set_cvar(name, value)
     if "error" in result and "400" in str(result["error"]):

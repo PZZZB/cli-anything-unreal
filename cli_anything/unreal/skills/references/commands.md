@@ -14,10 +14,10 @@ Workflow examples live in sibling workflow docs.
 | `editor close` | Gracefully close editor | No |
 | `editor new-level PATH [--template PATH]` | Safely create/open new level | Yes |
 | `editor save-level` | Safely save current level | Yes |
-| `editor exec COMMAND` | Run UE console command (`stat unit`, `renderdoc.captureframe`) | Yes |
+| `editor exec [--timeout SEC] [--log-wait SEC] COMMAND` | Run UE console command and return captured Output Log text when available (`stat unit`, `r.DumpRenderTargetPoolMemory`, `renderdoc.captureframe`) | Yes |
 | `editor viewport bookmark jump --index N [--timeout SEC]` | Jump Level Viewport bookmark 0-9; Windows only | Yes |
 | `editor run-script [PATH] [-c CODE] [--timeout N] [--no-save]` | Execute Python file/inline code with result capture | Yes |
-| `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable | Yes |
+| `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable; negative values are supported (`... set r.X -4` or `... set r.X -- -4`) | Yes |
 | `editor enable-remote` | Enable Remote Control config | No |
 | `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover UE class/API. TARGET: class, asset path, actor path | Yes |
 | `editor cancel TASK_ID` | Cancel async editor launch | - |
@@ -171,7 +171,7 @@ All screenshot commands require editor.
 | Command | Description |
 |---------|-------------|
 | `screenshot capture [--path PATH] [--filename NAME] [--no-compress]` | Capture main editor window |
-| `screenshot capture-sequence [-n N] [-i SEC] [--no-compress]` | Capture sequence |
+| `screenshot capture-sequence [-n N] [-i SEC] [--no-compress]` | Capture sequence with bounded per-frame waits |
 
 ## session - Undo/Redo
 
