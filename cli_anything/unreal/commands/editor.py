@@ -663,6 +663,11 @@ def editor_close(state: AppState):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     api = UEEditorAPI(port=state.session.port)
+    output(_close_editor_for_project(api, state), state)
+
+
+def _close_editor_for_project(api, state: AppState) -> dict:
+    """Close the targeted editor using the same robust path for all callers."""
     if not api.is_alive():
         kill_result = _kill_matching_project_editors(
             state.session.project_path,
@@ -672,12 +677,10 @@ def editor_close(state: AppState):
         )
         if kill_result:
             if kill_result.get("status") == "closed":
-                output(kill_result, state)
-                return
+                return kill_result
             raise AppError("EDITOR_CLOSE_FAILED", kill_result["message"], exit_code=3, details=kill_result)
 
-        output({"status": "offline", "port": state.session.port, "message": "No editor running on this port."}, state)
-        return
+        return {"status": "offline", "port": state.session.port, "message": "No editor running on this port."}
 
     if state.session.project_path and sys.platform == "win32":
         running, matches = _find_matching_project_editors(state.session.project_path)
@@ -710,8 +713,7 @@ def editor_close(state: AppState):
     deadline = time.time() + 30
     while time.time() < deadline:
         if not api.is_alive():
-            output({"status": "closed", "port": state.session.port}, state)
-            return
+            return {"status": "closed", "port": state.session.port}
         time.sleep(2)
 
     kill_result = _kill_matching_project_editors(
@@ -721,8 +723,7 @@ def editor_close(state: AppState):
         failure_message="Editor did not close within 30s and matching UnrealEditor process could not be terminated.",
     )
     if kill_result and kill_result.get("status") == "closed":
-        output(kill_result, state)
-        return
+        return kill_result
 
     details = kill_result or {"status": "timeout", "port": state.session.port}
     raise AppError("EDITOR_CLOSE_TIMEOUT", "Editor did not close within 30s.", exit_code=3, details=details)
@@ -1094,15 +1095,7 @@ def editor_plugin_upgrade(state: AppState):
             output({"status": "up_to_date", "version": bundled}, state)
             return
 
-        api.exec_console("exit")
-        time.sleep(5)
-        for _ in range(15):
-            if not api.is_alive():
-                break
-            time.sleep(2)
-        else:
-            if api.is_alive():
-                raise AppError("UPGRADE_FAILED", "Editor did not shut down within timeout — aborting upgrade")
+        _close_editor_for_project(api, state)
 
     if plugin_dir.exists():
         shutil.rmtree(str(plugin_dir))

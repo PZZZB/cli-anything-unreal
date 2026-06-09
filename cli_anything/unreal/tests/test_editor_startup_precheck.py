@@ -506,14 +506,14 @@ def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
         return mock_proc
 
     mock_api = MagicMock()
-    # 1st call: editor_was_running check → True
-    # 2nd call: wait-for-close loop → False (editor closed)
-    # 3rd call: wait-for-api loop → True (editor back online)
-    mock_api.is_alive.side_effect = [True, False, True]
+    # 1st call: editor_was_running check -> True
+    # 2nd call: wait-for-api loop -> True (editor back online)
+    mock_api.is_alive.side_effect = [True, True]
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
          patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
          patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=["1.0", "2.0"]), \
+         patch("cli_anything.unreal.commands.editor._close_editor_for_project", return_value={"status": "closed"}), \
          patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
              "deployed": True, "action": "updated", "version": "2.0", "plugin_dir": "/tmp/plugin"
          }), \
@@ -532,6 +532,36 @@ def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
     relaunch_cmd = popen_calls[0]
     assert "-nosplash" in relaunch_cmd
     assert "-unattended" in relaunch_cmd
+
+
+def test_plugin_upgrade_uses_editor_close_helper(mini_project):
+    """plugin-upgrade should reuse editor close logic instead of console 'exit'."""
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    mock_api = MagicMock()
+    mock_api.is_alive.side_effect = [True, True]
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=["1.0", "2.0"]), \
+         patch("cli_anything.unreal.commands.editor._close_editor_for_project", return_value={"status": "closed"}) as mock_close, \
+         patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
+             "deployed": True, "action": "updated", "version": "2.0", "plugin_dir": "/tmp/plugin"
+         }), \
+         patch("cli_anything.unreal.core.build.compile_project", return_value={"status": "ok"}), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/Engine/Binaries/Win64/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=MagicMock(pid=9999)), \
+         patch("cli_anything.unreal.commands.editor.time.sleep"):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "plugin-upgrade",
+        ])
+
+    assert result.exit_code == 0
+    mock_close.assert_called_once()
+    mock_api.exec_console.assert_not_called()
 
 
 # ── auto-compile on plugin load failure / skip when OK ────────────────
