@@ -37,7 +37,7 @@ Verify install first: `ue-cli --version`.
   - OK: `ue-cli --output json editor launch`
   - Bad: `ue-cli editor launch --output json`
 - **Runner output contract.** JSON mode stdout = one final payload. Progress/heartbeats -> stderr. Do not stream stdout live then replay captured stdout, or JSON duplicates.
-- **Discover editors with `editor status`.** Result array items: `status`, `pid`, `port`, `project_path`. Online items include `bridge_version`, `bundled_version`, `plugin_match` (`true`/`false`/`null` when probe is busy). If mismatch has `next_command`, run `editor plugin-upgrade`. Offline items include `next_command`. Offline build commands need a project: `ue-cli --project P build compile` or `ue-cli build compile --project P`.
+- **Discover editors with `editor status`.** Result array items: `status`, `pid`, `port`, `project_path`. Online items include `bridge_version`, `bundled_version`, `plugin_match` (`true`/`false`/`null` when probe is busy). If mismatch has `next_command`, run `editor plugin-upgrade`. Offline items include `next_command`. Build commands need a project.
 - **Use UE virtual paths** (`/Game/MyAsset`) for engine assets, not OS `.uasset` paths.
 - **Use `editor launch` for normal startup.** It waits until API online or timeout. For async: `--no-wait`, then poll `editor status <task_id>` or `task status <task_id>`.
 - **Zombie handling.** `editor launch` kills stale `UnrealEditor.exe` with no API. Only API-alive `ALREADY_RUNNING` blocks launch.
