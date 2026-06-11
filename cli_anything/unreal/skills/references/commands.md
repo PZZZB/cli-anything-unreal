@@ -99,12 +99,12 @@ Build commands do not require editor.
 
 | Command | Description |
 |---------|-------------|
-| `build compile [--config C] [--platform P] [--no-wait] [--timeout N]` | Compile C++ |
-| `build cook [--platform P] [--no-wait] [--timeout N]` | Cook content |
-| `build package [--platform P] [--config C] [--output-dir DIR] [--no-wait] [--timeout N]` | Full package pipeline |
-| `build stop` | Kill MSBuild/UBT tree |
-| `build is-building` | Check compile/build running |
-| `build status [TASK_ID]` | Check artifacts/logs or async progress |
+| `build compile [--project PATH] [--config C] [--platform P] [--no-wait] [--timeout N]` | Compile C++ |
+| `build cook [--project PATH] [--platform P] [--no-wait] [--timeout N]` | Cook content |
+| `build package [--project PATH] [--platform P] [--config C] [--output-dir DIR] [--no-wait] [--timeout N]` | Full package pipeline |
+| `build stop [--project PATH]` | Kill MSBuild/UBT tree |
+| `build is-building [--project PATH]` | Check compile/build running |
+| `build status [--project PATH] [TASK_ID]` | Check artifacts/logs or async progress |
 | `build cancel TASK_ID` | Cancel async build |
 
 ## scene - Scene/Level Queries

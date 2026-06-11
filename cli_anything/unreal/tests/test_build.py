@@ -551,8 +551,40 @@ class TestBuildCLI:
         runner = CliRunner()
         result = runner.invoke(cli, ["build", "compile", "--help"])
         assert result.exit_code == 0
+        assert "--project" in result.output
         assert "--no-wait" in result.output
         assert "--timeout" in result.output
+
+    def test_build_compile_accepts_command_project_option(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        captured = {}
+
+        def fake_submit_task(command, payload):
+            captured["command"] = command
+            captured["payload"] = payload
+            return {"task_id": "compile-task"}
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.build.submit_task", side_effect=fake_submit_task):
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "build", "compile",
+                "--project", temp_project["uproject"],
+                "--platform", "Android",
+                "--config", "Development",
+                "--no-wait",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = self._parse_json_output(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["task_id"] == "compile-task"
+        assert captured["command"] == "build.compile"
+        assert captured["payload"]["project_path"] == temp_project["uproject"]
+        assert captured["payload"]["platform"] == "Android"
+        assert captured["payload"]["build_config"] == "Development"
 
     def test_build_cook_has_no_wait_and_timeout(self, temp_project):
         """build cook now has --no-wait and --timeout options."""
@@ -562,6 +594,7 @@ class TestBuildCLI:
         runner = CliRunner()
         result = runner.invoke(cli, ["build", "cook", "--help"])
         assert result.exit_code == 0
+        assert "--project" in result.output
         assert "--no-wait" in result.output
         assert "--timeout" in result.output
 
@@ -573,6 +606,7 @@ class TestBuildCLI:
         runner = CliRunner()
         result = runner.invoke(cli, ["build", "package", "--help"])
         assert result.exit_code == 0
+        assert "--project" in result.output
         assert "--no-wait" in result.output
         assert "--timeout" in result.output
 

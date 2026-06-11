@@ -19,6 +19,24 @@ def _build_payload(state: AppState, label: str, **kwargs) -> dict:
     return payload
 
 
+def _load_command_project(state: AppState, project_path: str | None) -> None:
+    if not project_path:
+        return
+    try:
+        state.session.load_project(project_path)
+    except FileNotFoundError:
+        raise AppError(
+            "PROJECT_NOT_FOUND",
+            f"Project not found: {project_path}",
+            exit_code=3,
+            suggestion="Pass --project <path-to.uproject>.",
+        )
+
+
+def _project_option(func):
+    return click.option("--project", "project_path", type=click.Path(), help="Path to .uproject file")(func)
+
+
 def _run_task(command: str, payload: dict, *, timeout: int | None, no_wait: bool, timeout_code: str):
     task = submit_task(command, payload)
     if no_wait:
@@ -62,13 +80,15 @@ def build_group():
 
 
 @build_group.command("compile")
+@_project_option
 @click.option("--config", "build_config", default="Development", type=click.Choice(["Development", "Shipping", "DebugGame", "Test"]))
 @click.option("--platform", default="Win64")
 @click.option("--no-wait", is_flag=True, default=False)
 @click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
-def build_compile(state: AppState, build_config, platform, no_wait, timeout):
+def build_compile(state: AppState, project_path, build_config, platform, no_wait, timeout):
+    _load_command_project(state, project_path)
     require_project(state)
     payload = _build_payload(state, "compile", build_config=build_config, platform=platform)
     result = _run_task("build.compile", payload, timeout=timeout, no_wait=no_wait, timeout_code="BUILD_WAIT_TIMEOUT")
@@ -76,12 +96,14 @@ def build_compile(state: AppState, build_config, platform, no_wait, timeout):
 
 
 @build_group.command("cook")
+@_project_option
 @click.option("--platform", default="Win64")
 @click.option("--no-wait", is_flag=True, default=False)
 @click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
-def build_cook(state: AppState, platform, no_wait, timeout):
+def build_cook(state: AppState, project_path, platform, no_wait, timeout):
+    _load_command_project(state, project_path)
     require_project(state)
     payload = _build_payload(state, "cook", platform=platform)
     result = _run_task("build.cook", payload, timeout=timeout, no_wait=no_wait, timeout_code="BUILD_WAIT_TIMEOUT")
@@ -89,6 +111,7 @@ def build_cook(state: AppState, platform, no_wait, timeout):
 
 
 @build_group.command("package")
+@_project_option
 @click.option("--platform", default="Win64")
 @click.option("--config", "build_config", default="Development", type=click.Choice(["Development", "Shipping", "DebugGame", "Test"]))
 @click.option("--output-dir", type=click.Path(), help="Archive output directory")
@@ -96,7 +119,8 @@ def build_cook(state: AppState, platform, no_wait, timeout):
 @click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
-def build_package(state: AppState, platform, build_config, output_dir, no_wait, timeout):
+def build_package(state: AppState, project_path, platform, build_config, output_dir, no_wait, timeout):
+    _load_command_project(state, project_path)
     require_project(state)
     payload = _build_payload(state, "package", platform=platform, build_config=build_config, output_dir=output_dir)
     result = _run_task("build.package", payload, timeout=timeout, no_wait=no_wait, timeout_code="BUILD_WAIT_TIMEOUT")
@@ -104,10 +128,12 @@ def build_package(state: AppState, platform, build_config, output_dir, no_wait, 
 
 
 @build_group.command("status")
+@_project_option
 @click.argument("task_id", required=False)
 @handle_error
 @click.pass_obj
-def build_status_cmd(state: AppState, task_id):
+def build_status_cmd(state: AppState, project_path, task_id):
+    _load_command_project(state, project_path)
     require_project(state)
     if task_id:
         task = load_task(task_id)
@@ -135,20 +161,24 @@ def build_cancel(state: AppState, task_id):
 
 
 @build_group.command("stop")
+@_project_option
 @handle_error
 @click.pass_obj
-def build_stop(state: AppState):
+def build_stop(state: AppState, project_path):
     from cli_anything.unreal.core.build import stop_build
 
+    _load_command_project(state, project_path)
     require_project(state)
     output(stop_build(state.session.project_path), state)
 
 
 @build_group.command("is-building")
+@_project_option
 @handle_error
 @click.pass_obj
-def build_is_building(state: AppState):
+def build_is_building(state: AppState, project_path):
     from cli_anything.unreal.core.build import is_building
 
+    _load_command_project(state, project_path)
     require_project(state)
     output(is_building(state.session.project_path), state)

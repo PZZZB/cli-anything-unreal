@@ -37,6 +37,8 @@ ue-cli --project F:\MyGame\MyGame.uproject editor preflight
 
 # 2. If BuildId mismatch, compile first
 ue-cli --project F:\MyGame\MyGame.uproject build compile
+# Equivalent:
+ue-cli build compile --project F:\MyGame\MyGame.uproject
 
 # 3. Launch editor (blocks until ready)
 ue-cli --project F:\MyGame\MyGame.uproject editor launch --map /Game/Maps/MyMap
