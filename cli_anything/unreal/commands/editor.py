@@ -984,7 +984,7 @@ def editor_exec(state: AppState, timeout, log_wait, command):
 
 @editor_group.command("run-script")
 @click.argument("script_path", type=click.Path(exists=True), required=False, default=None)
-@click.option("-c", "--code", default=None, help="Inline Python code to execute (alternative to script file).")
+@click.option("-c", "--code", default=None, help="Short inline Python code; use a script file for multiline code.")
 @click.option("--timeout", default=30, type=int, help="Max seconds to wait for results.")
 @click.option("--no-save", "no_save", is_flag=True, default=False, help="Skip auto-saving dirty packages after script execution.")
 @handle_error
@@ -992,11 +992,14 @@ def editor_exec(state: AppState, timeout, log_wait, command):
 def editor_run_script(state: AppState, script_path, code, timeout, no_save):
     """Execute Python in the editor with structured result capture.
 
-    Provide either a script file path OR inline code via -c:
+    Provide either a script file path OR short inline code via -c:
 
     \b
         editor run-script myscript.py
         editor run-script -c "result = {'hello': 'world'}"
+
+    For multiline Python, especially in PowerShell, pass a script file path
+    so shell argument splitting cannot corrupt code or indentation.
 
     The script should set a ``result`` dict variable.  It will be
     automatically captured and returned as structured JSON output.
@@ -1005,7 +1008,7 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
     Use --no-save to skip this.
     """
     if not script_path and not code:
-        raise AppError("MISSING_INPUT", "Provide a script file path or use -c for inline code.",
+        raise AppError("MISSING_INPUT", "Provide a script file path or use -c for short inline code.",
                        suggestion="editor run-script myscript.py  OR  editor run-script -c \"code\"")
     if script_path and code:
         raise AppError("AMBIGUOUS_INPUT", "Provide either a script file path or -c, not both.")

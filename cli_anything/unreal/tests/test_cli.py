@@ -28,6 +28,27 @@ class TestCLI:
         assert "screenshot" in result.output
         assert "editor" in result.output
 
+    def test_help_short_alias(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["-h"])
+        assert result.exit_code == 0
+        assert "project" in result.output
+        assert "build" in result.output
+        assert "editor" in result.output
+
+    def test_help_short_alias_for_subcommands(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["editor", "run-script", "-h"])
+        assert result.exit_code == 0
+        assert "-c, --code" in result.output
+        assert "--timeout" in result.output
+
     def test_version_option(self):
         from click.testing import CliRunner
         from cli_anything.unreal.core.plugin_bridge import get_bundled_version

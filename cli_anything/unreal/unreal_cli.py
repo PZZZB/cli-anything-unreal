@@ -21,6 +21,7 @@ from cli_anything.unreal.core.tasks import cancel_task, load_task, run_task_work
 
 
 _BRIDGE_VERSION = get_bundled_version() or "unknown"
+_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 COMMAND_SPECS = [
@@ -129,7 +130,7 @@ def _default_output_mode() -> str:
     return "text" if sys.stdout.isatty() else "json"
 
 
-@click.group(invoke_without_command=True)
+@click.group(invoke_without_command=True, context_settings=_CONTEXT_SETTINGS)
 @click.version_option(
     __version__,
     prog_name="ue-cli",

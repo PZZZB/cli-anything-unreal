@@ -81,7 +81,7 @@ ue-cli editor close
 
 ## Python Scripting Patterns
 
-Use `editor run-script` when no CLI command covers operation. `-c` for inline; file path for bigger scripts.
+Use `editor run-script` when no CLI command covers operation. Use `-c` only for short one-liners; for multiline Python, especially in PowerShell, write a temporary `.py` file and pass the path so shell argv splitting cannot corrupt code or indentation.
 
 ### Result Convention
 
