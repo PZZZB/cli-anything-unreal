@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import sys
+import time
+from pathlib import Path
+
 import click
 
 from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_project
-from cli_anything.unreal.core.tasks import load_task, submit_task, task_progress, wait_for_task
+from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, load_task, submit_task, task_progress
 from cli_anything.unreal.utils.ue_backend import _allocate_log_path
 
 
@@ -37,6 +41,47 @@ def _project_option(func):
     return click.option("--project", "project_path", type=click.Path(), help="Path to .uproject file")(func)
 
 
+def _stream_log_delta(log_file: str | None, offset: int = 0) -> int:
+    if not log_file:
+        return offset
+    path = Path(log_file)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return offset
+    if size < offset:
+        offset = 0
+    if size <= offset:
+        return offset
+    try:
+        with path.open("rb") as fh:
+            fh.seek(offset)
+            data = fh.read(size - offset)
+    except OSError:
+        return offset
+    if data:
+        sys.stderr.write(data.decode("utf-8", errors="replace"))
+        sys.stderr.flush()
+    return size
+
+
+def _wait_for_task_with_log_stream(task_id: str, timeout: int | None, log_file: str | None) -> dict | None:
+    deadline = None if timeout is None else time.time() + timeout
+    offset = 0
+    while True:
+        offset = _stream_log_delta(log_file, offset)
+        task = load_task(task_id)
+        if task is None:
+            return None
+        if task.get("status") in FINAL_TASK_STATUSES:
+            _stream_log_delta(log_file, offset)
+            return task
+        if deadline is not None and time.time() >= deadline:
+            _stream_log_delta(log_file, offset)
+            return None
+        time.sleep(0.5)
+
+
 def _run_task(command: str, payload: dict, *, timeout: int | None, no_wait: bool, timeout_code: str):
     task = submit_task(command, payload)
     if no_wait:
@@ -46,7 +91,7 @@ def _run_task(command: str, payload: dict, *, timeout: int | None, no_wait: bool
             "suggested_poll_interval_seconds": 5,
         }
 
-    final_task = wait_for_task(task["task_id"], timeout)
+    final_task = _wait_for_task_with_log_stream(task["task_id"], timeout, payload.get("log_file"))
     if final_task is None:
         current = load_task(task["task_id"]) or task
         if timeout is None:

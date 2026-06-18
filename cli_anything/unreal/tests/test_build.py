@@ -554,6 +554,7 @@ class TestBuildCLI:
         assert "--project" in result.output
         assert "--no-wait" in result.output
         assert "--timeout" in result.output
+        assert "--log-tail-lines" not in result.output
 
     def test_build_compile_accepts_command_project_option(self, temp_project):
         from click.testing import CliRunner
@@ -586,6 +587,27 @@ class TestBuildCLI:
         assert captured["payload"]["platform"] == "Android"
         assert captured["payload"]["build_config"] == "Development"
 
+    def test_build_wait_streams_log_file_to_stderr(self, tmp_path, capsys):
+        from cli_anything.unreal.commands.build import _wait_for_task_with_log_stream
+
+        log_file = tmp_path / "compile.log"
+        log_file.write_text("first\n", encoding="utf-8")
+        calls = {"count": 0}
+
+        def fake_load_task(task_id):
+            assert task_id == "t-log"
+            calls["count"] += 1
+            with log_file.open("a", encoding="utf-8") as fh:
+                fh.write("second\n" if calls["count"] == 1 else "third\n")
+            status = "running" if calls["count"] == 1 else "completed"
+            return {"task_id": task_id, "command": "build.compile", "status": status}
+
+        with patch("cli_anything.unreal.commands.build.load_task", side_effect=fake_load_task):
+            task = _wait_for_task_with_log_stream("t-log", timeout=5, log_file=str(log_file))
+
+        assert task["status"] == "completed"
+        assert capsys.readouterr().err.replace("\r\n", "\n") == "first\nsecond\nthird\n"
+
     def test_build_cook_has_no_wait_and_timeout(self, temp_project):
         """build cook now has --no-wait and --timeout options."""
         from click.testing import CliRunner
@@ -597,6 +619,7 @@ class TestBuildCLI:
         assert "--project" in result.output
         assert "--no-wait" in result.output
         assert "--timeout" in result.output
+        assert "--log-tail-lines" not in result.output
 
     def test_build_package_has_no_wait_and_timeout(self, temp_project):
         """build package now has --no-wait and --timeout options."""
@@ -609,6 +632,7 @@ class TestBuildCLI:
         assert "--project" in result.output
         assert "--no-wait" in result.output
         assert "--timeout" in result.output
+        assert "--log-tail-lines" not in result.output
 
     def test_build_stop_cli(self, temp_project):
         """build stop command works and calls stop_build."""

@@ -97,6 +97,8 @@ All asset commands require editor.
 
 Build commands do not require editor.
 
+Synchronous `build compile` / `build cook` / `build package` stream the live UAT/UBT log to stderr while waiting, similar to UE `Build.bat`. JSON stdout stays one final payload with `log_file`.
+
 | Command | Description |
 |---------|-------------|
 | `build compile [--project PATH] [--config C] [--platform P] [--no-wait] [--timeout N]` | Compile C++ |
