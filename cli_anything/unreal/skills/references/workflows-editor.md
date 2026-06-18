@@ -69,6 +69,8 @@ ue-cli task cancel <task_id>
 - `bridge_version` / `bundled_version` / `plugin_match`: online bridge plugin health. `plugin_match` can be `null` if the version probe timed out or the editor is busy.
 - `message` / `suggestion` / `next_command`: recovery hints on offline items, and on online bridge mismatches
 
+With top-level `--project`, `editor status` filters to that project by default. Use `editor status --all` only when you need to inspect editors for other projects too.
+
 If an online item has `plugin_match: false` and `next_command`, run it (`editor plugin-upgrade`). Do not force recompile before every launch; `editor launch` deploys bridge source and recompiles only when plugin load failure requires it.
 
 `editor status <task_id>` returns async task progress.

@@ -63,17 +63,42 @@ def test_editor_status_offline_ignores_other_project_processes(mini_project):
         ])
 
     assert result.exit_code == 0
+    assert result.output.count('"status": "success"') == 1
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert data["result"] == []
+
+
+def test_editor_status_all_lists_other_project_processes(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 5678, "project": other_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+             "ready": True,
+             "engine": {"errors": [], "warnings": []},
+             "project": {"errors": [], "warnings": []},
+         }):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status", "--all",
+        ])
+
+    assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["status"] == "success"
     instance = data["result"][0]
     assert instance["status"] == "offline"
     assert instance["pid"] == 5678
-    assert instance["port"] is None
     assert instance["project_path"] == other_project
-    assert "editor launch" in instance["suggestion"]
 
 
-def test_editor_status_lists_online_port_owner_even_when_other_project(mini_project):
+def test_editor_status_filters_online_port_owner_when_other_project(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
@@ -101,17 +126,7 @@ def test_editor_status_lists_online_port_owner_even_when_other_project(mini_proj
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["status"] == "success"
-    assert data["result"] == [
-        {
-            "status": "online",
-            "pid": 5678,
-            "port": 30020,
-            "project_path": other_project,
-            "bridge_version": "1.13",
-            "bundled_version": "1.13",
-            "plugin_match": True,
-        },
-    ]
+    assert data["result"] == []
 
 
 def test_editor_status_online_includes_matching_bridge_versions(mini_project):
@@ -502,7 +517,8 @@ def test_editor_launch_preflight_failed_includes_startup_precheck(mini_project):
         "ready": False,
         "engine": {"errors": ["engine error"], "warnings": ["engine warning"]},
         "project": {"errors": ["project error"], "warnings": []},
-    }):
+    }), \
+         patch("cli_anything.unreal.commands.editor.submit_task", return_value={"task_id": "launch-task"}):
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "launch", "--no-wait",
@@ -529,6 +545,7 @@ def test_editor_launch_success_includes_startup_precheck(mini_project):
          patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
          patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={"deployed": False}), \
          patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor.submit_task", return_value={"task_id": "launch-task"}), \
          patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
              "ready": True,
              "engine": {"errors": [], "warnings": ["engine warning"]},

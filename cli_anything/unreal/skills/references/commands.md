@@ -8,7 +8,7 @@ Workflow examples live in sibling workflow docs.
 
 | Command | Description | Requires Editor |
 |---------|-------------|:-:|
-| `editor status [--scan-range START-END] [TASK_ID]` | No TASK_ID: list Unreal Editor processes/result array. Online entries include bridge plugin version fields; mismatch entries include `next_command` when project is known. Offline entries include recovery hints. With TASK_ID: async progress | - |
+| `editor status [--all] [--scan-range START-END] [TASK_ID]` | No TASK_ID: list Unreal Editor processes/result array. With `--project`, filters to that project unless `--all` is set. Online entries include bridge plugin version fields; mismatch entries include `next_command` when project is known. Offline entries include recovery hints. With TASK_ID: async progress | - |
 | `editor preflight` | Check engine/project build compatibility | No |
 | `editor launch [--map MAP] [--no-wait] [--timeout N]` | Launch editor; waits until ready; kills zombies | No |
 | `editor close` | Gracefully close editor | No |
@@ -199,10 +199,10 @@ Generic async task polling/cancel.
 
 ## Multi-Instance Support
 
-Multiple editors: discover with `editor status`, target with `--port`.
+Multiple editors: discover with `editor status --all`, target with `--port`.
 
 ```bash
-ue-cli editor status
+ue-cli editor status --all
 ue-cli --port 30010 editor status
 ue-cli --port 30011 material list
 ```

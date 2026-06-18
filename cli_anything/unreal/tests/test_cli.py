@@ -340,10 +340,11 @@ class TestCLI:
         }
 
         runner = CliRunner()
-        result = runner.invoke(cli, [
-            "--output", "json", "--project", temp_project["uproject"],
-            "editor", "launch", "--no-wait",
-        ])
+        with patch("cli_anything.unreal.commands.editor.submit_task", return_value={"task_id": "launch-task"}):
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "editor", "launch", "--no-wait",
+            ])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -375,10 +376,11 @@ class TestCLI:
         mock_popen.return_value = mock_proc
 
         runner = CliRunner()
-        result = runner.invoke(cli, [
-            "--output", "json", "--project", temp_project["uproject"],
-            "editor", "launch", "--no-wait",
-        ])
+        with patch("cli_anything.unreal.commands.editor.submit_task", return_value={"task_id": "launch-task"}):
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "editor", "launch", "--no-wait",
+            ])
 
         assert result.exit_code == 0
         data = json.loads(result.output)

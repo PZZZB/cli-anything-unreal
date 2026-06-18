@@ -265,11 +265,14 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
             continue
         owner_pid = pid_by_port.get(port)
         owner = process_by_pid.get(int(owner_pid)) if owner_pid else None
+        project_path = owner.get("project") if owner else None
+        if project_path is None and state.session.project_path and port == state.session.port:
+            project_path = state.session.project_path
         entry = _compact_editor_entry(
             "online",
             int(owner_pid) if owner_pid else None,
             port,
-            owner.get("project") if owner else None,
+            project_path,
         )
         _add_online_bridge_status(entry)
         instances.append(entry)
@@ -277,12 +280,22 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
     return instances
 
 
+def _filter_editor_status_instances(instances: list[dict], project_path: str | None) -> list[dict]:
+    if not project_path:
+        return instances
+    return [
+        item for item in instances
+        if _same_project_path(item.get("project_path"), project_path)
+    ]
+
+
 @editor_group.command("status")
 @click.option("--scan-range", default="30010-30020", help="Port range to scan")
+@click.option("--all", "show_all", is_flag=True, default=False, help="Show all editor instances instead of filtering to --project.")
 @click.argument("task_id", required=False)
 @handle_error
 @click.pass_obj
-def editor_status(state: AppState, scan_range, task_id):
+def editor_status(state: AppState, scan_range, show_all, task_id):
     if task_id:
         task = load_task(task_id)
         if task is None:
@@ -290,7 +303,10 @@ def editor_status(state: AppState, scan_range, task_id):
         output(task_progress(task), state)
         return
 
-    output(_scan_editor_status_instances(state, scan_range), state)
+    instances = _scan_editor_status_instances(state, scan_range)
+    if not show_all:
+        instances = _filter_editor_status_instances(instances, state.session.project_path)
+    output(instances, state)
 
 
 @editor_group.command("preflight")
