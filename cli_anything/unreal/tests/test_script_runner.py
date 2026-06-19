@@ -946,6 +946,43 @@ class TestScriptRunner:
             assert data["result"]["actors"] == 42
             mock_run.assert_called_once()
 
+    def test_editor_run_script_stdin_code(self):
+        """``editor run-script -`` should read multiline Python from stdin."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        code = "value = 41\nresult = {'actors': value + 1}\n"
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_editor.return_value = MagicMock()
+            mock_run.return_value = {"status": "ok", "actors": 42}
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script", "-",
+            ], input=code)
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["result"]["actors"] == 42
+            mock_run.assert_called_once()
+            assert mock_run.call_args.args[1] == code
+
+    def test_editor_run_script_missing_file_errors(self):
+        """Missing script path should return a structured file error."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "--output", "json", "editor", "run-script", "missing_script.py",
+        ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "FILE_NOT_FOUND"
+        assert "missing_script.py" in data["message"]
+
     def test_editor_exec_captures_console_log_output(self):
         """Console commands should return log output captured by Python execution."""
         from click.testing import CliRunner

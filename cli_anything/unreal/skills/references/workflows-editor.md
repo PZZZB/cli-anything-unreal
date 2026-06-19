@@ -83,7 +83,7 @@ ue-cli editor close
 
 ## Python Scripting Patterns
 
-Use `editor run-script` when no CLI command covers operation. Use `-c` only for short one-liners; for multiline Python, especially in PowerShell, write a temporary `.py` file and pass the path so shell argv splitting cannot corrupt code or indentation.
+Use `editor run-script` when no CLI command covers operation. Use `-c` only for short one-liners; for multiline Python, especially in PowerShell, pipe code to `editor run-script -` or pass a `.py` file so shell argv splitting cannot corrupt code or indentation.
 
 ### Result Convention
 
@@ -92,6 +92,12 @@ Set `result` dict to return structured data. Missing -> `{"status": "ok"}`. Exce
 ```bash
 # Inline Python via -c - result variable is captured
 ue-cli editor run-script -c "result = {'actors': 42}"
+
+# Multiline Python via stdin - avoids PowerShell argv splitting
+@'
+value = 41
+result = {'actors': value + 1}
+'@ | ue-cli editor run-script -
 
 # Script file - same result capture, auto-save
 ue-cli editor run-script build_scene.py --timeout 60
