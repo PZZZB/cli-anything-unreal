@@ -15,6 +15,24 @@ from cli_anything.unreal.commands import AppError, AppState, handle_error, outpu
 from cli_anything.unreal.core.tasks import cancel_task, load_task, submit_task, task_progress, wait_for_task
 
 
+def _load_command_project(state: AppState, project_path: str | None) -> None:
+    if not project_path:
+        return
+    try:
+        state.session.load_project(project_path)
+    except FileNotFoundError:
+        raise AppError(
+            "PROJECT_NOT_FOUND",
+            f"Project not found: {project_path}",
+            exit_code=3,
+            suggestion="Pass --project <path-to.uproject> before or after editor launch.",
+        )
+
+
+def _project_option(func):
+    return click.option("--project", "project_path", type=click.Path(), help="Path to .uproject file")(func)
+
+
 _VIEWPORT_CAMERA_SCRIPT = """\
 import unreal
 loc, rot = unreal.EditorLevelLibrary.get_level_viewport_camera_info()
@@ -633,6 +651,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 
 
 @editor_group.command("launch")
+@_project_option
 @click.option("--map", "map_path", default=None, help="Level/map to open (.umap path)")
 @click.option("--no-wait", is_flag=True, default=False)
 @click.option("--timeout", default=None, type=int, help="Max seconds to wait for editor startup")
@@ -646,7 +665,8 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 )
 @handle_error
 @click.pass_obj
-def editor_launch(state: AppState, map_path, no_wait, timeout, extra_args):
+def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, extra_args):
+    _load_command_project(state, project_path)
     require_project(state)
     duplicate = _check_already_running(state.session, state)
     if duplicate is not None:

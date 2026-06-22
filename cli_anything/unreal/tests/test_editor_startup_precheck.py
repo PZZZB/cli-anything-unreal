@@ -657,6 +657,42 @@ def test_editor_launch_extra_args_propagate_to_payload(mini_project):
     assert captured["payload"]["extra_args"] == ["-vulkan", "-ResX=1280", "-ResY=720"]
 
 
+def test_editor_launch_accepts_command_level_project(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["command"] = command
+        captured["payload"] = payload
+        return {"task_id": "task-xyz", "status": "submitted"}
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "launch", "--project", mini_project, "--no-wait",
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert captured["command"] == "editor.launch"
+    assert captured["payload"]["project_path"] == mini_project
+
+
+def test_editor_launch_help_lists_command_level_project():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    result = CliRunner().invoke(cli, ["editor", "launch", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--project" in result.output
+
+
 def test_editor_launch_no_extra_args_yields_empty_list(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
