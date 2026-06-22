@@ -74,6 +74,18 @@ class TestCLI:
         data = json.loads(result.output)
         assert data["name"] == "ue-cli"
 
+    def test_list_commands_includes_umg_authoring_commands(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--list-commands"])
+
+        assert result.exit_code == 0
+        names = {item["name"] for item in json.loads(result.output)}
+        assert {"umg create", "umg add-widget", "umg tree"}.issubset(names)
+        assert "slate create" not in names
+
     def test_setup_metadata_uses_ue_cli_name(self):
         setup_py = Path(__file__).parents[3] / "setup.py"
         tree = ast.parse(setup_py.read_text(encoding="utf-8"))

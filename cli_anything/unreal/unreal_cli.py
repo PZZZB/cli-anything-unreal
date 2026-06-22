@@ -87,6 +87,47 @@ COMMAND_SPECS = [
             {"name": "--timeout", "required": False},
         ],
     },
+    {
+        "name": "umg create",
+        "description": "Create a Widget Blueprint with a root widget.",
+        "async_supported": False,
+        "estimated_duration": "5-30s",
+        "parameters": [
+            {"name": "WIDGET_PATH", "required": True},
+            {"name": "--root-class", "required": False},
+            {"name": "--root-name", "required": False},
+            {"name": "--force", "required": False},
+            {"name": "--variable", "required": False},
+        ],
+    },
+    {
+        "name": "umg add-widget",
+        "description": "Add a widget to a CanvasPanel in a Widget Blueprint.",
+        "async_supported": False,
+        "estimated_duration": "5-30s",
+        "parameters": [
+            {"name": "WIDGET_PATH", "required": True},
+            {"name": "--type", "required": True},
+            {"name": "--name", "required": True},
+            {"name": "--parent", "required": False},
+            {"name": "--text", "required": False},
+            {"name": "--x", "required": False},
+            {"name": "--y", "required": False},
+            {"name": "--w", "required": False},
+            {"name": "--h", "required": False},
+            {"name": "--z", "required": False},
+            {"name": "--variable", "required": False},
+        ],
+    },
+    {
+        "name": "umg tree",
+        "description": "Inspect the design-time WidgetTree for a Widget Blueprint.",
+        "async_supported": False,
+        "estimated_duration": "<5s",
+        "parameters": [
+            {"name": "WIDGET_PATH", "required": True},
+        ],
+    },
 ]
 
 
