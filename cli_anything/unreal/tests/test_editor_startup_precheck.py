@@ -785,9 +785,14 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
          patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
          patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
          patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
-             "deployed": True, "action": "fresh_install", "version": "1.13"
+             "deployed": True, "action": "already_up_to_date", "version": "1.13"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=True), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
          patch("cli_anything.unreal.core.build.compile_project", return_value={"status": "ok"}) as mock_compile, \
          patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
          patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=[
@@ -799,6 +804,59 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
     mock_compile.assert_called_once()
     assert result["status"] == "completed"
     assert result["result"].get("recompiled") is True
+
+
+def test_run_editor_launch_task_precompiles_when_bridge_binary_missing(tmp_path):
+    """_run_editor_launch_task should compile the bridge before launching when its DLL is absent."""
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", side_effect=[
+             {
+                 "ready": False,
+                 "reason": "missing_binary",
+                 "message": "Bridge plugin binary is missing.",
+             },
+             {
+                 "ready": True,
+                 "reason": "ok",
+                 "message": "Bridge plugin binary is ready.",
+             },
+         ], create=True), \
+         patch("cli_anything.unreal.core.build.compile_project", return_value={"status": "ok"}) as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    mock_compile.assert_called_once()
+    assert result["status"] == "completed"
+    assert result["result"].get("precompiled_bridge") is True
+    assert result["result"].get("compile_reason") == "Bridge plugin binary is missing."
 
 
 def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
@@ -831,6 +889,11 @@ def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
          patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
          patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
          patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
@@ -870,15 +933,23 @@ def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=True), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
          patch("cli_anything.unreal.core.build.compile_project", return_value={
              "status": "error", "error": "Build failed", "returncode": 1
-         }), \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         }) as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc) as mock_popen, \
          patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={
              "status": "error_dialog", "error": "Plugin 'CliAnythingBridge' failed to load because module 'CliAnythingBridge' could not be found."
-         }):
+         }) as mock_wait:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
+    mock_popen.assert_called_once()
+    mock_wait.assert_called_once()
+    mock_compile.assert_called_once()
     assert result["status"] == "failed"
     assert result["error"]["code"] == "COMPILE_FAILED"
 

@@ -88,6 +88,18 @@ class TestPluginBridge:
         assert "updated" in result["action"]
         assert result["version"] == get_bundled_version()
 
+    def test_get_plugin_binary_status_missing_binary(self, tmp_path):
+        """Deployed bridge source is not launch-ready until its editor DLL exists."""
+        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed, get_plugin_binary_status
+
+        ensure_plugin_deployed(str(tmp_path))
+
+        result = get_plugin_binary_status(str(tmp_path))
+
+        assert result["ready"] is False
+        assert result["reason"] == "missing_binary"
+        assert result["dll_path"].endswith("UnrealEditor-CliAnythingBridge.dll")
+
     def test_is_plugin_loaded_true(self):
         """is_plugin_loaded returns True when probe script succeeds."""
         from cli_anything.unreal.core.plugin_bridge import is_plugin_loaded

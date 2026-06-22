@@ -235,6 +235,16 @@ def _run_build_task(task: dict, func_name: str, *, estimated_total_seconds: int)
     return save_task(task)
 
 
+def _clean_bridge_build_outputs(project_dir: str) -> None:
+    import shutil
+
+    plugin_dir = Path(project_dir) / "Plugins" / "CliAnythingBridge"
+    for sub in ("Intermediate", "Binaries"):
+        path = plugin_dir / sub
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict:
     import subprocess as sp
 
@@ -295,10 +305,79 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         state.session.port = new_port
 
     deploy_result = _deploy_bridge(state.session, state)
+    if not deploy_result.get("deployed", False):
+        task["status"] = "failed"
+        task["error"] = {
+            "code": "BRIDGE_DEPLOY_FAILED",
+            "message": deploy_result.get("error", "CliAnythingBridge deployment failed"),
+            "details": deploy_result,
+        }
+        return save_task(task)
 
     # Auto-enable CliAnythingBridge in .uproject
     from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
-    _ensure_plugin_enabled(state.session.project_dir, "CliAnythingBridge")
+    bridge_enabled_changed = _ensure_plugin_enabled(state.session.project_dir, "CliAnythingBridge")
+
+    from cli_anything.unreal.core.plugin_bridge import get_plugin_binary_status
+    bridge_binary_status = get_plugin_binary_status(
+        state.session.project_dir,
+        engine_root=state.session.engine_root,
+    )
+    compile_reason = None
+    if not bridge_binary_status.get("ready", False):
+        compile_reason = bridge_binary_status.get("message") or "Bridge plugin binary is not ready."
+    elif deploy_result.get("action") != "already_up_to_date":
+        compile_reason = f"Bridge plugin source {deploy_result.get('action')} requires compilation."
+
+    if compile_reason:
+        task = load_task(task["task_id"]) or task
+        task["status"] = "compiling"
+        task["estimated_total_seconds"] = estimated_total_seconds
+        task["result"] = {
+            "project": state.session.project_name,
+            "editor_exe": editor_exe,
+            "startup_precheck": startup_precheck,
+            "bridge_deploy": deploy_result,
+            "bridge_enabled_changed": bridge_enabled_changed,
+            "bridge_binary_status": bridge_binary_status,
+            "compile_reason": compile_reason,
+        }
+        save_task(task)
+
+        _clean_bridge_build_outputs(state.session.project_dir)
+
+        from cli_anything.unreal.core.build import compile_project
+        compile_result = compile_project(
+            state.session.project_path,
+            engine_root=state.session.engine_root,
+        )
+        task = load_task(task["task_id"]) or task
+        task["result"] = dict(task.get("result", {}))
+        task["result"]["compile_result"] = compile_result
+        if compile_result.get("status") != "ok":
+            task["status"] = "failed"
+            task["error"] = {
+                "code": "COMPILE_FAILED",
+                "message": f"Bridge plugin compilation failed: {compile_result.get('error', 'Unknown error')}",
+                "details": compile_result,
+            }
+            return save_task(task)
+
+        bridge_binary_status = get_plugin_binary_status(
+            state.session.project_dir,
+            engine_root=state.session.engine_root,
+        )
+        task["result"]["bridge_binary_status"] = bridge_binary_status
+        if not bridge_binary_status.get("ready", False):
+            task["status"] = "failed"
+            task["error"] = {
+                "code": "BRIDGE_BINARY_NOT_READY",
+                "message": bridge_binary_status.get("message", "Bridge plugin binary is still not ready after compilation."),
+                "details": bridge_binary_status,
+            }
+            return save_task(task)
+        task["result"]["precompiled_bridge"] = True
+        save_task(task)
 
     cmd = _build_launch_cmd(editor_exe, state.session.project_path, payload.get("map_path"), payload.get("extra_args"))
     proc = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
@@ -307,12 +386,19 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     task["pid"] = proc.pid
     task["estimated_total_seconds"] = estimated_total_seconds
     task["status"] = "running"
-    task["result"] = {
+    task_result = dict(task.get("result", {}))
+    task_result.update({
         "pid": proc.pid,
         "project": state.session.project_name,
         "editor_exe": editor_exe,
         "startup_precheck": startup_precheck,
-    }
+        "bridge_deploy": deploy_result,
+        "bridge_binary_status": bridge_binary_status,
+    })
+    task["result"] = task_result
+    if compile_reason:
+        task["result"]["compile_reason"] = compile_reason
+        task["result"]["precompiled_bridge"] = True
     save_task(task)
 
     log_file = Path(state.session.project_dir) / "Saved" / "Logs" / f"{state.session.project_name}.log"
@@ -320,12 +406,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     # Auto-compile and retry if plugin failed to load
     if wait_result.get("status") == "error_dialog" and "failed to load" in wait_result.get("error", ""):
-        import shutil
-        plugin_dir = Path(state.session.project_dir) / "Plugins" / "CliAnythingBridge"
-        for sub in ("Intermediate", "Binaries"):
-            d = plugin_dir / sub
-            if d.is_dir():
-                shutil.rmtree(d, ignore_errors=True)
+        _clean_bridge_build_outputs(state.session.project_dir)
 
         task = load_task(task["task_id"]) or task
         task["status"] = "compiling"

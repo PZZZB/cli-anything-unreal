@@ -83,6 +83,123 @@ def ensure_plugin_deployed(project_dir: str) -> dict:
     }
 
 
+def _read_modules_build_id(modules_path: Path) -> str | None:
+    try:
+        data = json.loads(modules_path.read_text(encoding="utf-8-sig"))
+        return data.get("BuildId")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _newest_plugin_source_mtime(plugin_dir: Path) -> float:
+    newest = 0.0
+    source_dir = plugin_dir / "Source"
+
+    for path in plugin_dir.glob("*.uplugin"):
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            pass
+    if not source_dir.is_dir():
+        return newest
+    for pattern in ("*.cpp", "*.h", "*.cs"):
+        for path in source_dir.rglob(pattern):
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                pass
+    return newest
+
+
+def get_plugin_binary_status(project_dir: str, engine_root: str | None = None) -> dict:
+    """Check whether the deployed bridge has a loadable editor binary.
+
+    Launching UE with an enabled project plugin but no compiled module creates
+    a modal "module could not be found" startup failure. This check lets the
+    CLI compile before launch instead of learning that from a failed editor.
+    """
+    plugin_dir = Path(project_dir) / "Plugins" / _PLUGIN_NAME
+    bin_dir = plugin_dir / "Binaries" / "Win64"
+    dll_path = bin_dir / f"UnrealEditor-{_PLUGIN_NAME}.dll"
+    modules_path = bin_dir / "UnrealEditor.modules"
+
+    base = {
+        "plugin_dir": str(plugin_dir),
+        "dll_path": str(dll_path),
+        "modules_path": str(modules_path),
+    }
+
+    if not plugin_dir.is_dir():
+        return {
+            **base,
+            "ready": False,
+            "reason": "not_deployed",
+            "message": "Bridge plugin source is not deployed.",
+        }
+
+    if not dll_path.is_file():
+        return {
+            **base,
+            "ready": False,
+            "reason": "missing_binary",
+            "message": "Bridge plugin binary is missing.",
+        }
+
+    if not modules_path.is_file():
+        return {
+            **base,
+            "ready": False,
+            "reason": "missing_modules_file",
+            "message": "Bridge plugin UnrealEditor.modules file is missing.",
+        }
+
+    try:
+        modules = json.loads(modules_path.read_text(encoding="utf-8-sig")).get("Modules", {})
+    except (OSError, json.JSONDecodeError):
+        modules = {}
+    if _PLUGIN_NAME not in modules:
+        return {
+            **base,
+            "ready": False,
+            "reason": "missing_module_entry",
+            "message": "Bridge plugin modules file does not list CliAnythingBridge.",
+        }
+
+    newest_source = _newest_plugin_source_mtime(plugin_dir)
+    try:
+        dll_mtime = dll_path.stat().st_mtime
+    except OSError:
+        dll_mtime = 0.0
+    if newest_source > dll_mtime:
+        return {
+            **base,
+            "ready": False,
+            "reason": "stale_binary",
+            "message": "Bridge plugin source is newer than its compiled binary.",
+        }
+
+    if engine_root:
+        engine_modules = Path(engine_root) / "Engine" / "Binaries" / "Win64" / "UnrealEditor.modules"
+        engine_build_id = _read_modules_build_id(engine_modules)
+        plugin_build_id = _read_modules_build_id(modules_path)
+        if engine_build_id and plugin_build_id and engine_build_id != plugin_build_id:
+            return {
+                **base,
+                "ready": False,
+                "reason": "build_id_mismatch",
+                "message": "Bridge plugin binary was built against a different engine BuildId.",
+                "engine_build_id": engine_build_id,
+                "plugin_build_id": plugin_build_id,
+            }
+
+    return {
+        **base,
+        "ready": True,
+        "reason": "ok",
+        "message": "Bridge plugin binary is ready.",
+    }
+
+
 def is_plugin_loaded(api) -> bool:
     """Check if the bridge plugin is loaded in the running editor.
 
