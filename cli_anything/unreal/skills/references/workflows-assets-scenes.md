@@ -123,6 +123,24 @@ ue-cli blueprint delete-unused-variables /Game/BP_Enemy
 ue-cli blueprint compile /Game/BP_Enemy
 ```
 
+## UMG Widget Blueprint Authoring
+
+Use `umg` commands for common designer-tree edits. They hide UE Python gaps where
+`WidgetBlueprint.WidgetTree`, `WidgetTree.RootWidget`, and `Widget.bIsVariable`
+are protected from Python.
+
+```bash
+# Create a Widget Blueprint with a CanvasPanel root
+ue-cli umg create /Game/UI/WBP_Hud --force
+
+# Add a TextBlock to the root CanvasPanel
+ue-cli umg add-widget /Game/UI/WBP_Hud --type TextBlock --name TitleText \
+  --text "Ready" --x 10 --y 20 --w 320 --h 48 --z 3 --variable
+
+# Inspect the design-time tree
+ue-cli umg tree /Game/UI/WBP_Hud
+```
+
 ## Operations Without Dedicated Subcommands
 
 For adding Blueprint components, spawning actors, setting component defaults, etc., use `editor run-script`. Do not hunt for absent subcommands.

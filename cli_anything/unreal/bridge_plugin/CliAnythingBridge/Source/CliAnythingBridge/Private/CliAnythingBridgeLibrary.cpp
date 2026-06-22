@@ -19,12 +19,23 @@
 #include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/CanvasPanel.h"
+#include "Components/CanvasPanelSlot.h"
+#include "Components/PanelWidget.h"
+#include "Components/TextBlock.h"
+#include "Components/Widget.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "WidgetBlueprint.h"
 
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/TextProperty.h"
 
 static FString JsonEscape(const FString& Input);
+static FString JsonError(const FString& Message);
+static UClass* FindWidgetClassByName(const FString& ClassName);
+static FString WidgetJson(UWidget* Widget, UWidgetBlueprint* Blueprint);
 
 class FMaterialResourceExtractSource : public FMaterialResource
 {
@@ -89,7 +100,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.13");
+	return TEXT("1.14");
 }
 
 FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)
@@ -219,6 +230,226 @@ static FString JsonEscape(const FString& Input)
 		}
 	}
 	return Result;
+}
+
+static FString JsonError(const FString& Message)
+{
+	return TEXT("{\"error\":\"") + JsonEscape(Message) + TEXT("\"}");
+}
+
+static UClass* FindWidgetClassByName(const FString& ClassName)
+{
+	FString Name = ClassName;
+	Name.TrimStartAndEndInline();
+	Name.RemoveFromStart(TEXT("unreal."));
+	if (Name.IsEmpty()) return nullptr;
+
+	if (Name.StartsWith(TEXT("/Script/")) || Name.Contains(TEXT(".")))
+	{
+		if (UClass* LoadedClass = LoadClass<UWidget>(nullptr, *Name))
+		{
+			return LoadedClass->IsChildOf(UWidget::StaticClass()) ? LoadedClass : nullptr;
+		}
+	}
+
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		UClass* Candidate = *It;
+		if (!Candidate || !Candidate->IsChildOf(UWidget::StaticClass())) continue;
+		if (Candidate->GetName() == Name || Candidate->GetPathName() == Name)
+		{
+			return Candidate;
+		}
+	}
+	return nullptr;
+}
+
+static FString WidgetJson(UWidget* Widget, UWidgetBlueprint* Blueprint)
+{
+	if (!Widget) return TEXT("{}");
+
+	FString Json = TEXT("{\"name\":\"") + JsonEscape(Widget->GetName()) + TEXT("\"");
+	Json += TEXT(",\"class\":\"") + JsonEscape(Widget->GetClass()->GetName()) + TEXT("\"");
+	Json += TEXT(",\"path\":\"") + JsonEscape(Widget->GetPathName()) + TEXT("\"");
+	Json += TEXT(",\"is_variable\":");
+	Json += Widget->bIsVariable ? TEXT("true") : TEXT("false");
+
+	const bool bIsRoot = Blueprint && Blueprint->WidgetTree && Blueprint->WidgetTree->RootWidget == Widget;
+	Json += TEXT(",\"is_root\":");
+	Json += bIsRoot ? TEXT("true") : TEXT("false");
+
+	int32 ChildIndex = INDEX_NONE;
+	if (UPanelWidget* Parent = UWidgetTree::FindWidgetParent(Widget, ChildIndex))
+	{
+		Json += TEXT(",\"parent\":\"") + JsonEscape(Parent->GetName()) + TEXT("\"");
+		Json += FString::Printf(TEXT(",\"child_index\":%d"), ChildIndex);
+	}
+
+	if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Widget->Slot))
+	{
+		const FVector2D Position = CanvasSlot->GetPosition();
+		const FVector2D Size = CanvasSlot->GetSize();
+		Json += FString::Printf(
+			TEXT(",\"slot\":{\"type\":\"CanvasPanelSlot\",\"position\":[%.6g,%.6g],\"size\":[%.6g,%.6g],\"z_order\":%d}"),
+			Position.X, Position.Y, Size.X, Size.Y, CanvasSlot->GetZOrder());
+	}
+
+	if (UTextBlock* TextBlock = Cast<UTextBlock>(Widget))
+	{
+		Json += TEXT(",\"text\":\"") + JsonEscape(TextBlock->GetText().ToString()) + TEXT("\"");
+	}
+
+	if (UPanelWidget* Panel = Cast<UPanelWidget>(Widget))
+	{
+		Json += TEXT(",\"children\":[");
+		for (int32 Index = 0; Index < Panel->GetChildrenCount(); ++Index)
+		{
+			if (Index > 0) Json += TEXT(",");
+			if (UWidget* Child = Panel->GetChildAt(Index))
+			{
+				Json += TEXT("{\"name\":\"") + JsonEscape(Child->GetName()) + TEXT("\"");
+				Json += TEXT(",\"class\":\"") + JsonEscape(Child->GetClass()->GetName()) + TEXT("\"}");
+			}
+			else
+			{
+				Json += TEXT("{}");
+			}
+		}
+		Json += TEXT("]");
+	}
+
+	Json += TEXT("}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::SetWidgetBlueprintRoot(UWidgetBlueprint* Blueprint, const FString& RootWidgetClassName, const FString& RootWidgetName, bool bIsVariable)
+{
+	if (!Blueprint) return JsonError(TEXT("WidgetBlueprint is null."));
+	if (!Blueprint->WidgetTree) return JsonError(TEXT("WidgetBlueprint has no WidgetTree."));
+	if (Blueprint->WidgetTree->RootWidget) return JsonError(TEXT("WidgetBlueprint already has a root widget."));
+
+	UClass* RootClass = FindWidgetClassByName(RootWidgetClassName.IsEmpty() ? TEXT("CanvasPanel") : RootWidgetClassName);
+	if (!RootClass) return JsonError(TEXT("Root widget class not found or not a UWidget: ") + RootWidgetClassName);
+
+	const FName RootName = RootWidgetName.IsEmpty() ? FName(TEXT("RootCanvas")) : FName(*RootWidgetName);
+	if (Blueprint->WidgetTree->FindWidget(RootName))
+	{
+		return JsonError(TEXT("Widget name already exists: ") + RootName.ToString());
+	}
+
+	UWidget* Root = Blueprint->WidgetTree->ConstructWidget<UWidget>(RootClass, RootName);
+	if (!Root) return JsonError(TEXT("Failed to construct root widget."));
+
+	Root->bIsVariable = bIsVariable;
+	Blueprint->WidgetTree->RootWidget = Root;
+	if (bIsVariable)
+	{
+		Blueprint->OnVariableAdded(Root->GetFName());
+	}
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+	Blueprint->MarkPackageDirty();
+
+	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"set_root\",\"root\":");
+	Json += WidgetJson(Root, Blueprint);
+	Json += TEXT("}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::AddWidgetToCanvas(UWidgetBlueprint* Blueprint, const FString& WidgetClassName, const FString& WidgetName, const FString& ParentWidgetName, bool bIsVariable, float X, float Y, float Width, float Height, int32 ZOrder, const FString& Text)
+{
+	if (!Blueprint) return JsonError(TEXT("WidgetBlueprint is null."));
+	if (!Blueprint->WidgetTree) return JsonError(TEXT("WidgetBlueprint has no WidgetTree."));
+	if (!Blueprint->WidgetTree->RootWidget) return JsonError(TEXT("WidgetBlueprint has no root widget."));
+
+	UClass* WidgetClass = FindWidgetClassByName(WidgetClassName);
+	if (!WidgetClass) return JsonError(TEXT("Widget class not found or not a UWidget: ") + WidgetClassName);
+	if (WidgetName.IsEmpty()) return JsonError(TEXT("Widget name is required."));
+
+	const FName NewWidgetName(*WidgetName);
+	if (Blueprint->WidgetTree->FindWidget(NewWidgetName))
+	{
+		return JsonError(TEXT("Widget name already exists: ") + WidgetName);
+	}
+
+	UWidget* ParentWidget = nullptr;
+	if (ParentWidgetName.IsEmpty())
+	{
+		ParentWidget = Blueprint->WidgetTree->RootWidget;
+	}
+	else
+	{
+		ParentWidget = Blueprint->WidgetTree->FindWidget(FName(*ParentWidgetName));
+	}
+
+	UCanvasPanel* Canvas = Cast<UCanvasPanel>(ParentWidget);
+	if (!Canvas)
+	{
+		const FString ParentLabel = ParentWidget ? ParentWidget->GetName() : ParentWidgetName;
+		return JsonError(TEXT("Parent widget is not a CanvasPanel: ") + ParentLabel);
+	}
+
+	UWidget* Child = Blueprint->WidgetTree->ConstructWidget<UWidget>(WidgetClass, NewWidgetName);
+	if (!Child) return JsonError(TEXT("Failed to construct widget: ") + WidgetName);
+
+	Child->bIsVariable = bIsVariable;
+	if (UTextBlock* TextBlock = Cast<UTextBlock>(Child))
+	{
+		if (!Text.IsEmpty())
+		{
+			TextBlock->SetText(FText::FromString(Text));
+		}
+	}
+
+	UCanvasPanelSlot* Slot = Canvas->AddChildToCanvas(Child);
+	if (!Slot) return JsonError(TEXT("Failed to add widget to CanvasPanel."));
+	Slot->SetPosition(FVector2D(X, Y));
+	if (Width >= 0.0f && Height >= 0.0f)
+	{
+		Slot->SetSize(FVector2D(Width, Height));
+	}
+	Slot->SetZOrder(ZOrder);
+
+	if (bIsVariable)
+	{
+		Blueprint->OnVariableAdded(Child->GetFName());
+	}
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+	Blueprint->MarkPackageDirty();
+
+	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"add_widget\",\"parent\":\"");
+	Json += JsonEscape(Canvas->GetName());
+	Json += TEXT("\",\"widget\":");
+	Json += WidgetJson(Child, Blueprint);
+	Json += TEXT("}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::GetWidgetBlueprintTree(UWidgetBlueprint* Blueprint)
+{
+	if (!Blueprint) return JsonError(TEXT("WidgetBlueprint is null."));
+	if (!Blueprint->WidgetTree) return JsonError(TEXT("WidgetBlueprint has no WidgetTree."));
+
+	FString Json = TEXT("{\"status\":\"ok\",\"widget\":\"") + JsonEscape(Blueprint->GetPathName()) + TEXT("\"");
+	if (Blueprint->WidgetTree->RootWidget)
+	{
+		Json += TEXT(",\"root\":");
+		Json += WidgetJson(Blueprint->WidgetTree->RootWidget, Blueprint);
+	}
+	else
+	{
+		Json += TEXT(",\"root\":null");
+	}
+
+	TArray<UWidget*> Widgets;
+	Blueprint->WidgetTree->GetAllWidgets(Widgets);
+	Json += TEXT(",\"widgets\":[");
+	for (int32 Index = 0; Index < Widgets.Num(); ++Index)
+	{
+		if (Index > 0) Json += TEXT(",");
+		Json += WidgetJson(Widgets[Index], Blueprint);
+	}
+	Json += TEXT("]}");
+	return Json;
 }
 
 FString UCliAnythingBridgeLibrary::GetClassInfo(const FString& ClassName, bool bIncludeInherited)

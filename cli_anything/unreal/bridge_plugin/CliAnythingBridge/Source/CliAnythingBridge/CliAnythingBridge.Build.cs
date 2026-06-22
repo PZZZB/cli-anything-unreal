@@ -11,6 +11,7 @@ public class CliAnythingBridge : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"UMG",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
@@ -19,6 +20,7 @@ public class CliAnythingBridge : ModuleRules
 			"RenderCore",
 			"Slate",
 			"SlateCore",
+			"UMGEditor",
 			"UnrealEd",
 		});
 	}

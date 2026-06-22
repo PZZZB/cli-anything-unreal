@@ -5,6 +5,8 @@
 #include "UObject/UnrealType.h"
 #include "CliAnythingBridgeLibrary.generated.h"
 
+class UWidgetBlueprint;
+
 UCLASS()
 class CLIANYTHINGBRIDGE_API UCliAnythingBridgeLibrary : public UBlueprintFunctionLibrary
 {
@@ -103,4 +105,26 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString GetActorComponentTree(AActor* Actor, bool bIncludeVisualization = false);
+
+	/**
+	 * Sets the design-time root widget for a Widget Blueprint.
+	 * Python cannot access WidgetTree::RootWidget because it is protected by the
+	 * generated reflection wrapper, so UMG authoring goes through this bridge.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|UMG")
+	static FString SetWidgetBlueprintRoot(UWidgetBlueprint* Blueprint, const FString& RootWidgetClassName, const FString& RootWidgetName, bool bIsVariable);
+
+	/**
+	 * Adds a widget under a CanvasPanel in a Widget Blueprint, sets Canvas slot layout,
+	 * and optionally marks it as a Blueprint variable.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|UMG")
+	static FString AddWidgetToCanvas(UWidgetBlueprint* Blueprint, const FString& WidgetClassName, const FString& WidgetName, const FString& ParentWidgetName, bool bIsVariable, float X, float Y, float Width, float Height, int32 ZOrder, const FString& Text);
+
+	/**
+	 * Returns the design-time WidgetTree as JSON, including root, widgets, parent,
+	 * CanvasPanel slot layout, and TextBlock text when present.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|UMG")
+	static FString GetWidgetBlueprintTree(UWidgetBlueprint* Blueprint);
 };

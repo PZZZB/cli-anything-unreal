@@ -258,6 +258,7 @@ def register_commands(cli_group: click.Group):
     from cli_anything.unreal.commands.scene import scene_group
     from cli_anything.unreal.commands.material import material_group
     from cli_anything.unreal.commands.blueprint import blueprint_group
+    from cli_anything.unreal.commands.umg import umg_group
     from cli_anything.unreal.commands.screenshot import screenshot_group
     from cli_anything.unreal.commands.editor import editor_group
     from cli_anything.unreal.commands.session import session_group
@@ -270,6 +271,7 @@ def register_commands(cli_group: click.Group):
     cli_group.add_command(scene_group)
     cli_group.add_command(material_group)
     cli_group.add_command(blueprint_group)
+    cli_group.add_command(umg_group)
     cli_group.add_command(screenshot_group)
     cli_group.add_command(editor_group)
     cli_group.add_command(session_group)

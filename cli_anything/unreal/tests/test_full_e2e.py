@@ -1093,6 +1093,77 @@ else:
 # ═══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.e2e
+class TestUMGE2E:
+    """Test UMG Widget Blueprint authoring against a running editor."""
+
+    TEST_WIDGET = "/Game/__UeCliE2E/WBP_CliUMG"
+
+    def _cleanup(self, api):
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        script = f"""
+import unreal
+path = {json.dumps(self.TEST_WIDGET)}
+EAL = unreal.EditorAssetLibrary
+deleted = False
+if EAL.does_asset_exist(path):
+    deleted = EAL.delete_asset(path)
+    unreal.SystemLibrary.collect_garbage()
+result = {{"status": "ok", "deleted": deleted}}
+"""
+        run_python_code(api, script, timeout=60, save=False)
+
+    def test_umg_create_add_tree_cli(self, cli_runner, project_path, api_port, api):
+        from cli_anything.unreal.unreal_cli import cli
+
+        self._cleanup(api)
+        try:
+            create = cli_runner.invoke(cli, [
+                "--output", "json", "--project", project_path, "--port", str(api_port),
+                "umg", "create", self.TEST_WIDGET,
+                "--force",
+            ])
+            assert create.exit_code == 0, create.output
+            create_data = json.loads(create.output)
+            assert create_data["status"] == "success"
+            assert create_data["result"]["status"] == "ok"
+            assert create_data["result"]["root"]["class"] == "CanvasPanel"
+
+            add = cli_runner.invoke(cli, [
+                "--output", "json", "--project", project_path, "--port", str(api_port),
+                "umg", "add-widget", self.TEST_WIDGET,
+                "--type", "TextBlock",
+                "--name", "TitleText",
+                "--text", "Ready",
+                "--x", "10",
+                "--y", "20",
+                "--w", "320",
+                "--h", "48",
+                "--z", "3",
+                "--variable",
+            ])
+            assert add.exit_code == 0, add.output
+            add_data = json.loads(add.output)
+            assert add_data["status"] == "success"
+            assert add_data["result"]["status"] == "ok"
+            assert add_data["result"]["widget"]["name"] == "TitleText"
+            assert add_data["result"]["widget"]["text"] == "Ready"
+
+            tree = cli_runner.invoke(cli, [
+                "--output", "json", "--project", project_path, "--port", str(api_port),
+                "umg", "tree", self.TEST_WIDGET,
+            ])
+            assert tree.exit_code == 0, tree.output
+            tree_data = json.loads(tree.output)
+            assert tree_data["status"] == "success"
+            assert tree_data["result"]["status"] == "ok"
+            names = {widget["name"] for widget in tree_data["result"]["widgets"]}
+            assert {"RootCanvas", "TitleText"}.issubset(names)
+        finally:
+            self._cleanup(api)
+
+
+@pytest.mark.e2e
 class TestSceneE2E:
     """Test scene/level actor queries against running editor."""
 
