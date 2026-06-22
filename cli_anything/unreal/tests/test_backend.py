@@ -725,6 +725,77 @@ class TestHTTPAPI:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _write_remote_control_project(project_dir: Path, *, remote_enabled: bool) -> Path:
+    project_dir.mkdir()
+    uproject = project_dir / "RemoteOnly.uproject"
+    uproject.write_text(json.dumps({
+        "FileVersion": 3,
+        "EngineAssociation": "5.7",
+        "Plugins": [{"Name": "RemoteControl", "Enabled": remote_enabled}],
+    }), encoding="utf-8")
+
+    config_dir = project_dir / "Config"
+    config_dir.mkdir()
+    (config_dir / "DefaultRemoteControl.ini").write_text(
+        "[/Script/RemoteControlCommon.RemoteControlSettings]\n"
+        "bRestrictServerAccess=True\n"
+        "bAllowConsoleCommandRemoteExecution=True\n"
+        "bEnableRemotePythonExecution=True\n"
+        "AllowedOrigin=\"*\"\n"
+        "RemoteControlHttpServerPort=30010\n",
+        encoding="utf-8",
+    )
+    return uproject
+
+
+def test_check_remote_control_config_requires_enabled_plugin(tmp_path):
+    """RemoteControl ini alone is not enough; .uproject plugin must be enabled."""
+    from cli_anything.unreal.utils.ue_backend import check_remote_control_config
+
+    project_dir = tmp_path / "RemoteOnly"
+    _write_remote_control_project(project_dir, remote_enabled=False)
+
+    result = check_remote_control_config(str(project_dir))
+
+    assert result["configured"] is False
+    assert any("RemoteControl plugin is not enabled" in issue for issue in result["issues"])
+
+
+def test_preflight_enables_remote_control_plugin_when_ini_already_valid(tmp_path):
+    """preflight should auto-enable RemoteControl even when DefaultRemoteControl.ini is already valid."""
+    from cli_anything.unreal.utils.ue_backend import _is_plugin_enabled_in_uproject, preflight_check
+
+    project_dir = tmp_path / "RemoteOnly"
+    uproject = _write_remote_control_project(project_dir, remote_enabled=False)
+
+    with patch("cli_anything.unreal.utils.ue_backend.check_engine_build", return_value={
+        "ready": True,
+        "build_id": "engine-build",
+        "errors": [],
+        "warnings": [],
+        "details": {},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.check_project_build", return_value={
+             "ready": True,
+             "needs_compile": False,
+             "errors": [],
+             "warnings": [],
+             "details": {},
+         }), \
+         patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
+             "deployed": True,
+             "action": "already_up_to_date",
+         }):
+        result = preflight_check(str(uproject), engine_root="F:/MockEngine")
+
+    assert _is_plugin_enabled_in_uproject(str(project_dir), "RemoteControl") is True
+    assert result["remote_control"]["auto_fixed"] is True
+    assert any(
+        "Fixed: RemoteControl plugin is not enabled" in warning
+        for warning in result["project"]["warnings"]
+    )
+
+
 class TestHTTPAPIAssets:
     """Tests for the asset-related methods on UEEditorAPI."""
 

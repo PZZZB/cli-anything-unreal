@@ -878,6 +878,13 @@ def check_remote_control_config(project_dir: str) -> dict:
     config_file = Path(project_dir) / "Config" / "DefaultRemoteControl.ini"
     issues = []
 
+    if not _is_plugin_enabled_in_uproject(project_dir, "RemoteControl"):
+        issues.append(
+            "RemoteControl plugin is not enabled in .uproject. "
+            "Remote Control HTTP server will not start. "
+            "Run: ue-cli editor enable-remote"
+        )
+
     if not config_file.exists():
         return {
             "configured": False,
@@ -885,7 +892,7 @@ def check_remote_control_config(project_dir: str) -> dict:
                 "DefaultRemoteControl.ini not found. "
                 "Remote console commands and Python execution will be blocked. "
                 "Run: ue-cli editor enable-remote"
-            ],
+            ] + issues,
             "file": None,
         }
 

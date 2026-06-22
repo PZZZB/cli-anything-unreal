@@ -22,6 +22,7 @@ Step 4: editor status (verify)
 ```
 
 Key points:
+- `editor preflight` verifies Remote Control config and enables the `RemoteControl` plugin when needed.
 - `editor launch` waits until API online or timeout. Do not use `sleep`.
 - Async: `--no-wait`, then `editor status <task_id>` or `task status <task_id>`.
 - DLL locked build fail -> `editor close`, then compile.
