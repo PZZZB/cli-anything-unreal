@@ -35,6 +35,33 @@ def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _widget_asset_path_candidates(widget_path: str) -> list[str]:
+    """Return loadable WidgetBlueprint asset paths for common UE object path forms."""
+    base_path = str(widget_path).strip().split(":", 1)[0]
+    if not base_path:
+        return [base_path]
+
+    candidates: list[str] = []
+
+    def add(path: str) -> None:
+        if path and path not in candidates:
+            candidates.append(path)
+
+    leaf = base_path.rsplit("/", 1)[-1]
+    if "." not in leaf:
+        add(base_path)
+        return candidates
+
+    package_path, object_name = base_path.rsplit(".", 1)
+    if object_name.endswith("_C"):
+        object_name = object_name[:-2]
+        add(package_path + "." + object_name)
+    else:
+        add(base_path)
+    add(package_path)
+    return candidates
+
+
 def create_widget_blueprint(
     api: UEEditorAPI,
     widget_path: str,
@@ -126,6 +153,7 @@ import json
 import unreal
 
 asset_path = {_json(widget_path)}
+asset_candidates = {_json(_widget_asset_path_candidates(widget_path))}
 widget_type = {_json(widget_type)}
 widget_name = {_json(widget_name)}
 parent = {_json(parent or "")}
@@ -143,9 +171,15 @@ bridge, bridge_error = _cli_bridge()
 if bridge_error:
     result = bridge_error
 else:
-    bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+    bp = None
+    loaded_asset_path = None
+    for candidate in asset_candidates:
+        bp = unreal.EditorAssetLibrary.load_asset(candidate)
+        if bp:
+            loaded_asset_path = candidate
+            break
     if not bp:
-        result = {{"error": "WidgetBlueprint not found: " + asset_path}}
+        result = {{"error": "WidgetBlueprint not found: " + asset_path, "tried": asset_candidates}}
     else:
         result = _cli_parse_bridge(
             bridge.add_widget_to_canvas(
@@ -155,7 +189,7 @@ else:
         )
         if result.get("status") == "ok":
             unreal.BlueprintEditorLibrary.compile_blueprint(bp)
-            unreal.EditorAssetLibrary.save_asset(asset_path, only_if_is_dirty=False)
+            unreal.EditorAssetLibrary.save_asset(loaded_asset_path, only_if_is_dirty=False)
 """
     return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
 
@@ -173,6 +207,7 @@ import json
 import unreal
 
 asset_path = {_json(widget_path)}
+asset_candidates = {_json(_widget_asset_path_candidates(widget_path))}
 
 {_BRIDGE_CHECK}
 
@@ -180,13 +215,19 @@ bridge, bridge_error = _cli_bridge()
 if bridge_error:
     result = bridge_error
 else:
-    bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+    bp = None
+    loaded_asset_path = None
+    for candidate in asset_candidates:
+        bp = unreal.EditorAssetLibrary.load_asset(candidate)
+        if bp:
+            loaded_asset_path = candidate
+            break
     if not bp:
-        result = {{"error": "WidgetBlueprint not found: " + asset_path}}
+        result = {{"error": "WidgetBlueprint not found: " + asset_path, "tried": asset_candidates}}
     else:
         result = _cli_parse_bridge(bridge.get_widget_blueprint_tree(bp))
         if result.get("status") == "ok":
-            result["widget"] = asset_path
+            result["widget"] = loaded_asset_path
 """
     return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
 

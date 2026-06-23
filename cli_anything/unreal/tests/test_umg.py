@@ -5,6 +5,23 @@ from unittest.mock import MagicMock, patch
 
 
 class TestUMGCore:
+    def test_widget_asset_path_candidates_normalizes_generated_class_and_subobject(self):
+        from cli_anything.unreal.core.umg import _widget_asset_path_candidates
+
+        assert _widget_asset_path_candidates("/Game/UI/WBP_Hud") == ["/Game/UI/WBP_Hud"]
+        assert _widget_asset_path_candidates("/Game/UI/WBP_Hud.WBP_Hud") == [
+            "/Game/UI/WBP_Hud.WBP_Hud",
+            "/Game/UI/WBP_Hud",
+        ]
+        assert _widget_asset_path_candidates("/Game/UI/WBP_Hud.WBP_Hud_C") == [
+            "/Game/UI/WBP_Hud.WBP_Hud",
+            "/Game/UI/WBP_Hud",
+        ]
+        assert _widget_asset_path_candidates("/Game/UI/WBP_Hud.WBP_Hud:WidgetTree.TitleText") == [
+            "/Game/UI/WBP_Hud.WBP_Hud",
+            "/Game/UI/WBP_Hud",
+        ]
+
     @patch("cli_anything.unreal.core.umg._exec_umg_script")
     def test_create_widget_blueprint(self, mock_exec):
         from cli_anything.unreal.core.umg import create_widget_blueprint
