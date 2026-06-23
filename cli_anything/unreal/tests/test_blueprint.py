@@ -14,6 +14,39 @@ import pytest
 class TestBlueprint:
     """Tests for core/blueprint.py — mocked script execution."""
 
+    def test_blueprint_asset_path_candidates_normalizes_generated_class(self):
+        from cli_anything.unreal.core.blueprint import _blueprint_asset_path_candidates
+
+        assert _blueprint_asset_path_candidates("/Game/UI/BP_Test") == [
+            "/Game/UI/BP_Test",
+            "/Game/UI/BP_Test.BP_Test",
+        ]
+        assert _blueprint_asset_path_candidates("/Game/UI/BP_Test.BP_Test") == [
+            "/Game/UI/BP_Test.BP_Test",
+            "/Game/UI/BP_Test",
+        ]
+        assert _blueprint_asset_path_candidates("/Game/UI/BP_Test.BP_Test_C") == [
+            "/Game/UI/BP_Test.BP_Test",
+            "/Game/UI/BP_Test",
+        ]
+        assert _blueprint_asset_path_candidates("/Game/UI/BP_Test.BP_Test_C:WidgetTree.Root") == [
+            "/Game/UI/BP_Test.BP_Test",
+            "/Game/UI/BP_Test",
+        ]
+
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_compile_blueprint_uses_normalized_asset_candidates(self, mock_run):
+        from cli_anything.unreal.core.blueprint import compile_blueprint
+
+        mock_run.return_value = {"status": "ok", "action": "compile"}
+
+        compile_blueprint(MagicMock(), "/Game/UI/BP_Test.BP_Test_C")
+
+        script = mock_run.call_args.args[1]
+        assert 'asset_path = "/Game/UI/BP_Test.BP_Test_C"' in script
+        assert 'asset_candidates = ["/Game/UI/BP_Test.BP_Test", "/Game/UI/BP_Test"]' in script
+        assert "_cli_load_blueprint" in script
+
     @patch("cli_anything.unreal.core.blueprint._exec_blueprint_script")
     def test_list_blueprints(self, mock_exec):
         from cli_anything.unreal.core.blueprint import list_blueprints

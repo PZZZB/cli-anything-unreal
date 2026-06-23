@@ -9,7 +9,83 @@ Uses two approaches:
 2. Python script execution — For complex queries via BlueprintEditorLibrary
 """
 
+import json
+
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+
+def _blueprint_asset_path_candidates(blueprint_path: str) -> list[str]:
+    """Return likely loadable Blueprint asset paths for UE object path forms."""
+    base_path = str(blueprint_path).strip().split(":", 1)[0]
+    if not base_path:
+        return [base_path]
+
+    candidates: list[str] = []
+
+    def add(path: str) -> None:
+        if path and path not in candidates:
+            candidates.append(path)
+
+    leaf = base_path.rsplit("/", 1)[-1]
+    if "." not in leaf:
+        add(base_path)
+        add(base_path + "." + leaf)
+        return candidates
+
+    package_path, object_name = base_path.rsplit(".", 1)
+    if object_name.endswith("_C"):
+        object_name = object_name[:-2]
+    add(package_path + "." + object_name)
+    add(package_path)
+    return candidates
+
+
+_BLUEPRINT_RESOLVER = '''
+def _cli_load_blueprint(asset_path, asset_candidates):
+    tried = []
+
+    def _try_load(candidate):
+        if not candidate or candidate in tried:
+            return None, None
+        tried.append(candidate)
+        try:
+            bp = unreal.EditorAssetLibrary.load_asset(candidate)
+            if bp is not None:
+                return bp, candidate
+        except Exception:
+            pass
+        try:
+            data = unreal.EditorAssetLibrary.find_asset_data(candidate)
+            if data and data.is_valid():
+                bp = data.get_asset()
+                if bp is not None:
+                    return bp, candidate
+        except Exception:
+            pass
+        return None, None
+
+    for candidate in asset_candidates:
+        bp, loaded_path = _try_load(candidate)
+        if bp is not None:
+            return bp, loaded_path, tried
+
+    try:
+        registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        for candidate in asset_candidates:
+            package_name = str(candidate).split(":", 1)[0]
+            leaf = package_name.rsplit("/", 1)[-1]
+            if "." in leaf:
+                package_name = package_name.rsplit(".", 1)[0]
+            for data in registry.get_assets_by_package_name(package_name, False):
+                object_path = str(data.package_name) + "." + str(data.asset_name)
+                bp, loaded_path = _try_load(object_path)
+                if bp is not None:
+                    return bp, loaded_path, tried
+    except Exception:
+        pass
+
+    return None, None, tried
+'''
 
 
 # ── Python script templates ──────────────────────────────────────────
@@ -18,14 +94,15 @@ _SCRIPT_BP_INFO = '''
 import unreal
 import json
 
-asset_path = "{blueprint_path}"
-bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+asset_path = {blueprint_path_json}
+asset_candidates = {blueprint_path_candidates_json}
+bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset_candidates)
 if bp is None:
-    result = {{"error": "Blueprint not found: " + asset_path}}
+    result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
     result = {{
         "name": bp.get_name(),
-        "path": asset_path,
+        "path": loaded_asset_path,
         "class": bp.get_class().get_name(),
     }}
 
@@ -96,12 +173,13 @@ _SCRIPT_ADD_FUNCTION = '''
 import unreal
 import json
 
-asset_path = "{blueprint_path}"
+asset_path = {blueprint_path_json}
+asset_candidates = {blueprint_path_candidates_json}
 func_name = "{func_name}"
 
-bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset_candidates)
 if bp is None:
-    result = {{"error": "Blueprint not found: " + asset_path}}
+    result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
     bel = unreal.BlueprintEditorLibrary
     try:
@@ -110,7 +188,7 @@ else:
             result = {{
                 "status": "ok",
                 "action": "add_function",
-                "blueprint": asset_path,
+                "blueprint": loaded_asset_path,
                 "function": func_name,
                 "graph_name": graph.get_name(),
             }}
@@ -124,12 +202,13 @@ _SCRIPT_REMOVE_FUNCTION = '''
 import unreal
 import json
 
-asset_path = "{blueprint_path}"
+asset_path = {blueprint_path_json}
+asset_candidates = {blueprint_path_candidates_json}
 func_name = "{func_name}"
 
-bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset_candidates)
 if bp is None:
-    result = {{"error": "Blueprint not found: " + asset_path}}
+    result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
     bel = unreal.BlueprintEditorLibrary
     try:
@@ -141,7 +220,7 @@ else:
             result = {{
                 "status": "ok",
                 "action": "remove_function",
-                "blueprint": asset_path,
+                "blueprint": loaded_asset_path,
                 "function": func_name,
             }}
     except Exception as e:
@@ -152,13 +231,14 @@ _SCRIPT_ADD_VARIABLE = '''
 import unreal
 import json
 
-asset_path = "{blueprint_path}"
+asset_path = {blueprint_path_json}
+asset_candidates = {blueprint_path_candidates_json}
 var_name = "{var_name}"
 var_type = "{var_type}"
 
-bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset_candidates)
 if bp is None:
-    result = {{"error": "Blueprint not found: " + asset_path}}
+    result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
     bel = unreal.BlueprintEditorLibrary
     try:
@@ -171,7 +251,7 @@ else:
                 result = {{
                     "status": "ok",
                     "action": "add_variable",
-                    "blueprint": asset_path,
+                    "blueprint": loaded_asset_path,
                     "variable": var_name,
                     "type": var_type,
                 }}
@@ -186,12 +266,13 @@ _SCRIPT_REMOVE_VARIABLE = '''
 import unreal
 import json
 
-asset_path = "{blueprint_path}"
+asset_path = {blueprint_path_json}
+asset_candidates = {blueprint_path_candidates_json}
 var_name = "{var_name}"
 
-bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset_candidates)
 if bp is None:
-    result = {{"error": "Blueprint not found: " + asset_path}}
+    result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
     bel = unreal.BlueprintEditorLibrary
     try:
@@ -200,7 +281,7 @@ else:
             result = {{
                 "status": "ok",
                 "action": "remove_variable",
-                "blueprint": asset_path,
+                "blueprint": loaded_asset_path,
                 "variable": var_name,
             }}
         else:
@@ -213,11 +294,12 @@ _SCRIPT_REMOVE_UNUSED_VARS = '''
 import unreal
 import json
 
-asset_path = "{blueprint_path}"
+asset_path = {blueprint_path_json}
+asset_candidates = {blueprint_path_candidates_json}
 
-bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset_candidates)
 if bp is None:
-    result = {{"error": "Blueprint not found: " + asset_path}}
+    result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
     bel = unreal.BlueprintEditorLibrary
     try:
@@ -225,7 +307,7 @@ else:
         result = {{
             "status": "ok",
             "action": "remove_unused_variables",
-            "blueprint": asset_path,
+            "blueprint": loaded_asset_path,
             "removed_count": count,
         }}
     except Exception as e:
@@ -236,11 +318,12 @@ _SCRIPT_COMPILE = '''
 import unreal
 import json
 
-asset_path = "{blueprint_path}"
+asset_path = {blueprint_path_json}
+asset_candidates = {blueprint_path_candidates_json}
 
-bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset_candidates)
 if bp is None:
-    result = {{"error": "Blueprint not found: " + asset_path}}
+    result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
     bel = unreal.BlueprintEditorLibrary
     try:
@@ -248,7 +331,7 @@ else:
         result = {{
             "status": "ok",
             "action": "compile",
-            "blueprint": asset_path,
+            "blueprint": loaded_asset_path,
         }}
     except Exception as e:
         result = {{"error": "Failed to compile blueprint: " + str(e)}}
@@ -258,13 +341,14 @@ _SCRIPT_RENAME_GRAPH = '''
 import unreal
 import json
 
-asset_path = "{blueprint_path}"
+asset_path = {blueprint_path_json}
+asset_candidates = {blueprint_path_candidates_json}
 old_name = "{old_name}"
 new_name = "{new_name}"
 
-bp = unreal.EditorAssetLibrary.load_asset(asset_path)
+bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset_candidates)
 if bp is None:
-    result = {{"error": "Blueprint not found: " + asset_path}}
+    result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
     bel = unreal.BlueprintEditorLibrary
     try:
@@ -276,7 +360,7 @@ else:
             result = {{
                 "status": "ok",
                 "action": "rename_graph",
-                "blueprint": asset_path,
+                "blueprint": loaded_asset_path,
                 "old_name": old_name,
                 "new_name": new_name,
             }}
@@ -566,5 +650,12 @@ def _exec_blueprint_script(
     """
     from cli_anything.unreal.core.script_runner import run_python_code
 
-    script_content = script_template.format(**kwargs)
+    if "blueprint_path" in kwargs:
+        blueprint_path = kwargs["blueprint_path"]
+        kwargs.setdefault("blueprint_path_json", json.dumps(blueprint_path, ensure_ascii=False))
+        kwargs.setdefault(
+            "blueprint_path_candidates_json",
+            json.dumps(_blueprint_asset_path_candidates(blueprint_path), ensure_ascii=False),
+        )
+    script_content = _BLUEPRINT_RESOLVER + "\n" + script_template.format(**kwargs)
     return run_python_code(api, script_content, timeout=timeout)
