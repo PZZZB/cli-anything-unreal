@@ -85,7 +85,7 @@ All asset commands require editor.
 
 | Command | Description |
 |---------|-------------|
-| `asset list [-q QUERY] [--class CLASS] [--path PATH] [--limit N]` | Search assets via Asset Registry |
+| `asset list [-q QUERY] [--class CLASS] [--path PATH] [--limit N]` | Search assets via Asset Registry. `--class Blueprint` includes Blueprint-family assets such as `WidgetBlueprint` and `AnimBlueprint` |
 | `asset exists ASSET_PATH` | Check existence |
 | `asset property ASSET_PATH PROP[=VALUE]` | Get/set property |
 | `asset delete ASSET_PATH [--force]` | Delete with ref detection |

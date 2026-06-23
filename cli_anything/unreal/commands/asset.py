@@ -16,7 +16,12 @@ def asset_group():
 @click.option("--query", "-q", default="",
               help="Case-insensitive regex for asset names (via re.search). "
                    "Plain strings behave as substrings; anchors/alternation also work.")
-@click.option("--class", "class_name", default=None, help="Filter by class (e.g., Material, Texture2D, Blueprint)")
+@click.option(
+    "--class",
+    "class_name",
+    default=None,
+    help="Filter by class (e.g., Material, Texture2D, Blueprint; Blueprint includes WidgetBlueprint/AnimBlueprint)",
+)
 @click.option("--path", "package_path", default="/Game", help="Content path to search (default: /Game)")
 @click.option("--limit", default=0, type=int, help="Max results (0 = unlimited)")
 @handle_error

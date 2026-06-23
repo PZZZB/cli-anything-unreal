@@ -18,6 +18,26 @@ class TestAssets:
         api = MagicMock()
         return api
 
+    def test_asset_class_matches_blueprint_family(self):
+        from cli_anything.unreal.core.assets import _asset_class_matches
+
+        assert _asset_class_matches("Blueprint", "Blueprint") is True
+        assert _asset_class_matches("WidgetBlueprint", "Blueprint") is True
+        assert _asset_class_matches("AnimBlueprint", "Blueprint") is True
+        assert _asset_class_matches("Material", "Blueprint") is False
+
+    def test_search_assets_blueprint_filter_uses_family_matcher(self):
+        from cli_anything.unreal.core.assets import search_assets
+
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"assets": [], "count": 0}
+            search_assets(self._mock_api(), class_name="Blueprint")
+
+        script = mock_run.call_args.args[1]
+        assert "def _cli_asset_class_matches" in script
+        assert "_class_filter = 'Blueprint'" in script
+        assert "return _cls == _filter or _cls.endswith('Blueprint')" in script
+
     def test_asset_exists_true(self):
         from cli_anything.unreal.core.assets import asset_exists
 

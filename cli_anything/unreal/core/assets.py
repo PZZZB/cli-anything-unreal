@@ -12,6 +12,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+
+def _asset_class_matches(asset_class: str, class_filter: str | None) -> bool:
+    """Return whether an Asset Registry class satisfies the CLI class filter."""
+    if not class_filter:
+        return True
+    if class_filter == "Blueprint":
+        return asset_class == class_filter or asset_class.endswith("Blueprint")
+    return asset_class == class_filter
+
+
 if TYPE_CHECKING:
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
@@ -141,6 +151,13 @@ _class_filter = {class_repr}
 _name_query = {query_repr}
 _limit = {limit_val}
 
+def _cli_asset_class_matches(_cls, _filter):
+    if not _filter:
+        return True
+    if _filter == "Blueprint":
+        return _cls == _filter or _cls.endswith('Blueprint')
+    return _cls == _filter
+
 # Case-insensitive regex for name query (re.search — partial match OK).
 _name_pat = None
 if _name_query:
@@ -159,7 +176,7 @@ else:
         _cls = str(_ad.asset_class_path.asset_name)
         _name = str(_ad.asset_name)
 
-        if _class_filter and _cls != _class_filter:
+        if not _cli_asset_class_matches(_cls, _class_filter):
             continue
         if _name_pat is not None and not _name_pat.search(_name):
             continue
