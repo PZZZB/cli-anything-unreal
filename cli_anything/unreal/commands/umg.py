@@ -68,7 +68,10 @@ def umg_add_widget(
     z_order,
     variable,
 ):
-    """Add a widget to a CanvasPanel in a Widget Blueprint."""
+    """Add a widget to a CanvasPanel in a Widget Blueprint.
+
+    WIDGET_PATH accepts package, object, generated-class, or WidgetTree subobject paths.
+    """
     from cli_anything.unreal.core.umg import add_widget_to_canvas
 
     api = require_editor(state)
@@ -95,7 +98,10 @@ def umg_add_widget(
 @handle_error
 @click.pass_obj
 def umg_tree(state: AppState, widget_path):
-    """Show the design-time WidgetTree for a Widget Blueprint."""
+    """Show the design-time WidgetTree for a Widget Blueprint.
+
+    WIDGET_PATH accepts package, object, generated-class, or WidgetTree subobject paths.
+    """
     from cli_anything.unreal.core.umg import get_widget_tree
 
     api = require_editor(state)

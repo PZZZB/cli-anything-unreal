@@ -363,6 +363,42 @@ def test_editor_status_scans_running_project_config_ports_outside_default_range(
     ]
 
 
+def test_editor_status_uses_config_port_when_owner_pid_unavailable(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30020), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.13"):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert data["result"] == [
+        {
+            "status": "online",
+            "pid": 1234,
+            "port": 30020,
+            "project_path": mini_project,
+            "bridge_version": "1.13",
+            "bundled_version": "1.13",
+            "plugin_match": True,
+        },
+    ]
+
+
 def test_editor_list_command_removed():
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

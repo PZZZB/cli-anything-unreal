@@ -228,10 +228,15 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
         extra_ports.add(int(configured_port))
 
     running = find_running_editors() if sys.platform == "win32" else []
+    proc_config_port_by_pid: dict[int, int] = {}
     for proc in running:
         proc_port = _project_config_port(proc.get("project") or None)
         if proc_port:
             extra_ports.add(int(proc_port))
+            try:
+                proc_config_port_by_pid[int(proc.get("pid", 0))] = int(proc_port)
+            except (TypeError, ValueError):
+                pass
 
     online_by_port: dict[int, dict] = {}
     for item in scan_editor_ports(port_range=(start, end)):
@@ -266,6 +271,10 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
             pid = None
         project_path = proc.get("project") or None
         port = port_by_pid.get(pid) if pid is not None else None
+        if port is None and pid is not None:
+            configured_proc_port = proc_config_port_by_pid.get(pid)
+            if configured_proc_port in online_by_port:
+                port = configured_proc_port
         if port is not None:
             used_ports.add(port)
             entry = _compact_editor_entry("online", pid, port, project_path)

@@ -173,8 +173,8 @@ All UMG commands require editor and the CliAnythingBridge plugin.
 | Command | Description |
 |---------|-------------|
 | `umg create WIDGET_PATH [--root-class CLASS] [--root-name NAME] [--force] [--variable]` | Create a Widget Blueprint with a root widget; default root is `CanvasPanel` |
-| `umg add-widget WIDGET_PATH --type CLASS --name NAME [--parent CANVAS] [--text TEXT] [--x X] [--y Y] [--w W] [--h H] [--z Z] [--variable]` | Add a child widget to a CanvasPanel and set its Canvas slot |
-| `umg tree WIDGET_PATH` | Inspect the design-time WidgetTree, including root, child widgets, slots, and TextBlock text |
+| `umg add-widget WIDGET_PATH --type CLASS --name NAME [--parent CANVAS] [--text TEXT] [--x X] [--y Y] [--w W] [--h H] [--z Z] [--variable]` | Add a child widget to a CanvasPanel and set its Canvas slot. `WIDGET_PATH` accepts package, object, generated-class, or WidgetTree subobject paths |
+| `umg tree WIDGET_PATH` | Inspect the design-time WidgetTree, including root, child widgets, slots, and TextBlock text. `WIDGET_PATH` accepts package, object, generated-class, or WidgetTree subobject paths |
 
 ## screenshot - Screenshot
 

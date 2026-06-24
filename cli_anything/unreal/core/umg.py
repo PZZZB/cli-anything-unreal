@@ -50,6 +50,7 @@ def _widget_asset_path_candidates(widget_path: str) -> list[str]:
     leaf = base_path.rsplit("/", 1)[-1]
     if "." not in leaf:
         add(base_path)
+        add(base_path + "." + leaf)
         return candidates
 
     package_path, object_name = base_path.rsplit(".", 1)
