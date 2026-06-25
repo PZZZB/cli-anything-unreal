@@ -1,6 +1,7 @@
 #include "CliAnythingBridgeLibrary.h"
 
 #include "Materials/Material.h"
+#include "Materials/MaterialExpression.h"
 #include "Materials/MaterialInterface.h"
 #include "MaterialShared.h"
 #include "RHIShaderPlatform.h"
@@ -34,6 +35,7 @@
 
 static FString JsonEscape(const FString& Input);
 static FString JsonError(const FString& Message);
+static FString JsonStringArray(const TArray<FString>& Values);
 static UClass* FindWidgetClassByName(const FString& ClassName);
 static FString WidgetJson(UWidget* Widget, UWidgetBlueprint* Blueprint);
 
@@ -60,6 +62,88 @@ TArray<FString> UCliAnythingBridgeLibrary::GetMaterialCompileErrors(UMaterialInt
 		for (const FString& Error : Resource->GetCompileErrors()) { Result.AddUnique(Error); }
 	}
 	return Result;
+}
+
+FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput(UMaterial* Material, UMaterialExpression* ToExpression, const FString& ToInputName)
+{
+	if (!Material)
+	{
+		return JsonError(TEXT("Material is null"));
+	}
+	if (!ToExpression)
+	{
+		return JsonError(TEXT("Target expression is null"));
+	}
+
+	FString Wanted = ToInputName;
+	Wanted.TrimStartAndEndInline();
+
+	TArray<FString> AvailableInputs;
+	int32 TargetIndex = INDEX_NONE;
+	FExpressionInput* TargetInput = nullptr;
+	for (int32 Index = 0;; ++Index)
+	{
+		FExpressionInput* CurrentInput = ToExpression->GetInput(Index);
+		if (!CurrentInput)
+		{
+			break;
+		}
+		const FString InputName = ToExpression->GetInputName(Index).ToString();
+		AvailableInputs.Add(InputName);
+		if (TargetIndex == INDEX_NONE && (Wanted.IsEmpty() || InputName.Equals(Wanted, ESearchCase::IgnoreCase)))
+		{
+			TargetIndex = Index;
+			TargetInput = CurrentInput;
+			if (!Wanted.IsEmpty())
+			{
+				break;
+			}
+		}
+	}
+
+	if (AvailableInputs.Num() == 0)
+	{
+		return JsonError(TEXT("Target expression has no inputs: ") + ToExpression->GetName());
+	}
+
+	if (TargetIndex == INDEX_NONE)
+	{
+		return TEXT("{\"error\":\"Input not found: ") + JsonEscape(Wanted) + TEXT("\",\"available_inputs\":") + JsonStringArray(AvailableInputs) + TEXT("}");
+	}
+
+	FExpressionInput* Input = TargetInput;
+	if (!Input)
+	{
+		return JsonError(TEXT("Input pointer is null"));
+	}
+
+	const FString InputName = ToExpression->GetInputName(TargetIndex).ToString();
+	const bool bHadConnection = Input->Expression != nullptr;
+	const FString FromExpressionName = Input->Expression ? Input->Expression->GetName() : FString();
+	const FString FromExpressionPath = Input->Expression ? Input->Expression->GetPathName() : FString();
+
+	Material->Modify();
+	ToExpression->Modify();
+
+	Input->Expression = nullptr;
+	Input->OutputIndex = 0;
+	Input->InputName = NAME_None;
+	Input->Mask = 0;
+	Input->MaskR = 0;
+	Input->MaskG = 0;
+	Input->MaskB = 0;
+	Input->MaskA = 0;
+
+	ToExpression->PostEditChange();
+	Material->PostEditChange();
+	Material->MarkPackageDirty();
+
+	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"disconnect\",\"to_node\":\"") + JsonEscape(ToExpression->GetName()) + TEXT("\"");
+	Json += TEXT(",\"to_input\":\"") + JsonEscape(InputName) + TEXT("\"");
+	Json += TEXT(",\"had_connection\":") + FString(bHadConnection ? TEXT("true") : TEXT("false"));
+	Json += TEXT(",\"disconnected_from\":\"") + JsonEscape(FromExpressionName) + TEXT("\"");
+	Json += TEXT(",\"disconnected_from_path\":\"") + JsonEscape(FromExpressionPath) + TEXT("\"}");
+	return Json;
 }
 
 FIntVector4 UCliAnythingBridgeLibrary::GetActiveViewportScreenBounds()
@@ -100,7 +184,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.14");
+	return TEXT("1.15");
 }
 
 FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)
@@ -235,6 +319,21 @@ static FString JsonEscape(const FString& Input)
 static FString JsonError(const FString& Message)
 {
 	return TEXT("{\"error\":\"") + JsonEscape(Message) + TEXT("\"}");
+}
+
+static FString JsonStringArray(const TArray<FString>& Values)
+{
+	FString Result = TEXT("[");
+	for (int32 Index = 0; Index < Values.Num(); ++Index)
+	{
+		if (Index > 0)
+		{
+			Result += TEXT(",");
+		}
+		Result += TEXT("\"") + JsonEscape(Values[Index]) + TEXT("\"");
+	}
+	Result += TEXT("]");
+	return Result;
 }
 
 static UClass* FindWidgetClassByName(const FString& ClassName)

@@ -647,6 +647,58 @@ else:
         )
         assert disc.get("status") == "ok"
 
+    def test_disconnect_between_expressions(self, api, project_path):
+        """Test disconnecting a material expression input pin."""
+        from cli_anything.unreal.core.materials import (
+            add_material_node, connect_material_nodes, disconnect_material_nodes, get_material_info,
+        )
+
+        project_dir = str(Path(project_path).parent)
+
+        const_result = add_material_node(
+            api, self.TEST_MATERIAL,
+            "MaterialExpressionConstant",
+            project_dir=project_dir,
+        )
+        assert const_result.get("status") == "ok"
+        const_name = const_result["node"]["name"]
+
+        multiply_result = add_material_node(
+            api, self.TEST_MATERIAL,
+            "MaterialExpressionMultiply",
+            project_dir=project_dir,
+        )
+        assert multiply_result.get("status") == "ok"
+        multiply_name = multiply_result["node"]["name"]
+
+        conn = connect_material_nodes(
+            api, self.TEST_MATERIAL,
+            const_name, "", multiply_name, "A",
+            project_dir=project_dir,
+        )
+        assert conn.get("status") == "ok"
+
+        before = get_material_info(api, self.TEST_MATERIAL, project_dir)
+        assert any(
+            edge["from_node"] == const_name and edge["to_node"] == multiply_name
+            for edge in before.get("edges", [])
+        )
+
+        disc = disconnect_material_nodes(
+            api, self.TEST_MATERIAL,
+            const_name, "", multiply_name, "A",
+            project_dir=project_dir,
+        )
+        assert disc.get("status") == "ok", f"disconnect failed: {disc}"
+        assert disc.get("to") == multiply_name
+        assert disc.get("to_input") == "A"
+
+        after = get_material_info(api, self.TEST_MATERIAL, project_dir)
+        assert not any(
+            edge["from_node"] == const_name and edge["to_node"] == multiply_name
+            for edge in after.get("edges", [])
+        )
+
     def test_recompile(self, api, project_path):
         """Test recompiling a material."""
         from cli_anything.unreal.core.materials import recompile_material

@@ -133,7 +133,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.14"
+        assert version == "1.15"
 
     def test_bridge_declares_umg_helpers(self):
         """UMG authoring helpers live in the bridge because WidgetTree fields are protected."""
@@ -156,6 +156,27 @@ class TestPluginBridge:
         for name in ("SetWidgetBlueprintRoot", "AddWidgetToCanvas", "GetWidgetBlueprintTree"):
             assert name in header
             assert name in cpp
+
+    def test_bridge_declares_material_disconnect_helper(self):
+        """Material node input disconnect needs C++ because UE Python has no disconnect API."""
+        plugin_dir = Path(__file__).resolve().parents[1] / "bridge_plugin" / "CliAnythingBridge"
+        header = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Public"
+            / "CliAnythingBridgeLibrary.h"
+        ).read_text(encoding="utf-8")
+        cpp = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+
+        assert "DisconnectMaterialExpressionInput" in header
+        assert "DisconnectMaterialExpressionInput" in cpp
 
     def test_get_loaded_plugin_version(self):
         """get_loaded_plugin_version queries the running editor."""

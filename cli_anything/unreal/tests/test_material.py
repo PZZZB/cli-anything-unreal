@@ -645,6 +645,29 @@ class TestMaterialEditing:
         assert result["status"] == "ok"
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_disconnect_between_expressions_uses_bridge(self, mock_exec):
+        from cli_anything.unreal.core.materials import disconnect_material_nodes
+
+        mock_exec.return_value = {
+            "status": "ok",
+            "action": "disconnect",
+            "from": "Constant_0",
+            "to": "Multiply_0",
+            "to_input": "A",
+        }
+
+        api = MagicMock()
+        result = disconnect_material_nodes(
+            api, "/Game/M_Test",
+            "Constant_0", "", "Multiply_0", "A",
+        )
+
+        assert result["status"] == "ok"
+        script_template = mock_exec.call_args.args[1]
+        assert "disconnect_material_expression_input" in script_template
+        assert "disconnect_material_expression(" not in script_template
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_set_param_scalar(self, mock_exec):
         from cli_anything.unreal.core.materials import set_material_param
 

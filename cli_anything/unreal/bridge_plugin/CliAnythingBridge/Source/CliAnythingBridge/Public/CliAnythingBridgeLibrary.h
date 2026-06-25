@@ -5,6 +5,9 @@
 #include "UObject/UnrealType.h"
 #include "CliAnythingBridgeLibrary.generated.h"
 
+class UMaterial;
+class UMaterialExpression;
+class UMaterialInterface;
 class UWidgetBlueprint;
 
 UCLASS()
@@ -20,6 +23,15 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static TArray<FString> GetMaterialCompileErrors(UMaterialInterface* Material);
+
+	/**
+	 * Disconnects a material expression input pin.
+	 * UE Python exposes ConnectMaterialExpressions but no reliable disconnect API,
+	 * and FExpressionInput properties are protected from Python.
+	 * Returns a JSON result string.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString DisconnectMaterialExpressionInput(UMaterial* Material, UMaterialExpression* ToExpression, const FString& ToInputName);
 
 	/**
 	 * Gets the absolute screen coordinates (X, Y, Width, Height) of the active level viewport.

@@ -595,10 +595,25 @@ else:
             if to_expr is None:
                 result = {{"error": "Target node not found: " + to_node_name}}
             else:
-                mel.disconnect_material_expression(mat, to_expr, to_input)
-                mel.recompile_material(mat)
-                mat.modify()
-                result = {{"status": "ok", "action": "disconnect", "from": from_node_name, "to": to_node_name, "to_input": to_input}}
+                bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+                if bridge is None or not hasattr(bridge, "disconnect_material_expression_input"):
+                    result = {{
+                        "error": "CliAnythingBridgeLibrary is missing DisconnectMaterialExpressionInput. material disconnect between nodes requires bridge plugin 1.15+.",
+                        "suggestion": "Run editor plugin-upgrade, then relaunch the editor.",
+                    }}
+                else:
+                    raw = bridge.disconnect_material_expression_input(mat, to_expr, to_input)
+                    bridge_result = json.loads(raw) if raw else {{"error": "Bridge returned empty result"}}
+                    if "error" in bridge_result:
+                        result = bridge_result
+                    else:
+                        mel.recompile_material(mat)
+                        mat.modify()
+                        result = bridge_result
+                        result["from"] = from_node_name
+                        result["from_output"] = from_output
+                        result["to"] = to_node_name
+                        result["to_input"] = bridge_result.get("to_input", to_input)
     except Exception as e:
         result = {{"error": "Disconnect failed: " + str(e)}}
 '''
