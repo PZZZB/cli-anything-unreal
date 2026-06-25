@@ -129,6 +129,11 @@ Use `umg` commands for common designer-tree edits. They hide UE Python gaps wher
 `WidgetBlueprint.WidgetTree`, `WidgetTree.RootWidget`, and `Widget.bIsVariable`
 are protected from Python.
 
+Known limitation: direct UE Python reads of `WidgetTree`/`RootWidget` can fail
+because those fields are protected. Prefer `ue-cli umg tree`; when falling back
+to Python, resolve the WidgetTree/root through object/subobject paths instead of
+reading the protected properties directly.
+
 ```bash
 # Create a Widget Blueprint with a CanvasPanel root
 ue-cli umg create /Game/UI/WBP_Hud --force

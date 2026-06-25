@@ -63,6 +63,12 @@ ue-cli material rename-custom-input /Game/M_Water \
     --node MaterialExpressionCustom_0 --from OutlineWidth --to OutlineWidthPx
 ```
 
+Custom node input display labels are not stable through UE Python across all
+engine versions. Treat `inputs[].input_name` and the Custom HLSL code as the
+source of truth. MaterialInstance parameters are separate; artists can still see
+and tune MI names such as `OutlineWidthPx` even if a Custom node display label
+does not persist.
+
 ### 4. Alternative: Standard Nodes
 
 For simple changes:
@@ -198,6 +204,6 @@ Full command reference: `commands.md` -> `material`.
 
 - **`MEL.recompile_material()` is void** - cannot detect compile failures. Verify with `material recompile` or `material get-errors`. No exception != success.
 - `Material.expressions` protected in UE5.7+. Read nodes with `material info`; edit via `add-node`, `connect`, `delete-node`.
-- Custom node internal HLSL variable names are `inputs[].input_name`; use `material rename-custom-input` for persistent renames.
+- Custom node internal HLSL variable names are `inputs[].input_name`; use `material rename-custom-input` for persistent HLSL variable renames. Do not rely on display-label-only edits.
 - Existing node prop edits: use `MaterialEditingLibrary.get_material_property_input_node()`; avoid `find_object` and direct `expressions`.
 - `material shader-source` always sync recompiles to guarantee latest source; complex materials may take time.
