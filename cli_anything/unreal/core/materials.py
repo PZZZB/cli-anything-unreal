@@ -74,6 +74,13 @@ else:
                             node["output_type"] = str(expr.get_editor_property("output_type"))
                         except:
                             pass
+                        try:
+                            _custom_inputs = []
+                            for _ci in expr.get_editor_property("inputs") or []:
+                                _custom_inputs.append(str(_ci.get_editor_property("input_name")))
+                            node["inputs"] = _custom_inputs
+                        except Exception as e:
+                            node["inputs_error"] = str(e)
                     nodes.append(node)
                     _expr_objs.append(expr)
             result["nodes"] = nodes
@@ -305,6 +312,128 @@ else:
             mat.modify()
     except Exception as e:
         result = {{"error": "create_material_expression failed: " + str(e)}}
+'''
+
+_SCRIPT_RENAME_CUSTOM_INPUT = '''
+import re
+import unreal
+
+material_path = {material_path}
+node_name = {node_name}
+old_name = {old_name}
+new_name = {new_name}
+update_code = {update_code}
+
+def _list_nodes(_mat):
+    _nodes = []
+    for _expr in unreal.ObjectIterator(unreal.MaterialExpression):
+        if _expr.get_outer() == _mat:
+            _nodes.append(_expr.get_name())
+    return _nodes
+
+def _input_names(_expr):
+    _names = []
+    for _ci in _expr.get_editor_property("inputs") or []:
+        _names.append(str(_ci.get_editor_property("input_name")))
+    return _names
+
+mat = unreal.EditorAssetLibrary.load_asset(material_path)
+if mat is None:
+    result = {{"error": "Material not found: " + material_path}}
+elif not isinstance(mat, unreal.Material):
+    result = {{"error": "Asset is not a Material: " + material_path}}
+elif not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", new_name):
+    result = {{"error": "New Custom input name is not a valid HLSL identifier: " + new_name}}
+else:
+    mel = unreal.MaterialEditingLibrary
+    target = unreal.find_object(None, mat.get_path_name() + ":" + node_name)
+    if target is None:
+        for _expr in unreal.ObjectIterator(unreal.MaterialExpression):
+            if _expr.get_outer() == mat and _expr.get_name() == node_name:
+                target = _expr
+                break
+
+    if target is None:
+        result = {{"error": "Node not found: " + node_name, "available_nodes": _list_nodes(mat)}}
+    elif target.get_class().get_name() != "MaterialExpressionCustom":
+        result = {{
+            "error": "Node is not a MaterialExpressionCustom: " + node_name,
+            "node_type": target.get_class().get_name(),
+        }}
+    else:
+        try:
+            inputs = list(target.get_editor_property("inputs") or [])
+            before_names = _input_names(target)
+            if old_name not in before_names:
+                result = {{
+                    "error": "Custom input not found: " + old_name,
+                    "material": material_path,
+                    "node": node_name,
+                    "inputs": before_names,
+                }}
+            elif new_name != old_name and new_name in before_names:
+                result = {{
+                    "error": "Custom input already exists: " + new_name,
+                    "material": material_path,
+                    "node": node_name,
+                    "inputs": before_names,
+                }}
+            else:
+                warnings = []
+                for _ci in inputs:
+                    if str(_ci.get_editor_property("input_name")) == old_name:
+                        _ci.set_editor_property("input_name", new_name)
+                target.set_editor_property("inputs", inputs)
+
+                code_updated = False
+                if update_code:
+                    try:
+                        code = target.get_editor_property("code") or ""
+                        next_code = re.sub(
+                            r"(?<![A-Za-z0-9_])" + re.escape(old_name) + r"(?![A-Za-z0-9_])",
+                            new_name,
+                            code,
+                        )
+                        if next_code != code:
+                            target.set_editor_property("code", next_code)
+                            code_updated = True
+                    except Exception as e:
+                        warnings.append("code: " + str(e))
+
+                for _obj in [target, mat]:
+                    try:
+                        _obj.modify()
+                    except Exception:
+                        pass
+                    try:
+                        _obj.post_edit_change()
+                    except Exception:
+                        pass
+                try:
+                    mel.recompile_material(mat)
+                except Exception as e:
+                    warnings.append("recompile: " + str(e))
+                try:
+                    unreal.EditorAssetLibrary.save_loaded_asset(mat)
+                except Exception as e:
+                    warnings.append("save: " + str(e))
+
+                after_names = _input_names(target)
+                result = {{
+                    "status": "ok",
+                    "action": "rename_custom_input",
+                    "material": material_path,
+                    "node": node_name,
+                    "old_name": old_name,
+                    "new_name": new_name,
+                    "inputs_before": before_names,
+                    "inputs_after": after_names,
+                    "code_updated": code_updated,
+                }}
+                if warnings:
+                    result["warnings"] = warnings
+        except Exception as e:
+            result = {{"error": "rename_custom_input failed: " + str(e)}}
 '''
 
 _SCRIPT_DELETE_NODE = '''
@@ -1283,6 +1412,34 @@ def delete_material_node(
         project_dir=project_dir,
         material_path=material_path,
         node_name=node_name,
+    )
+
+
+def rename_custom_input(
+    api: UEEditorAPI,
+    material_path: str,
+    node_name: str,
+    old_name: str,
+    new_name: str,
+    update_code: bool = True,
+    project_dir: str | None = None,
+) -> dict:
+    """Rename a MaterialExpressionCustom input variable.
+
+    Custom node HLSL variable names come from ``inputs[].input_name``.
+    MaterialInstance parameter names and node display text do not rename
+    those variables. This helper updates the real Custom input name and,
+    by default, rewrites whole-word HLSL references from old_name to new_name.
+    """
+    return _exec_material_script(
+        api,
+        _SCRIPT_RENAME_CUSTOM_INPUT,
+        project_dir=project_dir,
+        material_path=repr(material_path),
+        node_name=repr(node_name),
+        old_name=repr(old_name),
+        new_name=repr(new_name),
+        update_code=repr(bool(update_code)),
     )
 
 

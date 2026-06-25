@@ -144,6 +144,7 @@ All material commands require editor.
 |---------|-------------|
 | `material add-node PATH --type CLASS [--pos-x X] [--pos-y Y] [--set KEY=VALUE] [--add-input NAME] [--code-file PATH]` | Add expression node |
 | `material delete-node PATH --node NAME` | Delete expression node |
+| `material rename-custom-input PATH --node NODE --from OLD --to NEW [--no-update-code]` | Rename Custom node input/HLSL variable |
 | `material connect PATH --from NODE [--from-output PIN] --to NODE --to-input PIN` | Connect nodes |
 | `material disconnect PATH --from NODE [--from-output PIN] --to NODE --to-input PIN` | Disconnect nodes |
 | `material set-param PATH --name N --value V --type scalar\|vector\|texture` | Set MaterialInstance param |

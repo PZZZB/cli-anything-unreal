@@ -314,6 +314,40 @@ def material_delete_node(state: AppState, material_path, node_name):
     output(result, state)
 
 
+@material_group.command("rename-custom-input")
+@click.argument("material_path")
+@click.option("--node", "node_name", required=True,
+              help="MaterialExpressionCustom node name")
+@click.option("--from", "old_name", required=True,
+              help="Existing Custom input/HLSL variable name")
+@click.option("--to", "new_name", required=True,
+              help="New Custom input/HLSL variable name")
+@click.option("--no-update-code", is_flag=True,
+              help="Rename the input only; do not rewrite HLSL references")
+@handle_error
+@click.pass_obj
+def material_rename_custom_input(state: AppState, material_path, node_name,
+                                 old_name, new_name, no_update_code):
+    """Rename a Custom node input and its HLSL variable references.
+
+    Example: material rename-custom-input /Game/M_Test --node Custom_0 \
+      --from OutlineWidth --to OutlineWidthPx
+    """
+    from cli_anything.unreal.core.materials import rename_custom_input
+
+    api = require_editor(state)
+    result = rename_custom_input(
+        api,
+        material_path,
+        node_name,
+        old_name,
+        new_name,
+        update_code=not no_update_code,
+        project_dir=state.session.project_dir,
+    )
+    output(result, state)
+
+
 @material_group.command("connect")
 @click.argument("material_path")
 @click.option("--from", "from_node", required=True, help="Source node name")

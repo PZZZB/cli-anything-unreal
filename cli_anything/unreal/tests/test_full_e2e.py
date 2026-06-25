@@ -436,23 +436,58 @@ import json
 mat_path = "/Game/E2E_TestMaterial"
 
 EAL = unreal.EditorAssetLibrary
-can_create = True
-if EAL.does_asset_exist(mat_path):
-    if EAL.delete_asset(mat_path):
-        unreal.SystemLibrary.collect_garbage()
-    else:
-        can_create = False
+mel = unreal.MaterialEditingLibrary
+mat = None
 
-if can_create:
+def _clear_material_expressions(_mat):
+    # Material.expressions is protected in UE 5.7+. Enumerate by outer instead.
+    def _is_valid(_obj):
+        try:
+            return unreal.SystemLibrary.is_valid(_obj)
+        except Exception:
+            return True
+
+    for _ in range(20):
+        exprs = [
+            expr for expr in unreal.ObjectIterator(unreal.MaterialExpression)
+            if expr.get_outer() == _mat and _is_valid(expr)
+        ]
+        if not exprs:
+            return True
+        for expr in exprs:
+            try:
+                mel.delete_material_expression(_mat, expr)
+            except Exception:
+                pass
+        unreal.SystemLibrary.collect_garbage()
+    return False
+
+if EAL.does_asset_exist(mat_path):
+    mat = EAL.load_asset(mat_path)
+    if mat is not None and not isinstance(mat, unreal.Material):
+        if EAL.delete_asset(mat_path):
+            unreal.SystemLibrary.collect_garbage()
+            mat = None
+        else:
+            result = {{"error": "Existing E2E_TestMaterial is not a Material and could not be deleted"}}
+            mat = None
+
+if mat is None and "result" not in globals():
     factory = unreal.MaterialFactoryNew()
     asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
     mat = asset_tools.create_asset("E2E_TestMaterial", "/Game", unreal.Material, factory)
-else:
-    mat = None
 
 if mat is not None:
-    result = {{"status": "ok", "name": mat.get_name()}}
-else:
+    # Keep the fixture stable across repeated e2e runs: reuse an existing
+    # material if delete_asset is temporarily blocked, but clear its graph.
+    if not _clear_material_expressions(mat):
+        result = {{"error": "Failed to clear E2E_TestMaterial expressions"}}
+    else:
+        mel.recompile_material(mat)
+        mat.modify()
+        EAL.save_loaded_asset(mat)
+        result = {{"status": "ok", "name": mat.get_name()}}
+elif "result" not in globals():
     result = {{"error": "Failed to create test material"}}
 '''
             result = _exec_material_script(api, create_script, project_dir=project_dir)
@@ -468,12 +503,33 @@ import json
 mat = unreal.EditorAssetLibrary.load_asset("/Game/E2E_TestMaterial")
 if mat is not None:
     mel = unreal.MaterialEditingLibrary
-    # BUG WORKAROUND: UE 5.7 DeleteAllMaterialExpressions has a C++ modify-while-iterating bug
-    # which only deletes half the nodes per call. We loop until no expressions remain.
-    while len(mat.get_editor_property("expressions")) > 0:
-        mel.delete_all_material_expressions(mat)
-    mel.recompile_material(mat)
-    result = {{"status": "ok"}}
+    def _clear_material_expressions(_mat):
+        # Material.expressions is protected in UE 5.7+. Enumerate by outer instead.
+        def _is_valid(_obj):
+            try:
+                return unreal.SystemLibrary.is_valid(_obj)
+            except Exception:
+                return True
+
+        for _ in range(20):
+            exprs = [
+                expr for expr in unreal.ObjectIterator(unreal.MaterialExpression)
+                if expr.get_outer() == _mat and _is_valid(expr)
+            ]
+            if not exprs:
+                return True
+            for expr in exprs:
+                try:
+                    mel.delete_material_expression(_mat, expr)
+                except Exception:
+                    pass
+            unreal.SystemLibrary.collect_garbage()
+        return False
+    if _clear_material_expressions(mat):
+        mel.recompile_material(mat)
+        result = {{"status": "ok"}}
+    else:
+        result = {{"error": "Failed to clear material expressions"}}
 else:
     result = {{"error": "material not loaded"}}
 '''
@@ -612,6 +668,43 @@ else:
         data = json.loads(result.output)
         assert data["status"] == "success"
         assert data["result"].get("status") == "ok"
+
+    def test_rename_custom_input_cli(self, api, cli_runner, project_path, api_port):
+        """Custom input rename changes the real HLSL variable name."""
+        from cli_anything.unreal.core.materials import add_material_node, get_material_info
+        from cli_anything.unreal.unreal_cli import cli
+
+        project_dir = str(Path(project_path).parent)
+        add_result = add_material_node(
+            api,
+            self.TEST_MATERIAL,
+            "MaterialExpressionCustom",
+            set_props=[("code", "return OutlineWidth + Softness;")],
+            add_input_names=["OutlineWidth", "Softness"],
+            project_dir=project_dir,
+        )
+        assert add_result.get("status") == "ok", f"add custom node failed: {add_result}"
+        node_name = add_result["node"]["name"]
+
+        result = cli_runner.invoke(cli, [
+            "--output", "json", "--project", project_path, "--port", str(api_port),
+            "material", "rename-custom-input", self.TEST_MATERIAL,
+            "--node", node_name,
+            "--from", "OutlineWidth",
+            "--to", "OutlineWidthPx",
+        ])
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert data["result"].get("status") == "ok"
+        assert data["result"].get("inputs_after") == ["OutlineWidthPx", "Softness"]
+        assert data["result"].get("code_updated") is True
+
+        info = get_material_info(api, self.TEST_MATERIAL, project_dir)
+        custom = next(n for n in info["nodes"] if n["name"] == node_name)
+        assert custom.get("inputs") == ["OutlineWidthPx", "Softness"]
+        assert "OutlineWidthPx + Softness" in custom.get("code_preview", "")
+        assert "OutlineWidth + Softness" not in custom.get("code_preview", "")
 
     def test_recompile_cli(self, cli_runner, project_path, api_port):
         """Test recompile via CLI."""

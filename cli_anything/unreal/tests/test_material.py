@@ -501,6 +501,62 @@ class TestMaterialEditing:
         assert "error" in result
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_rename_custom_input(self, mock_exec):
+        from cli_anything.unreal.core.materials import rename_custom_input
+
+        mock_exec.return_value = {
+            "status": "ok",
+            "action": "rename_custom_input",
+            "material": "/Game/M_Test",
+            "node": "Custom_0",
+            "old_name": "OutlineWidth",
+            "new_name": "OutlineWidthPx",
+            "inputs_after": ["OutlineWidthPx", "Softness"],
+            "code_updated": True,
+        }
+
+        api = MagicMock()
+        result = rename_custom_input(
+            api,
+            "/Game/M_Test",
+            "Custom_0",
+            "OutlineWidth",
+            "OutlineWidthPx",
+        )
+
+        assert result["status"] == "ok"
+        assert result["new_name"] == "OutlineWidthPx"
+        script_template = mock_exec.call_args.args[1]
+        assert 'set_editor_property("inputs", inputs)' in script_template
+        assert "re.sub" in script_template
+        assert mock_exec.call_args.kwargs["old_name"] == repr("OutlineWidth")
+        assert mock_exec.call_args.kwargs["new_name"] == repr("OutlineWidthPx")
+        assert mock_exec.call_args.kwargs["update_code"] == repr(True)
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_rename_custom_input_without_code_update(self, mock_exec):
+        from cli_anything.unreal.core.materials import rename_custom_input
+
+        mock_exec.return_value = {
+            "status": "ok",
+            "action": "rename_custom_input",
+            "code_updated": False,
+        }
+
+        api = MagicMock()
+        result = rename_custom_input(
+            api,
+            "/Game/M_Test",
+            "Custom_0",
+            "Softness",
+            "SoftnessPx",
+            update_code=False,
+        )
+
+        assert result["status"] == "ok"
+        assert mock_exec.call_args.kwargs["update_code"] == repr(False)
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_delete_node(self, mock_exec):
         from cli_anything.unreal.core.materials import delete_material_node
 
@@ -710,6 +766,36 @@ class TestMaterialEditing:
             assert data["status"] == "success"
             assert data["result"]["status"] == "ok"
             assert data["result"]["node"]["type"] == "MaterialExpressionConstant"
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_rename_custom_input_cli(self, mock_exec):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec.return_value = {
+            "status": "ok",
+            "action": "rename_custom_input",
+            "material": "/Game/M_Test",
+            "node": "Custom_0",
+            "old_name": "OutlineWidth",
+            "new_name": "OutlineWidthPx",
+            "code_updated": True,
+        }
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.material.require_editor") as mock_editor:
+            mock_editor.return_value = MagicMock()
+            result = runner.invoke(cli, [
+                "--output", "json", "material", "rename-custom-input", "/Game/M_Test",
+                "--node", "Custom_0",
+                "--from", "OutlineWidth",
+                "--to", "OutlineWidthPx",
+            ])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["status"] == "success"
+            assert data["result"]["status"] == "ok"
+            assert data["result"]["new_name"] == "OutlineWidthPx"
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_connect_cli(self, mock_exec):

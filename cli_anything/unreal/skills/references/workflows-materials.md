@@ -55,6 +55,14 @@ Then recompile:
 ue-cli material recompile /Game/M_Water
 ```
 
+Custom node HLSL variable names come from the node's input list, not from
+MaterialInstance parameter names or UI display text. Rename them with:
+
+```bash
+ue-cli material rename-custom-input /Game/M_Water \
+    --node MaterialExpressionCustom_0 --from OutlineWidth --to OutlineWidthPx
+```
+
 ### 4. Alternative: Standard Nodes
 
 For simple changes:
@@ -190,5 +198,6 @@ Full command reference: `commands.md` -> `material`.
 
 - **`MEL.recompile_material()` is void** - cannot detect compile failures. Verify with `material recompile` or `material get-errors`. No exception != success.
 - `Material.expressions` protected in UE5.7+. Read nodes with `material info`; edit via `add-node`, `connect`, `delete-node`.
+- Custom node internal HLSL variable names are `inputs[].input_name`; use `material rename-custom-input` for persistent renames.
 - Existing node prop edits: use `MaterialEditingLibrary.get_material_property_input_node()`; avoid `find_object` and direct `expressions`.
 - `material shader-source` always sync recompiles to guarantee latest source; complex materials may take time.
