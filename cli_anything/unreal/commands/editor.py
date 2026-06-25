@@ -319,10 +319,11 @@ def _filter_editor_status_instances(instances: list[dict], project_path: str | N
 @editor_group.command("status")
 @click.option("--scan-range", default="30010-30020", help="Port range to scan")
 @click.option("--all", "show_all", is_flag=True, default=False, help="Show all editor instances instead of filtering to --project.")
+@_project_option
 @click.argument("task_id", required=False)
 @handle_error
 @click.pass_obj
-def editor_status(state: AppState, scan_range, show_all, task_id):
+def editor_status(state: AppState, scan_range, show_all, project_path, task_id):
     if task_id:
         task = load_task(task_id)
         if task is None:
@@ -330,6 +331,7 @@ def editor_status(state: AppState, scan_range, show_all, task_id):
         output(task_progress(task), state)
         return
 
+    _load_command_project(state, project_path)
     instances = _scan_editor_status_instances(state, scan_range)
     if not show_all:
         instances = _filter_editor_status_instances(instances, state.session.project_path)

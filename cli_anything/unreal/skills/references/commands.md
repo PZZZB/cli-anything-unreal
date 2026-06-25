@@ -8,7 +8,7 @@ Workflow examples live in sibling workflow docs.
 
 | Command | Description | Requires Editor |
 |---------|-------------|:-:|
-| `editor status [--all] [--scan-range START-END] [TASK_ID]` | No TASK_ID: list Unreal Editor processes/result array. With `--project`, filters to that project unless `--all` is set. Online entries include bridge plugin version fields; mismatch entries include `next_command` when project is known. Offline entries include recovery hints. With TASK_ID: async progress | - |
+| `editor status [--project PATH] [--all] [--scan-range START-END] [TASK_ID]` | No TASK_ID: list Unreal Editor processes/result array. `--project` is accepted here or as top-level `ue-cli --project PATH editor status`; it filters to that project unless `--all` is set. Online entries include bridge plugin version fields; mismatch entries include `next_command` when project is known. Offline entries include recovery hints. With TASK_ID: async progress | - |
 | `editor preflight` | Check engine/project build compatibility | No |
 | `editor launch [--map MAP] [--no-wait] [--timeout N]` | Launch editor; waits until ready; kills zombies | No |
 | `editor close` | Gracefully close editor | No |

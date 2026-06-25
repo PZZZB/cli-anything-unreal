@@ -69,6 +69,34 @@ def test_editor_status_offline_ignores_other_project_processes(mini_project):
     assert data["result"] == []
 
 
+def test_editor_status_accepts_project_option_after_subcommand(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+             {"pid": 5678, "project": other_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+             "ready": True,
+             "engine": {"errors": [], "warnings": []},
+             "project": {"errors": [], "warnings": []},
+         }):
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status", "--project", mini_project,
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert len(data["result"]) == 1
+    assert data["result"][0]["project_path"] == mini_project
+
+
 def test_editor_status_all_lists_other_project_processes(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
