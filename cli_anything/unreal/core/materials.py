@@ -10,12 +10,105 @@ Uses two approaches:
 3. Python script execution — For complex queries not possible via REST
 """
 
+import json
 import time
 from pathlib import Path
 from typing import Optional
 
 from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+
+def _material_asset_path_candidates(material_path: str) -> list[str]:
+    """Return likely loadable material asset paths for UE object path forms."""
+    base_path = str(material_path).strip().split(":", 1)[0]
+    if not base_path:
+        return [base_path]
+
+    candidates: list[str] = []
+
+    def add(path: str) -> None:
+        if path and path not in candidates:
+            candidates.append(path)
+
+    leaf = base_path.rsplit("/", 1)[-1]
+    if "." not in leaf:
+        add(base_path)
+        add(base_path + "." + leaf)
+        return candidates
+
+    package_path, object_name = base_path.rsplit(".", 1)
+    add(package_path + "." + object_name)
+    add(package_path)
+    return candidates
+
+
+_MATERIAL_RESOLVER = '''
+def _cli_load_material(asset_path, asset_candidates):
+    tried = []
+
+    def _try_load(candidate):
+        if not candidate or candidate in tried:
+            return None, None
+        tried.append(candidate)
+        try:
+            mat = unreal.EditorAssetLibrary.load_asset(candidate)
+            if mat is not None:
+                return mat, candidate
+        except Exception:
+            pass
+        try:
+            data = unreal.EditorAssetLibrary.find_asset_data(candidate)
+            if data and data.is_valid():
+                mat = data.get_asset()
+                if mat is not None:
+                    return mat, candidate
+        except Exception:
+            pass
+        return None, None
+
+    for candidate in asset_candidates:
+        mat, loaded_path = _try_load(candidate)
+        if mat is not None:
+            return mat, loaded_path, tried
+
+    try:
+        registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        wanted_package_names = set()
+        wanted_asset_names = set()
+        parent_paths = []
+        for candidate in asset_candidates:
+            package_name = str(candidate).split(":", 1)[0]
+            leaf = package_name.rsplit("/", 1)[-1]
+            if "." in leaf:
+                object_name = package_name.rsplit(".", 1)[1]
+                package_name = package_name.rsplit(".", 1)[0]
+                wanted_asset_names.add(object_name)
+            else:
+                wanted_asset_names.add(leaf)
+            wanted_package_names.add(package_name)
+            parent_path = package_name.rsplit("/", 1)[0] or "/Game"
+            if parent_path not in parent_paths:
+                parent_paths.append(parent_path)
+
+            for data in registry.get_assets_by_package_name(package_name, False):
+                object_path = str(data.package_name) + "." + str(data.asset_name)
+                mat, loaded_path = _try_load(object_path)
+                if mat is not None:
+                    return mat, loaded_path, tried
+
+        for parent_path in parent_paths:
+            for data in registry.get_assets_by_path(parent_path, False, False):
+                if str(data.package_name) in wanted_package_names or str(data.asset_name) in wanted_asset_names:
+                    object_path = str(data.package_name) + "." + str(data.asset_name)
+                    mat, loaded_path = _try_load(object_path)
+                    if mat is not None:
+                        return mat, loaded_path, tried
+    except Exception:
+        pass
+
+    return None, None, tried
+'''
 
 
 # ── Python script templates (for complex queries) ─────────────────────
@@ -680,39 +773,60 @@ import unreal
 import json
 
 material_path = "{material_path}"
+material_candidates = {material_path_candidates_json}
 param_name = "{param_name}"
 param_type = "{param_type}"
 param_value_raw = """{param_value}"""
 
-mat = unreal.EditorAssetLibrary.load_asset(material_path)
+mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, material_candidates)
 if mat is None:
-    result = {{"error": "Material not found: " + material_path}}
+    result = {{"error": "Material not found: " + material_path, "tried": tried_asset_paths}}
 elif not isinstance(mat, unreal.MaterialInstanceConstant):
-    result = {{"error": "Asset is not a MaterialInstanceConstant (set-param only works on MI): " + material_path}}
+    result = {{"error": "Asset is not a MaterialInstanceConstant (set-param only works on MI): " + loaded_asset_path}}
 else:
     mel = unreal.MaterialEditingLibrary
     try:
+        set_return = None
         if param_type == "scalar":
             val = float(param_value_raw)
-            mel.set_material_instance_scalar_parameter_value(mat, param_name, val)
+            set_return = mel.set_material_instance_scalar_parameter_value(mat, param_name, val)
             mat.modify()
-            result = {{"status": "ok", "action": "set_param", "material": material_path, "param": param_name, "type": "scalar", "value": val}}
+            result = {{"status": "ok", "action": "set_param", "material": loaded_asset_path, "param": param_name, "type": "scalar", "value": val, "set_return": set_return}}
         elif param_type == "vector":
             parts = json.loads(param_value_raw)
             color = unreal.LinearColor(r=float(parts.get("r", 0)), g=float(parts.get("g", 0)), b=float(parts.get("b", 0)), a=float(parts.get("a", 1)))
-            mel.set_material_instance_vector_parameter_value(mat, param_name, color)
+            set_return = mel.set_material_instance_vector_parameter_value(mat, param_name, color)
             mat.modify()
-            result = {{"status": "ok", "action": "set_param", "material": material_path, "param": param_name, "type": "vector", "value": parts}}
+            result = {{"status": "ok", "action": "set_param", "material": loaded_asset_path, "param": param_name, "type": "vector", "value": parts, "set_return": set_return}}
         elif param_type == "texture":
             tex = unreal.EditorAssetLibrary.load_asset(param_value_raw)
             if tex is None:
                 result = {{"error": "Texture not found: " + param_value_raw}}
             else:
-                mel.set_material_instance_texture_parameter_value(mat, param_name, tex)
+                set_return = mel.set_material_instance_texture_parameter_value(mat, param_name, tex)
                 mat.modify()
-                result = {{"status": "ok", "action": "set_param", "material": material_path, "param": param_name, "type": "texture", "value": param_value_raw}}
+                result = {{"status": "ok", "action": "set_param", "material": loaded_asset_path, "param": param_name, "type": "texture", "value": param_value_raw, "set_return": set_return}}
         else:
             result = {{"error": "Unknown param_type: " + param_type + ". Use scalar, vector, or texture."}}
+        if "error" not in result:
+            save_errors = []
+            saved = False
+            try:
+                mat.modify()
+            except Exception as e:
+                save_errors.append("modify: " + str(e))
+            try:
+                saved = bool(unreal.EditorAssetLibrary.save_loaded_asset(mat, only_if_is_dirty=False))
+            except Exception as e:
+                save_errors.append("save_loaded_asset: " + str(e))
+            if not saved:
+                try:
+                    saved = bool(unreal.EditorLoadingAndSavingUtils.save_dirty_packages(False, True))
+                except Exception as e:
+                    save_errors.append("save_dirty_packages: " + str(e))
+            result["saved"] = saved
+            if save_errors:
+                result["save_warnings"] = save_errors
     except Exception as e:
         result = {{"error": "set_param failed: " + str(e)}}
 '''
@@ -722,9 +836,10 @@ import unreal
 import json
 
 material_path = "{material_path}"
-mat = unreal.EditorAssetLibrary.load_asset(material_path)
+material_candidates = {material_path_candidates_json}
+mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, material_candidates)
 if mat is None:
-    result = {{"error": "Material not found: " + material_path}}
+    result = {{"error": "Material not found: " + material_path, "tried": tried_asset_paths}}
 else:
     mel = unreal.MaterialEditingLibrary
     try:
@@ -741,12 +856,12 @@ else:
             result = {{
                 "status": "error", 
                 "action": "recompile", 
-                "material": material_path,
+                "material": loaded_asset_path,
                 "error": "Material compilation failed.",
                 "compile_errors": errors
             }}
         else:
-            result = {{"status": "ok", "action": "recompile", "material": material_path}}
+            result = {{"status": "ok", "action": "recompile", "material": loaded_asset_path}}
     except Exception as e:
         result = {{"error": "recompile_material failed: " + str(e)}}
 '''
@@ -903,16 +1018,18 @@ def get_material_stats(
 
 _PLUGIN_GET_ERRORS_SCRIPT = r'''import unreal
 
-mat = unreal.EditorAssetLibrary.load_asset("{material_path}")
+material_path = "{material_path}"
+material_candidates = {material_path_candidates_json}
+mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, material_candidates)
 if mat is None:
-    result = {{"error": "Material not found: {material_path}"}}
+    result = {{"error": "Material not found: " + material_path, "tried": tried_asset_paths}}
 else:
     bridge = unreal.CliAnythingBridgeLibrary
     errors = list(bridge.get_material_compile_errors(mat))
     result = {{
         "errors": errors,
         "warnings": [],
-        "material": "{material_path}",
+        "material": loaded_asset_path,
         "has_errors": len(errors) > 0,
         "source": "plugin",
     }}
@@ -1897,5 +2014,12 @@ def _exec_material_script(
     """
     from cli_anything.unreal.core.script_runner import run_python_code
 
-    script_content = script_template.format(**kwargs)
+    material_path = kwargs.get("material_path")
+    if isinstance(material_path, str) and material_path.startswith("/"):
+        kwargs.setdefault("material_path_json", json.dumps(material_path, ensure_ascii=False))
+        kwargs.setdefault(
+            "material_path_candidates_json",
+            json.dumps(_material_asset_path_candidates(material_path), ensure_ascii=False),
+        )
+    script_content = _MATERIAL_RESOLVER + "\n" + script_template.format(**kwargs)
     return run_python_code(api, script_content, timeout=timeout)

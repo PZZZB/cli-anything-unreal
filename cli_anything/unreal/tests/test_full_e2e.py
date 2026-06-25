@@ -707,6 +707,67 @@ else:
         result = recompile_material(api, self.TEST_MATERIAL, project_dir=project_dir)
         assert result.get("status") == "ok"
 
+    def test_set_material_instance_param_saves(self, api, project_path):
+        """Setting a MaterialInstance parameter saves the changed package."""
+        from cli_anything.unreal.core.materials import get_material_param, set_material_param
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        project_dir = str(Path(project_path).parent)
+        setup = r'''
+import unreal
+
+EAL = unreal.EditorAssetLibrary
+ATH = unreal.AssetToolsHelpers.get_asset_tools()
+mel = unreal.MaterialEditingLibrary
+mat_path = "/Game/E2E_MIParamMat"
+mi_path = "/Game/E2E_MIParamInst"
+
+for _path in [mi_path, mat_path]:
+    if EAL.does_asset_exist(_path):
+        EAL.delete_asset(_path)
+unreal.SystemLibrary.collect_garbage()
+
+mat = ATH.create_asset("E2E_MIParamMat", "/Game", unreal.Material, unreal.MaterialFactoryNew())
+if mat is None:
+    result = {"error": "Failed to create parent material"}
+else:
+    scalar = mel.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -300, 0)
+    scalar.set_editor_property("parameter_name", "Roughness")
+    scalar.set_editor_property("default_value", 0.1)
+    mel.connect_material_property(scalar, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    mel.recompile_material(mat)
+    mat.modify()
+    EAL.save_loaded_asset(mat)
+
+    factory = unreal.MaterialInstanceConstantFactoryNew()
+    mi = ATH.create_asset("E2E_MIParamInst", "/Game", unreal.MaterialInstanceConstant, factory)
+    if mi is None:
+        result = {"error": "Failed to create material instance"}
+    else:
+        mi.set_editor_property("parent", mat)
+        mi.modify()
+        EAL.save_loaded_asset(mi)
+        unreal.EditorLoadingAndSavingUtils.save_dirty_packages(False, True)
+        result = {"status": "ok"}
+'''
+        setup_result = run_python_code(api, setup, timeout=60.0)
+        assert setup_result.get("status") == "ok", setup_result
+
+        result = set_material_param(
+            api,
+            "/Game/E2E_MIParamInst",
+            "Roughness",
+            "0.77",
+            "scalar",
+            project_dir=project_dir,
+        )
+        assert result.get("status") == "ok", result
+        assert result.get("saved") is True, result
+
+        value = get_material_param(api, "/Game/E2E_MIParamInst", "Roughness", project_dir=project_dir)
+        assert value.get("status") == "ok", value
+        assert abs(float(value.get("value")) - 0.77) < 0.001
+
     def test_add_node_cli(self, cli_runner, project_path, api_port):
         """Test add-node via CLI."""
         from cli_anything.unreal.unreal_cli import cli

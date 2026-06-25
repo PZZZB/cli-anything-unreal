@@ -468,6 +468,22 @@ class TestMaterialConnections:
 class TestMaterialEditing:
     """Tests for material editing functions — mocked script execution."""
 
+    def test_material_asset_path_candidates_normalizes_object_and_subobject_paths(self):
+        from cli_anything.unreal.core.materials import _material_asset_path_candidates
+
+        assert _material_asset_path_candidates("/Game/Env/M_Test") == [
+            "/Game/Env/M_Test",
+            "/Game/Env/M_Test.M_Test",
+        ]
+        assert _material_asset_path_candidates("/Game/Env/M_Test.M_Test") == [
+            "/Game/Env/M_Test.M_Test",
+            "/Game/Env/M_Test",
+        ]
+        assert _material_asset_path_candidates("/Game/Env/M_Test.M_Test:SubObject") == [
+            "/Game/Env/M_Test.M_Test",
+            "/Game/Env/M_Test",
+        ]
+
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_add_node(self, mock_exec):
         from cli_anything.unreal.core.materials import add_material_node
@@ -685,6 +701,20 @@ class TestMaterialEditing:
         assert result["status"] == "ok"
         assert result["value"] == 0.5
 
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_set_param_saves_material_instance_package(self, mock_run):
+        from cli_anything.unreal.core.materials import set_material_param
+
+        mock_run.return_value = {"status": "ok", "action": "set_param"}
+
+        set_material_param(MagicMock(), "/Game/MI_Test", "Roughness", "0.5", "scalar")
+
+        script = mock_run.call_args.args[1]
+        assert "_cli_load_material" in script
+        assert "set_return" in script
+        assert "save_loaded_asset(mat" in script
+        assert "save_dirty_packages(False, True)" in script
+
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_set_param_vector(self, mock_exec):
         from cli_anything.unreal.core.materials import set_material_param
@@ -752,6 +782,33 @@ class TestMaterialEditing:
         api = MagicMock()
         result = recompile_material(api, "/Game/M_Test")
         assert result["status"] == "ok"
+
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_recompile_uses_material_resolver(self, mock_run):
+        from cli_anything.unreal.core.materials import recompile_material
+
+        mock_run.return_value = {"status": "ok", "action": "recompile"}
+
+        recompile_material(MagicMock(), "/Game/Env/M_Test.M_Test")
+
+        script = mock_run.call_args.args[1]
+        assert 'material_path = "/Game/Env/M_Test.M_Test"' in script
+        assert 'material_candidates = ["/Game/Env/M_Test.M_Test", "/Game/Env/M_Test"]' in script
+        assert "_cli_load_material" in script
+        assert '"material": loaded_asset_path' in script
+
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_get_errors_uses_material_resolver(self, mock_run):
+        from cli_anything.unreal.core.materials import get_material_errors
+
+        mock_run.return_value = {"errors": [], "has_errors": False}
+
+        get_material_errors(MagicMock(), "/Game/Env/M_Test.M_Test")
+
+        script = mock_run.call_args.args[1]
+        assert "_cli_load_material" in script
+        assert "bridge.get_material_compile_errors(mat)" in script
+        assert '"material": loaded_asset_path' in script
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_recompile_not_found(self, mock_exec):

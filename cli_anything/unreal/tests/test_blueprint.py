@@ -47,6 +47,18 @@ class TestBlueprint:
         assert 'asset_candidates = ["/Game/UI/BP_Test.BP_Test", "/Game/UI/BP_Test"]' in script
         assert "_cli_load_blueprint" in script
 
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_compile_blueprint_resolver_searches_registry_parent_path(self, mock_run):
+        from cli_anything.unreal.core.blueprint import compile_blueprint
+
+        mock_run.return_value = {"status": "ok", "action": "compile"}
+
+        compile_blueprint(MagicMock(), "/Game/UI/BP_Test")
+
+        script = mock_run.call_args.args[1]
+        assert "registry.get_assets_by_path(parent_path, False, False)" in script
+        assert "str(data.asset_name) in wanted_asset_names" in script
+
     @patch("cli_anything.unreal.core.blueprint._exec_blueprint_script")
     def test_list_blueprints(self, mock_exec):
         from cli_anything.unreal.core.blueprint import list_blueprints

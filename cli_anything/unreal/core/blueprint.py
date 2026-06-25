@@ -71,16 +71,34 @@ def _cli_load_blueprint(asset_path, asset_candidates):
 
     try:
         registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        wanted_package_names = set()
+        wanted_asset_names = set()
+        parent_paths = []
         for candidate in asset_candidates:
             package_name = str(candidate).split(":", 1)[0]
             leaf = package_name.rsplit("/", 1)[-1]
             if "." in leaf:
+                object_name = package_name.rsplit(".", 1)[1]
                 package_name = package_name.rsplit(".", 1)[0]
+                wanted_asset_names.add(object_name)
+            else:
+                wanted_asset_names.add(leaf)
+            wanted_package_names.add(package_name)
+            parent_path = package_name.rsplit("/", 1)[0] or "/Game"
+            if parent_path not in parent_paths:
+                parent_paths.append(parent_path)
             for data in registry.get_assets_by_package_name(package_name, False):
                 object_path = str(data.package_name) + "." + str(data.asset_name)
                 bp, loaded_path = _try_load(object_path)
                 if bp is not None:
                     return bp, loaded_path, tried
+        for parent_path in parent_paths:
+            for data in registry.get_assets_by_path(parent_path, False, False):
+                if str(data.package_name) in wanted_package_names or str(data.asset_name) in wanted_asset_names:
+                    object_path = str(data.package_name) + "." + str(data.asset_name)
+                    bp, loaded_path = _try_load(object_path)
+                    if bp is not None:
+                        return bp, loaded_path, tried
     except Exception:
         pass
 
