@@ -27,6 +27,58 @@ def _cli_parse_bridge(raw):
 """
 
 
+_WIDGET_BLUEPRINT_RESOLVER = """
+def _cli_candidate_package_name(candidate):
+    package_name = str(candidate).split(":", 1)[0]
+    leaf = package_name.rsplit("/", 1)[-1]
+    if "." in leaf:
+        package_name = package_name.rsplit(".", 1)[0]
+    return package_name
+
+
+def _cli_load_widget_blueprint(asset_candidates):
+    tried = []
+
+    def _try_load(candidate):
+        if not candidate or candidate in tried:
+            return None, None
+        tried.append(candidate)
+        try:
+            bp = unreal.EditorAssetLibrary.load_asset(candidate)
+            if bp is not None:
+                return bp, candidate
+        except Exception:
+            pass
+        return None, None
+
+    for candidate in asset_candidates:
+        bp, loaded_path = _try_load(candidate)
+        if bp is not None:
+            return bp, loaded_path, tried
+
+    try:
+        registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        for candidate in asset_candidates:
+            package_name = _cli_candidate_package_name(candidate)
+            for data in registry.get_assets_by_package_name(package_name, False):
+                try:
+                    if str(data.asset_class_path.asset_name) != "WidgetBlueprint":
+                        continue
+                    object_path = str(data.package_name) + "." + str(data.asset_name)
+                    if object_path not in tried:
+                        tried.append(object_path)
+                    bp = data.get_asset()
+                    if bp is not None:
+                        return bp, object_path, tried
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return None, None, tried
+"""
+
+
 def _json(value) -> str:
     if isinstance(value, bool):
         return "True" if value else "False"
@@ -166,21 +218,17 @@ height = float({_json(height)})
 z_order = int({_json(z_order)})
 variable = {_json(variable)}
 
+{_WIDGET_BLUEPRINT_RESOLVER}
+
 {_BRIDGE_CHECK}
 
 bridge, bridge_error = _cli_bridge()
 if bridge_error:
     result = bridge_error
 else:
-    bp = None
-    loaded_asset_path = None
-    for candidate in asset_candidates:
-        bp = unreal.EditorAssetLibrary.load_asset(candidate)
-        if bp:
-            loaded_asset_path = candidate
-            break
+    bp, loaded_asset_path, tried_asset_paths = _cli_load_widget_blueprint(asset_candidates)
     if not bp:
-        result = {{"error": "WidgetBlueprint not found: " + asset_path, "tried": asset_candidates}}
+        result = {{"error": "WidgetBlueprint not found: " + asset_path, "tried": tried_asset_paths}}
     else:
         result = _cli_parse_bridge(
             bridge.add_widget_to_canvas(
@@ -210,21 +258,17 @@ import unreal
 asset_path = {_json(widget_path)}
 asset_candidates = {_json(_widget_asset_path_candidates(widget_path))}
 
+{_WIDGET_BLUEPRINT_RESOLVER}
+
 {_BRIDGE_CHECK}
 
 bridge, bridge_error = _cli_bridge()
 if bridge_error:
     result = bridge_error
 else:
-    bp = None
-    loaded_asset_path = None
-    for candidate in asset_candidates:
-        bp = unreal.EditorAssetLibrary.load_asset(candidate)
-        if bp:
-            loaded_asset_path = candidate
-            break
+    bp, loaded_asset_path, tried_asset_paths = _cli_load_widget_blueprint(asset_candidates)
     if not bp:
-        result = {{"error": "WidgetBlueprint not found: " + asset_path, "tried": asset_candidates}}
+        result = {{"error": "WidgetBlueprint not found: " + asset_path, "tried": tried_asset_paths}}
     else:
         result = _cli_parse_bridge(bridge.get_widget_blueprint_tree(bp))
         if result.get("status") == "ok":

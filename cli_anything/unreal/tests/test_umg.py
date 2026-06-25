@@ -94,6 +94,19 @@ class TestUMGCore:
         assert result["root"]["name"] == "RootCanvas"
         assert len(result["widgets"]) == 2
 
+    @patch("cli_anything.unreal.core.umg._exec_umg_script")
+    def test_get_widget_tree_uses_asset_registry_fallback(self, mock_exec):
+        from cli_anything.unreal.core.umg import get_widget_tree
+
+        mock_exec.return_value = {"status": "ok", "widgets": []}
+
+        get_widget_tree(MagicMock(), "/Game/UI/WBP_Hud")
+
+        script = mock_exec.call_args.args[1]
+        assert "def _cli_load_widget_blueprint" in script
+        assert "get_assets_by_package_name" in script
+        assert "data.get_asset()" in script
+
 
 class TestUMGCLI:
     @patch("cli_anything.unreal.core.umg.create_widget_blueprint")
