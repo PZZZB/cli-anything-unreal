@@ -519,6 +519,35 @@ def test_editor_close_kills_matching_project_process_after_graceful_timeout(mini
     assert "did not close gracefully" in data["result"]["message"]
 
 
+def test_editor_close_waits_for_process_exit_after_api_closes(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    mock_api = MagicMock()
+    mock_api.is_alive.side_effect = [True, False]
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 98364, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.commands.editor._wait_for_project_editor_exit", return_value={
+             "status": "closed",
+             "method": "process_exit",
+         }) as mock_wait:
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    mock_wait.assert_called_once_with(mini_project, 30010, timeout=60)
+    data = json.loads(result.output)
+    assert data["status"] == "success"
+    assert data["result"]["status"] == "closed"
+    assert data["result"]["method"] == "process_exit"
+
+
 def test_editor_close_timeout_without_matching_process_returns_error(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

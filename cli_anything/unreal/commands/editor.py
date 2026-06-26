@@ -917,7 +917,20 @@ def _close_editor_for_project(api, state: AppState) -> dict:
     deadline = time.time() + 30
     while time.time() < deadline:
         if not api.is_alive():
-            return {"status": "closed", "port": state.session.port}
+            drain_result = _wait_for_project_editor_exit(state.session.project_path, state.session.port, timeout=60)
+            if drain_result is None:
+                return {"status": "closed", "port": state.session.port}
+            if drain_result.get("status") == "closed":
+                result = {"status": "closed", "port": state.session.port}
+                result.update(drain_result)
+                result["port"] = state.session.port
+                return result
+            raise AppError(
+                "EDITOR_CLOSE_FAILED",
+                drain_result.get("message", "Editor API closed but UnrealEditor process did not exit."),
+                exit_code=3,
+                details=drain_result,
+            )
         time.sleep(2)
 
     kill_result = _kill_matching_project_editors(

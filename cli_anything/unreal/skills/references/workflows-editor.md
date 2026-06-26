@@ -84,6 +84,8 @@ If an online item has `plugin_match: false` and `next_command`, run it (`editor 
 ue-cli editor close
 ```
 
+`editor close` does not report `closed` only because the Remote Control API stopped responding. On Windows it also waits for matching same-project `UnrealEditor.exe` processes to exit, and terminates a stale lock holder when needed so immediate `build compile` does not hit locked editor/plugin DLLs.
+
 ## Python Scripting Patterns
 
 Use `editor run-script` when no CLI command covers operation. Use `-c` only for short one-liners; for multiline Python, especially in PowerShell, pipe code to `editor run-script -` or pass a `.py` file so shell argv splitting cannot corrupt code or indentation.
