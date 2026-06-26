@@ -8,9 +8,10 @@ from pathlib import Path
 
 import click
 
-from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_project
+from cli_anything.unreal.commands import AppError, AppState, _same_project_path, handle_error, output, require_project
 from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, load_task, submit_task, task_progress
-from cli_anything.unreal.utils.ue_backend import _allocate_log_path
+from cli_anything.unreal.utils.ue_backend import _allocate_log_path, find_running_editors
+from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
 def _build_payload(state: AppState, label: str, **kwargs) -> dict:
@@ -39,6 +40,57 @@ def _load_command_project(state: AppState, project_path: str | None) -> None:
 
 def _project_option(func):
     return click.option("--project", "project_path", type=click.Path(), help="Path to .uproject file")(func)
+
+
+def _editor_compile_lock_risk(state: AppState, platform: str) -> dict | None:
+    if sys.platform != "win32" or platform.lower() != "win64" or not state.session.project_path:
+        return None
+
+    try:
+        running = find_running_editors()
+    except Exception:
+        return None
+
+    matches = [
+        editor for editor in running
+        if _same_project_path(editor.get("project", ""), state.session.project_path)
+    ]
+    if not matches:
+        return None
+
+    online = False
+    try:
+        online = UEEditorAPI(port=state.session.port).is_alive()
+    except Exception:
+        online = False
+
+    return {
+        "project_path": state.session.project_path,
+        "platform": platform,
+        "online": online,
+        "port": state.session.port,
+        "running_editors": [
+            {"pid": editor.get("pid"), "project": editor.get("project", "")}
+            for editor in matches
+        ],
+        "next_command": f'ue-cli --project "{state.session.project_path}" editor close',
+    }
+
+
+def _guard_compile_against_editor_locks(state: AppState, platform: str) -> None:
+    risk = _editor_compile_lock_risk(state, platform)
+    if not risk:
+        return
+    raise AppError(
+        "EDITOR_RUNNING_LOCKS_DLLS",
+        "UnrealEditor is running for this project; build compile can fail at link because editor/plugin DLLs are locked.",
+        exit_code=3,
+        suggestion=(
+            f"Run: {risk['next_command']}; then retry build compile. "
+            "For code changes while the editor stays open, use Unreal Live Coding/hot reload outside ue-cli build compile."
+        ),
+        details=risk,
+    )
 
 
 def _stream_log_delta(log_file: str | None, offset: int = 0) -> int:
@@ -135,6 +187,7 @@ def build_group():
 def build_compile(state: AppState, project_path, build_config, platform, no_wait, timeout):
     _load_command_project(state, project_path)
     require_project(state)
+    _guard_compile_against_editor_locks(state, platform)
     payload = _build_payload(state, "compile", build_config=build_config, platform=platform)
     result = _run_task("build.compile", payload, timeout=timeout, no_wait=no_wait, timeout_code="BUILD_WAIT_TIMEOUT")
     output(result, state)

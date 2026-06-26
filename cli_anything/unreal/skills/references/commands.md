@@ -100,6 +100,8 @@ Build commands do not require editor.
 
 Synchronous `build compile` / `build cook` / `build package` stream the live UAT/UBT log to stderr while waiting, similar to UE `Build.bat`. JSON stdout stays one final payload with `log_file`.
 
+On Windows, `build compile --platform Win64` refuses to start while an UnrealEditor process for the same project is running, because editor/plugin DLLs are commonly locked and link fails with `LNK1104`. Run `editor close` first, then compile.
+
 | Command | Description |
 |---------|-------------|
 | `build compile [--project PATH] [--config C] [--platform P] [--no-wait] [--timeout N]` | Compile C++ |

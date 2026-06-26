@@ -587,6 +587,63 @@ class TestBuildCLI:
         assert captured["payload"]["platform"] == "Android"
         assert captured["payload"]["build_config"] == "Development"
 
+    def test_build_compile_blocks_when_matching_editor_online(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_api = MagicMock()
+        mock_api.is_alive.return_value = True
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.build.sys.platform", "win32"), \
+             patch("cli_anything.unreal.commands.build.find_running_editors", return_value=[
+                 {"pid": 777, "project": temp_project["uproject"]},
+             ]), \
+             patch("cli_anything.unreal.commands.build.UEEditorAPI", return_value=mock_api), \
+             patch("cli_anything.unreal.commands.build.submit_task") as mock_submit:
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "build", "compile",
+                "--platform", "Win64",
+                "--config", "Development",
+                "--no-wait",
+            ])
+
+        assert result.exit_code == 3
+        data = self._parse_json_output(result.output)
+        assert data["code"] == "EDITOR_RUNNING_LOCKS_DLLS"
+        assert data["details"]["online"] is True
+        assert data["details"]["running_editors"][0]["pid"] == 777
+        assert "editor close" in data["suggestion"]
+        mock_submit.assert_not_called()
+
+    def test_build_compile_allows_other_project_editor(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_api = MagicMock()
+        mock_api.is_alive.return_value = True
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.build.sys.platform", "win32"), \
+             patch("cli_anything.unreal.commands.build.find_running_editors", return_value=[
+                 {"pid": 777, "project": "F:/Other/Other.uproject"},
+             ]), \
+             patch("cli_anything.unreal.commands.build.UEEditorAPI", return_value=mock_api), \
+             patch("cli_anything.unreal.commands.build.submit_task", return_value={"task_id": "compile-task"}):
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "build", "compile",
+                "--platform", "Win64",
+                "--config", "Development",
+                "--no-wait",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = self._parse_json_output(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["task_id"] == "compile-task"
+
     def test_build_wait_streams_log_file_to_stderr(self, tmp_path, capsys):
         from cli_anything.unreal.commands.build import _wait_for_task_with_log_stream
 
