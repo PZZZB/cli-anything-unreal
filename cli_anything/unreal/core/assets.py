@@ -30,18 +30,19 @@ if TYPE_CHECKING:
 
 _SCRIPT_DELETE_ASSET = r'''
 import unreal
-path = "{asset_path}"
+requested_path = "{requested_path}"
+delete_path = "{delete_path}"
 EAL = unreal.EditorAssetLibrary
 
 # Single attempt at deletion. Do NOT retry — repeated ForceDelete calls
 # can mark the package as "potentially corrupt" in UE, making all future
 # deletions impossible until editor restart.
-deleted = EAL.delete_asset(path)
+deleted = EAL.delete_asset(delete_path)
 if deleted:
     unreal.SystemLibrary.collect_garbage()
-    result = {{"deleted": True}}
+    result = {{"deleted": True, "deleted_asset": delete_path, "requested_asset": requested_path}}
 else:
-    result = {{"deleted": False, "hint": "ForceDelete failed. The package may be locked by an open asset editor, Content Browser, or undo buffer. Try: 1) Close any material/asset editors for this asset, 2) Use 'editor close' then restart the editor, 3) Delete after restart."}}
+    result = {{"deleted": False, "deleted_asset": delete_path, "requested_asset": requested_path, "hint": "ForceDelete failed. The package may be locked by an open asset editor, Content Browser, or undo buffer. Try: 1) Close any material/asset editors for this asset, 2) Use 'editor close' then restart the editor, 3) Delete after restart."}}
 '''
 
 _SCRIPT_DUPLICATE_ASSET = r'''
@@ -260,6 +261,18 @@ def asset_exists(api: "UEEditorAPI", asset_path: str, **_kw) -> dict:
     return {"exists": exists, "asset": asset_path}
 
 
+def _asset_object_path(asset_path: str) -> str:
+    """Return the full object path for package paths."""
+    path = str(asset_path).strip()
+    if not path:
+        return path
+    base, sep, suffix = path.partition(":")
+    leaf = base.rsplit("/", 1)[-1]
+    if "." not in leaf:
+        base = base + "." + leaf
+    return base + (sep + suffix if sep else "")
+
+
 def asset_refs(api: "UEEditorAPI", asset_path: str, **_kw) -> dict:
     """List all assets that reference the given asset."""
     if not api.does_asset_exist(asset_path):
@@ -314,7 +327,8 @@ def asset_delete(
             "hint": "Use --force to delete anyway (referencers will have broken references)",
         }
 
-    script = _SCRIPT_DELETE_ASSET.format(asset_path=asset_path)
+    delete_path = _asset_object_path(asset_path)
+    script = _SCRIPT_DELETE_ASSET.format(requested_path=asset_path, delete_path=delete_path)
     script_result = _exec(api, script, project_dir)
     deleted = script_result.get("deleted", False)
 
@@ -323,6 +337,8 @@ def asset_delete(
         "asset": asset_path,
         "deleted": deleted,
     }
+    if script_result.get("deleted_asset"):
+        result["deleted_asset"] = script_result["deleted_asset"]
     if refs:
         result["had_references"] = True
         result["referencers"] = refs

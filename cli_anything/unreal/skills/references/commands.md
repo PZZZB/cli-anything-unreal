@@ -19,7 +19,7 @@ Workflow examples live in sibling workflow docs.
 | `editor run-script [PATH|-] [-c CODE] [--timeout N] [--no-save]` | Execute Python file, stdin (`-`), or short inline code with result capture | Yes |
 | `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable; `get` errors on missing/unverified empty CVars, negative values are supported (`... set r.X -4` or `... set r.X -- -4`) | Yes |
 | `editor enable-remote` | Enable Remote Control config | No |
-| `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover UE class/struct/API. TARGET: class, struct, asset path, actor path | Yes |
+| `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover UE class/struct/API. TARGET: class, struct, asset path, loaded UObject/subobject path, actor path | Yes |
 | `editor cancel TASK_ID` | Cancel async editor launch | - |
 | `editor plugin-version` | Compare bundled vs loaded plugin | Yes (loaded) |
 | `editor plugin-upgrade` | Deploy -> compile -> restart plugin upgrade | No |
@@ -28,7 +28,7 @@ Workflow examples live in sibling workflow docs.
 
 `api-discover` belongs under `editor`, not top-level.
 
-**TARGET auto-detection**: class name, struct name (for UE Python structs such as `CustomInput`), asset path, actor path:
+**TARGET auto-detection**: class name, struct name (for UE Python structs such as `CustomInput`), asset path, loaded UObject/subobject path, actor path:
 
 ```bash
 # Class name - direct lookup:
@@ -37,6 +37,9 @@ ue-cli editor api-discover unreal.MaterialEditingLibrary -q connect
 
 # Asset path (/Game/...) - auto-detects class from the live asset:
 ue-cli editor api-discover /Game/Materials/M_Water
+
+# Loaded UObject/subobject path - resolved with unreal.find_object first:
+ue-cli editor api-discover "/Game/UI/WBP.WBP_C:WidgetTree.Image_Dot"
 
 # Actor path (contains PersistentLevel) - auto-detects class from scene actor:
 ue-cli editor api-discover /Game/Maps/L.L:PersistentLevel.Light_0
@@ -88,7 +91,7 @@ All asset commands require editor.
 | `asset list [-q QUERY] [--class CLASS] [--path PATH] [--limit N]` | Search assets via Asset Registry. `--class Blueprint` includes Blueprint-family assets such as `WidgetBlueprint` and `AnimBlueprint` |
 | `asset exists ASSET_PATH` | Check existence |
 | `asset property ASSET_PATH PROP[=VALUE]` | Get/set property |
-| `asset delete ASSET_PATH [--force]` | Delete with ref detection |
+| `asset delete ASSET_PATH [--force]` | Delete with ref detection. Accepts package paths like `/Game/A` and full object paths like `/Game/A.A`; package paths are normalized before deletion |
 | `asset refs ASSET_PATH` | List referencers |
 | `asset texture-source ASSET_PATH` | Read Texture2D source size/format and basic alpha/value stats through the bridge plugin |
 | `asset duplicate SRC DEST [--force]` | Duplicate asset |

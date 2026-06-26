@@ -143,6 +143,39 @@ class TestAssets:
         assert result["status"] == "ok"
         assert result["deleted"] is True
 
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_delete_normalizes_package_path_to_object_path(self, mock_exec):
+        from cli_anything.unreal.core.assets import asset_delete
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = True
+        api.find_asset_referencers.return_value = []
+        mock_exec.return_value = {"deleted": True, "deleted_asset": "/Game/WBP_Test.WBP_Test"}
+
+        result = asset_delete(api, "/Game/WBP_Test", force=True)
+
+        script = mock_exec.call_args.args[1]
+        assert 'delete_path = "/Game/WBP_Test.WBP_Test"' in script
+        assert 'requested_path = "/Game/WBP_Test"' in script
+        assert result["status"] == "ok"
+        assert result["asset"] == "/Game/WBP_Test"
+        assert result["deleted_asset"] == "/Game/WBP_Test.WBP_Test"
+
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_delete_keeps_object_path(self, mock_exec):
+        from cli_anything.unreal.core.assets import asset_delete
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = True
+        api.find_asset_referencers.return_value = []
+        mock_exec.return_value = {"deleted": True, "deleted_asset": "/Game/WBP_Test.WBP_Test"}
+
+        asset_delete(api, "/Game/WBP_Test.WBP_Test", force=True)
+
+        script = mock_exec.call_args.args[1]
+        assert 'delete_path = "/Game/WBP_Test.WBP_Test"' in script
+        assert 'requested_path = "/Game/WBP_Test.WBP_Test"' in script
+
     def test_asset_delete_has_refs_no_force(self):
         from cli_anything.unreal.core.assets import asset_delete
 

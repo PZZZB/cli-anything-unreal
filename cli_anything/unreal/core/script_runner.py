@@ -514,16 +514,36 @@ else:
 
 _RESOLVE_ASSET = '''\
 _cli_resolve_ok = False
-if not _cli_unreal.EditorAssetLibrary.does_asset_exist({asset_path!r}):
+_cli_asset_path = {asset_path!r}
+_cli_obj = None
+try:
+    _cli_obj = _cli_unreal.find_object(None, _cli_asset_path)
+except Exception:
+    _cli_obj = None
+
+if _cli_obj is not None:
+    _resolved_class = _cli_obj.__class__.__name__
+    _instance_context = {{
+        "object": _cli_asset_path,
+        "object_path": _cli_obj.get_path_name(),
+    }}
+    try:
+        _instance_context["object_name"] = _cli_obj.get_name()
+    except Exception:
+        pass
+    if ":" not in _cli_asset_path:
+        _instance_context["asset"] = _cli_asset_path
+    _cli_resolve_ok = True
+elif not _cli_unreal.EditorAssetLibrary.does_asset_exist(_cli_asset_path):
     result = {{"error": "Asset not found: " + {asset_path!r}}}
 else:
-    _asset = _cli_unreal.EditorAssetLibrary.load_asset({asset_path!r})
+    _asset = _cli_unreal.EditorAssetLibrary.load_asset(_cli_asset_path)
     if _asset is None:
         result = {{"error": "Failed to load asset: " + {asset_path!r}}}
     else:
         _resolved_class = _asset.__class__.__name__
         _instance_context = {{
-            "asset": {asset_path!r},
+            "asset": _cli_asset_path,
             "object_path": _asset.get_path_name(),
         }}
         _cli_resolve_ok = True
@@ -584,7 +604,7 @@ def api_discover(
 
     **TARGET is auto-detected from the string format:**
 
-    - Starts with ``/Game/`` → asset path, class is auto-resolved.
+    - Starts with ``/Game/`` → asset or loaded UObject/subobject path, class is auto-resolved.
     - Contains ``PersistentLevel`` → actor path, class is auto-resolved.
     - Otherwise → treated as a UE class name (e.g. ``DirectionalLight``).
 
@@ -601,7 +621,7 @@ def api_discover(
     api:
         A connected :class:`UEEditorAPI` instance.
     target:
-        UE class name, asset path (``/Game/...``), or actor path
+        UE class name, asset/subobject path (``/Game/...``), or actor path
         (containing ``PersistentLevel``).
     query:
         Optional case-insensitive regex (via ``re.search``) for property/function

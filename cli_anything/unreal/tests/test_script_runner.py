@@ -780,6 +780,7 @@ class TestScriptRunner:
         fake_asset_lib.does_asset_exist.side_effect = lambda p: p in assets_map
         fake_asset_lib.load_asset.side_effect = lambda p: assets_map.get(p)
         fake_unreal.EditorAssetLibrary = fake_asset_lib
+        fake_unreal.find_object = lambda outer, path: None
 
         old_unreal = sys.modules.get("unreal")
         sys.modules["unreal"] = fake_unreal
@@ -942,6 +943,47 @@ class TestScriptRunner:
             )
             assert "error" in result
             assert "not found" in result["error"].lower()
+        finally:
+            cleanup()
+
+    def test_inspect_blueprint_component_template_subobject(self):
+        """api_discover should resolve generated-class component templates via find_object."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        bridge_data = {
+            "SGCharacterTakeDamageComponent": {
+                "class": "SGCharacterTakeDamageComponent",
+                "properties": [
+                    {"name": "HitPartInfoLookupTable", "type": "UDataTable*",
+                     "owner": "SGCharacterTakeDamageComponent", "read": True, "write": True},
+                ],
+                "functions": [],
+            }
+        }
+
+        subobject_path = (
+            "/Game/InBattle/Blueprints/Game/BP_CharacterBase.BP_CharacterBase_C:"
+            "SGCharacterTakeDamage_GEN_VARIABLE"
+        )
+        fake_component = MagicMock()
+        fake_component.__class__ = type("SGCharacterTakeDamageComponent", (), {})
+        fake_component.get_path_name.return_value = subobject_path
+        fake_component.get_name.return_value = "SGCharacterTakeDamage_GEN_VARIABLE"
+
+        mock_api, fake_unreal, cleanup = self._setup_instance_discover(bridge_data, assets={})
+        fake_unreal.find_object = lambda outer, path: fake_component if path == subobject_path else None
+        try:
+            result = api_discover(
+                mock_api,
+                subobject_path,
+                detail="HitPartInfoLookupTable",
+                timeout=5,
+            )
+            assert "error" not in result
+            assert result["class"] == "SGCharacterTakeDamageComponent"
+            assert result["object"] == subobject_path
+            assert result["object_name"] == "SGCharacterTakeDamage_GEN_VARIABLE"
+            assert result["items"][0]["name"] == "HitPartInfoLookupTable"
         finally:
             cleanup()
 

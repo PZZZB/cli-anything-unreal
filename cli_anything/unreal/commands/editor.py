@@ -1243,7 +1243,7 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
 def editor_api_discover(state: AppState, target, query, detail, timeout):
     """Discover the API surface of a UE class via C++ reflection.
 
-    TARGET is auto-detected: class name, asset path, or actor path.
+    TARGET is auto-detected: class name, asset/subobject path, or actor path.
     Use -d to drill into specific properties/functions.
     """
     from cli_anything.unreal.core.script_runner import api_discover
