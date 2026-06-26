@@ -378,6 +378,325 @@ else:
     return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
 
 
+def get_live_widget_tree(
+    api: UEEditorAPI,
+    target: str,
+    *,
+    limit: int = 20,
+    project_dir: str | None = None,
+    timeout: float = 60.0,
+) -> dict:
+    """Inspect live UUserWidget instances and their child widgets at runtime."""
+    safe_limit = max(1, int(limit))
+    script = f"""
+import json
+import unreal
+
+target = {_json(target)}
+target_lower = str(target).lower()
+limit = int({_json(safe_limit)})
+
+
+def _safe_str(value):
+    try:
+        return str(value)
+    except Exception:
+        return ""
+
+
+def _call(obj, name, *args):
+    try:
+        fn = getattr(obj, name, None)
+        if callable(fn):
+            return fn(*args)
+    except Exception:
+        return None
+    return None
+
+
+def _editor_prop(obj, *names):
+    for name in names:
+        try:
+            return obj.get_editor_property(name)
+        except Exception:
+            pass
+        try:
+            return getattr(obj, name)
+        except Exception:
+            pass
+    return None
+
+
+def _name(obj):
+    return _safe_str(_call(obj, "get_name") or getattr(obj, "name", ""))
+
+
+def _path(obj):
+    return _safe_str(_call(obj, "get_path_name"))
+
+
+def _class_obj(obj):
+    return _call(obj, "get_class")
+
+
+def _class_name(obj):
+    cls = _class_obj(obj)
+    if cls is None:
+        return ""
+    return _safe_str(_call(cls, "get_name") or cls)
+
+
+def _class_path(obj):
+    cls = _class_obj(obj)
+    return _path(cls) if cls is not None else ""
+
+
+def _vec2(value):
+    if value is None:
+        return None
+    for x_name, y_name in (("x", "y"), ("X", "Y")):
+        try:
+            return [float(getattr(value, x_name)), float(getattr(value, y_name))]
+        except Exception:
+            pass
+    try:
+        if len(value) >= 2:
+            return [float(value[0]), float(value[1])]
+    except Exception:
+        pass
+    return None
+
+
+def _anchors(value):
+    if value is None:
+        return None
+    minimum = _vec2(getattr(value, "minimum", None) or getattr(value, "Minimum", None))
+    maximum = _vec2(getattr(value, "maximum", None) or getattr(value, "Maximum", None))
+    if minimum is None and maximum is None:
+        return None
+    return {{"minimum": minimum, "maximum": maximum}}
+
+
+def _is_child_of(obj, unreal_class):
+    if obj is None or unreal_class is None:
+        return False
+    try:
+        cls = _class_obj(obj)
+        parent = unreal_class.static_class()
+        return bool(cls and cls.is_child_of(parent))
+    except Exception:
+        return False
+
+
+def _iter_objects(unreal_class=None):
+    if unreal_class is not None:
+        try:
+            return list(unreal.ObjectIterator(unreal_class))
+        except Exception:
+            pass
+    try:
+        return list(unreal.ObjectIterator())
+    except Exception:
+        return []
+
+
+def _matches_target(obj):
+    if not target_lower:
+        return True
+    texts = [_name(obj), _path(obj), _class_name(obj), _class_path(obj)]
+    for text in texts:
+        if target_lower in _safe_str(text).lower():
+            return True
+    return False
+
+
+def _outer_chain_contains(obj, wanted):
+    cur = obj
+    for _idx in range(64):
+        cur = _call(cur, "get_outer")
+        if cur is None:
+            return False
+        if cur == wanted:
+            return True
+    return False
+
+
+def _belongs_to_instance(widget, instance, instance_path):
+    if widget == instance:
+        return False
+    widget_path = _path(widget)
+    if instance_path and (
+        widget_path.startswith(instance_path + ".")
+        or widget_path.startswith(instance_path + ":")
+        or widget_path.startswith(instance_path + "/")
+    ):
+        return True
+    return _outer_chain_contains(widget, instance)
+
+
+def _slot_info(widget):
+    slot = _editor_prop(widget, "slot", "Slot")
+    if slot is None:
+        slot = _call(widget, "get_slot")
+    if slot is None:
+        return None
+    info = {{"type": _class_name(slot), "path": _path(slot)}}
+    if "CanvasPanelSlot" in info["type"]:
+        position = _vec2(_call(slot, "get_position"))
+        size = _vec2(_call(slot, "get_size"))
+        alignment = _vec2(_call(slot, "get_alignment"))
+        anchors = _anchors(_call(slot, "get_anchors"))
+        if position is not None:
+            info["position"] = position
+        if size is not None:
+            info["size"] = size
+        if alignment is not None:
+            info["alignment"] = alignment
+        if anchors is not None:
+            info["anchors"] = anchors
+        z_order = _call(slot, "get_z_order")
+        if z_order is not None:
+            try:
+                info["z_order"] = int(z_order)
+            except Exception:
+                info["z_order"] = _safe_str(z_order)
+        auto_size = _call(slot, "get_auto_size")
+        if auto_size is not None:
+            info["auto_size"] = bool(auto_size)
+    return info
+
+
+def _geometry_info(widget):
+    geometry = _call(widget, "get_cached_geometry")
+    if geometry is None:
+        return None
+    info = {{}}
+    local_size = _vec2(_call(geometry, "get_local_size"))
+    absolute_size = _vec2(_call(geometry, "get_absolute_size"))
+    absolute_position = _vec2(_call(geometry, "get_absolute_position"))
+    if local_size is not None:
+        info["local_size"] = local_size
+    if absolute_size is not None:
+        info["absolute_size"] = absolute_size
+    if absolute_position is not None:
+        info["absolute_position"] = absolute_position
+    return info or None
+
+
+def _brush_info(widget):
+    if "Image" not in _class_name(widget):
+        return None
+    brush = _call(widget, "get_brush")
+    if brush is None:
+        brush = _editor_prop(widget, "brush", "Brush")
+    if brush is None:
+        return None
+    info = {{}}
+    resource = _call(brush, "get_resource_object") or _editor_prop(brush, "resource_object", "ResourceObject")
+    if resource is not None:
+        info["resource"] = _path(resource) or _name(resource)
+        info["resource_class"] = _class_name(resource)
+    image_size = _vec2(_call(brush, "get_image_size") or _editor_prop(brush, "image_size", "ImageSize"))
+    if image_size is not None:
+        info["image_size"] = image_size
+    draw_as = _editor_prop(brush, "draw_as", "DrawAs")
+    if draw_as is not None:
+        info["draw_as"] = _safe_str(draw_as)
+    return info or None
+
+
+def _widget_info(widget):
+    parent = _call(widget, "get_parent")
+    info = {{
+        "name": _name(widget),
+        "path": _path(widget),
+        "class": _class_name(widget),
+    }}
+    if parent is not None:
+        info["parent"] = {{"name": _name(parent), "path": _path(parent), "class": _class_name(parent)}}
+    slot = _slot_info(widget)
+    if slot is not None:
+        info["slot"] = slot
+    geometry = _geometry_info(widget)
+    if geometry is not None:
+        info["cached_geometry"] = geometry
+    brush = _brush_info(widget)
+    if brush is not None:
+        info["brush"] = brush
+    desired_size = _vec2(_call(widget, "get_desired_size"))
+    if desired_size is not None:
+        info["desired_size"] = desired_size
+    visibility = _call(widget, "get_visibility")
+    if visibility is not None:
+        info["visibility"] = _safe_str(visibility)
+    child_count = _call(widget, "get_children_count")
+    if child_count is not None:
+        try:
+            info["children_count"] = int(child_count)
+        except Exception:
+            pass
+    return info
+
+
+user_widget_class = getattr(unreal, "UserWidget", None)
+widget_class = getattr(unreal, "Widget", None)
+
+instances = []
+for obj in _iter_objects(user_widget_class):
+    if user_widget_class is not None and not _is_child_of(obj, user_widget_class):
+        continue
+    if not _matches_target(obj):
+        continue
+    instances.append(obj)
+    if len(instances) >= limit:
+        break
+
+all_widgets = []
+for widget in _iter_objects(widget_class):
+    if widget_class is not None and not _is_child_of(widget, widget_class):
+        continue
+    all_widgets.append(widget)
+
+out_instances = []
+for instance in instances:
+    instance_path = _path(instance)
+    widgets = []
+    for widget in all_widgets:
+        if _belongs_to_instance(widget, instance, instance_path):
+            widgets.append(_widget_info(widget))
+    widget_paths = set([item.get("path") for item in widgets if item.get("path")])
+    root_widgets = []
+    for item in widgets:
+        parent_path = (item.get("parent") or {{}}).get("path")
+        if not parent_path or parent_path not in widget_paths:
+            root_widgets.append(item.get("name"))
+    out_instances.append({{
+        "name": _name(instance),
+        "path": instance_path,
+        "class": _class_name(instance),
+        "class_path": _class_path(instance),
+        "widget_count": len(widgets),
+        "root_widgets": root_widgets,
+        "widgets": widgets,
+    }})
+
+if not out_instances:
+    result = {{
+        "error": "Live UserWidget not found: " + str(target),
+        "target": target,
+        "suggestion": "Run PIE or open the UI so live UUserWidget instances exist, then pass an instance name/path or generated class name.",
+    }}
+else:
+    result = {{
+        "status": "ok",
+        "target": target,
+        "count": len(out_instances),
+        "instances": out_instances,
+    }}
+"""
+    return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
+
+
 def _exec_umg_script(
     api: UEEditorAPI,
     script_content: str,

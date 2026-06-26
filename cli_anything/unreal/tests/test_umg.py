@@ -109,6 +109,43 @@ class TestUMGCore:
 
 
     @patch("cli_anything.unreal.core.umg._exec_umg_script")
+    def test_get_live_widget_tree_uses_object_iterator_and_runtime_geometry(self, mock_exec):
+        from cli_anything.unreal.core.umg import get_live_widget_tree
+
+        mock_exec.return_value = {
+            "status": "ok",
+            "target": "BP_RXCrosshairStyle_C",
+            "count": 1,
+            "instances": [
+                {
+                    "name": "BP_RXCrosshairStyle_C_4",
+                    "class": "BP_RXCrosshairStyle_C",
+                    "widgets": [
+                        {
+                            "name": "Image_Dot",
+                            "class": "Image",
+                            "slot": {"type": "CanvasPanelSlot", "position": [1.0, 2.0], "size": [32.0, 32.0]},
+                            "cached_geometry": {"local_size": [32.0, 32.0], "absolute_size": [32.0, 32.0]},
+                            "brush": {"resource": "/Game/UI/T_Dot.T_Dot"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+        result = get_live_widget_tree(MagicMock(), "BP_RXCrosshairStyle_C", limit=3)
+
+        assert result["status"] == "ok"
+        assert result["instances"][0]["widgets"][0]["name"] == "Image_Dot"
+        script = mock_exec.call_args.args[1]
+        assert "unreal.ObjectIterator" in script
+        assert "get_cached_geometry" in script
+        assert "CanvasPanelSlot" in script
+        assert "get_brush" in script
+        assert "limit = int(3)" in script
+
+
+    @patch("cli_anything.unreal.core.umg._exec_umg_script")
     def test_set_widget_image(self, mock_exec):
         from cli_anything.unreal.core.umg import set_widget_image
 
@@ -216,6 +253,32 @@ class TestUMGCLI:
         data = json.loads(result.output)
         assert data["status"] == "success"
         assert data["result"]["root"]["class"] == "CanvasPanel"
+
+    @patch("cli_anything.unreal.core.umg.get_live_widget_tree")
+    def test_umg_live_tree_cli(self, mock_tree):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_tree.return_value = {
+            "status": "ok",
+            "target": "BP_RXCrosshairStyle_C",
+            "count": 1,
+            "instances": [{"name": "BP_RXCrosshairStyle_C_4", "widgets": []}],
+        }
+
+        with patch("cli_anything.unreal.commands.umg.require_editor", return_value=MagicMock()):
+            result = CliRunner().invoke(cli, [
+                "--output", "json",
+                "umg", "live-tree", "BP_RXCrosshairStyle_C",
+                "--limit", "3",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["instances"][0]["name"] == "BP_RXCrosshairStyle_C_4"
+        mock_tree.assert_called_once()
+        assert mock_tree.call_args.kwargs["limit"] == 3
 
     @patch("cli_anything.unreal.core.umg.set_widget_image")
     def test_umg_set_image_cli(self, mock_set):

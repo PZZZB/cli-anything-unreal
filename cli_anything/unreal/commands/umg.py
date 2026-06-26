@@ -141,3 +141,25 @@ def umg_tree(state: AppState, widget_path):
     api = require_editor(state)
     result = get_widget_tree(api, widget_path, project_dir=state.session.project_dir)
     output(result, state)
+
+
+@umg_group.command("live-tree")
+@click.argument("target")
+@click.option("--limit", default=20, type=int, help="Max matching live UserWidget instances")
+@handle_error
+@click.pass_obj
+def umg_live_tree(state: AppState, target, limit):
+    """Show runtime child widgets for live UUserWidget instances.
+
+    TARGET matches live instance name/path or generated class name.
+    """
+    from cli_anything.unreal.core.umg import get_live_widget_tree
+
+    api = require_editor(state)
+    result = get_live_widget_tree(
+        api,
+        target,
+        limit=limit,
+        project_dir=state.session.project_dir,
+    )
+    output(result, state)
