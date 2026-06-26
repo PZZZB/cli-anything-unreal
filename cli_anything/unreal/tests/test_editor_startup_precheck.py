@@ -823,8 +823,9 @@ def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
 
     assert result.exit_code == 0
     # The relaunch Popen call must include -nosplash and -unattended
-    assert len(popen_calls) == 1
-    relaunch_cmd = popen_calls[0]
+    relaunch_calls = [cmd for cmd in popen_calls if cmd and str(cmd[0]).endswith("UnrealEditor.exe")]
+    assert len(relaunch_calls) == 1
+    relaunch_cmd = relaunch_calls[0]
     assert "-nosplash" in relaunch_cmd
     assert "-unattended" in relaunch_cmd
 
@@ -860,6 +861,78 @@ def test_plugin_upgrade_uses_editor_close_helper(mini_project):
 
 
 # ── auto-compile on plugin load failure / skip when OK ────────────────
+
+
+def test_plugin_upgrade_kills_residual_project_editor_before_compile(mini_project):
+    """plugin-upgrade must not compile while same-project editor process still locks DLLs."""
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    mock_api = MagicMock()
+    mock_api.is_alive.side_effect = [True, False, True]
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=["1.0", "2.0"]), \
+         patch("cli_anything.unreal.commands.editor._close_editor_for_project", return_value={"status": "closed"}), \
+         patch("cli_anything.unreal.commands.editor._wait_for_project_editor_exit", return_value={
+             "status": "closed",
+             "method": "process_tree_kill",
+             "closed_processes": [{"pid": 1234, "project": mini_project}],
+         }) as mock_drain, \
+         patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
+             "deployed": True, "action": "updated", "version": "2.0", "plugin_dir": "/tmp/plugin"
+         }), \
+         patch("cli_anything.unreal.core.build.compile_project", return_value={"status": "ok"}) as mock_compile, \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/Engine/Binaries/Win64/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=MagicMock(pid=9999)), \
+         patch("cli_anything.unreal.commands.editor.time.sleep"):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "plugin-upgrade",
+        ])
+
+    assert result.exit_code == 0, result.output
+    mock_drain.assert_called_once_with(mini_project, 30010, timeout=60)
+    mock_compile.assert_called_once()
+
+
+def test_plugin_upgrade_reports_locked_dll_from_compile_log(mini_project, tmp_path):
+    """LNK1104 locked DLL failures should identify the locked file and recovery."""
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    log_file = tmp_path / "cli_compile.log"
+    locked = r"F:\RXGame\Plugins\Tencent\UnLua\Binaries\Win64\UnrealEditor-UnLua.dll"
+    log_file.write_text(f"LINK : fatal error LNK1104: cannot open file '{locked}'\n", encoding="utf-8")
+
+    runner = CliRunner()
+    mock_api = MagicMock()
+    mock_api.is_alive.return_value = False
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
+         patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
+             "deployed": True, "action": "updated", "version": "2.0", "plugin_dir": "/tmp/plugin"
+         }), \
+         patch("cli_anything.unreal.core.build.compile_project", return_value={
+             "status": "error",
+             "error": "Compile failed (exit 6). See log_file for details.",
+             "log_file": str(log_file),
+             "returncode": 6,
+         }):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "plugin-upgrade",
+        ])
+
+    assert result.exit_code == 1
+    data = json.loads(result.output)
+    assert data["code"] == "COMPILE_FAILED"
+    assert data["details"]["locked_file"] == locked
+    assert data["details"]["lock_error"] == "LNK1104"
+    assert "UnrealEditor" in data["suggestion"]
 
 
 def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):

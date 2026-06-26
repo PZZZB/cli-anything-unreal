@@ -25,7 +25,7 @@ Key points:
 - `editor preflight` verifies Remote Control config and enables the `RemoteControl` plugin when needed.
 - `editor launch` waits until API online or timeout. Do not use `sleep`.
 - Async: `--no-wait`, then `editor status <task_id>` or `task status <task_id>`.
-- DLL locked build fail -> `editor close`, then compile.
+- DLL locked build fail -> `editor close`, then compile. If `editor plugin-upgrade` reports `LNK1104` with `locked_file`, close/kill all UnrealEditor processes for that project and retry the reported command. `plugin-upgrade` waits for matching editor processes to exit before compiling, but another stale process can still hold third-party plugin DLLs.
 - CliAnythingBridge missing/stale module -> keep plugin enabled; `editor launch` deploys/enables it and precompiles before starting UE. Do not disable it to bypass startup.
 - User says editor running -> still verify with Step 1.
 - Offline `editor status` item -> use its `next_command`.

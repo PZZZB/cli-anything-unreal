@@ -550,6 +550,65 @@ def _remove_tree_with_retries(path: Path, *, attempts: int = 30, delay: float = 
     raise last_error
 
 
+def _wait_for_project_editor_exit(project_path: str | None, port: int, *, timeout: float = 60.0) -> dict | None:
+    """Wait for same-project UnrealEditor processes to exit, then kill stale lock holders."""
+    if not project_path or sys.platform != "win32":
+        return None
+
+    deadline = time.time() + timeout
+    last_matches: list[dict] = []
+    while time.time() < deadline:
+        _, matches = _find_matching_project_editors(project_path)
+        if not matches:
+            return {"status": "closed", "method": "process_exit"}
+        last_matches = matches
+        time.sleep(1)
+
+    kill_result = _kill_matching_project_editors(
+        project_path,
+        port,
+        success_message="Editor API closed but UnrealEditor process still held project DLLs; terminated matching process before compile.",
+        failure_message="Editor API closed but UnrealEditor process still held project DLLs and could not be terminated.",
+    )
+    if kill_result:
+        return kill_result
+
+    return {
+        "status": "timeout",
+        "port": port,
+        "message": "Timed out waiting for matching UnrealEditor process to exit before compile.",
+        "running_processes": [
+            {"pid": proc.get("pid"), "project": proc.get("project", "")}
+            for proc in last_matches
+        ],
+    }
+
+
+def _extract_compile_lock_error(log_file: str | None) -> dict:
+    if not log_file:
+        return {}
+    try:
+        text = Path(log_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+
+    match = re.search(r"LNK1104:\s*cannot open file\s+['\"]?([^'\"\r\n]+)['\"]?", text, re.IGNORECASE)
+    if not match:
+        return {}
+
+    locked_file = match.group(1).strip()
+    details = {
+        "lock_error": "LNK1104",
+        "locked_file": locked_file,
+    }
+    if locked_file.lower().endswith(".dll"):
+        details["lock_hint"] = (
+            "A running UnrealEditor or stale child process is holding this DLL. "
+            "Close/kill editors for this project, then retry editor plugin-upgrade."
+        )
+    return details
+
+
 def _deploy_bridge(session, state) -> dict:
     from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
 
@@ -1229,6 +1288,15 @@ def editor_plugin_upgrade(state: AppState):
             if not api.is_alive():
                 break
             time.sleep(1)
+        drain_result = _wait_for_project_editor_exit(state.session.project_path, state.session.port, timeout=60)
+        if drain_result and drain_result.get("status") not in {"closed", "offline"}:
+            raise AppError(
+                "EDITOR_CLOSE_FAILED",
+                "Editor process did not fully exit before plugin compile; project DLLs may still be locked.",
+                exit_code=3,
+                suggestion="Close or kill UnrealEditor processes for this project, then retry editor plugin-upgrade.",
+                details=drain_result,
+            )
 
     if plugin_dir.exists():
         _remove_tree_with_retries(plugin_dir)
@@ -1247,9 +1315,23 @@ def editor_plugin_upgrade(state: AppState):
     from cli_anything.unreal.core.build import compile_project
     build_result = compile_project(state.session.project_path, engine_root=state.session.engine_root)
     if build_result.get("status") == "error":
-        raise AppError("COMPILE_FAILED", build_result.get("error", "Build failed"), details={
+        details = {
             "log_file": build_result.get("log_file", ""),
-        })
+            "returncode": build_result.get("returncode"),
+        }
+        details.update(_extract_compile_lock_error(build_result.get("log_file", "")))
+        suggestion = None
+        if details.get("locked_file"):
+            suggestion = (
+                "A DLL is locked during compile. Close all UnrealEditor processes for this project "
+                "or stop the process holding the DLL, then retry editor plugin-upgrade."
+            )
+        raise AppError(
+            "COMPILE_FAILED",
+            build_result.get("error", "Build failed"),
+            suggestion=suggestion,
+            details=details,
+        )
 
     if editor_was_running:
         from cli_anything.unreal.utils.ue_backend import find_editor_exe
