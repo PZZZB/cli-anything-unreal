@@ -470,7 +470,7 @@ def _kill_matching_project_editors(
     if not project_path:
         return None
 
-    from cli_anything.unreal.utils.ue_backend import _kill_process_tree
+    from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
 
     _, matches = _find_matching_project_editors(project_path)
     if not matches:
@@ -484,9 +484,15 @@ def _kill_matching_project_editors(
         except (TypeError, ValueError):
             pid = 0
         entry = {"pid": pid, "project": proc.get("project", "")}
-        if pid and _kill_process_tree(pid):
+        kill_result = _kill_process_tree_result(pid) if pid else {
+            "ok": False,
+            "error": "Missing process id.",
+            "retry_suggested": False,
+        }
+        if kill_result.get("ok"):
             closed.append(entry)
         else:
+            entry["kill_result"] = kill_result
             failed.append(entry)
 
     if closed:
@@ -501,12 +507,27 @@ def _kill_matching_project_editors(
             result["failed_processes"] = failed
         return result
 
-    return {
+    result = {
         "status": "failed",
         "port": port,
         "message": failure_message,
         "failed_processes": failed,
     }
+    suggestions = [
+        item.get("kill_result", {}).get("suggestion")
+        for item in failed
+        if item.get("kill_result", {}).get("suggestion")
+    ]
+    if suggestions:
+        result["suggestion"] = suggestions[0]
+    retry_flags = [
+        item.get("kill_result", {}).get("retry_suggested")
+        for item in failed
+        if "kill_result" in item
+    ]
+    if retry_flags:
+        result["retry_suggested"] = any(bool(flag) for flag in retry_flags)
+    return result
 
 
 def _check_already_running(session, state) -> dict | None:

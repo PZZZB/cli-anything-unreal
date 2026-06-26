@@ -426,6 +426,129 @@ def _allocate_log_path(project_dir: str | None, label: str) -> str:
     return str(log_dir / filename)
 
 
+def _decode_process_output(data) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    for encoding in ("utf-8", "mbcs", "cp936", "gbk"):
+        try:
+            return data.decode(encoding, errors="replace")
+        except Exception:
+            continue
+    return str(data)
+
+
+def _classify_kill_result(result: dict) -> dict:
+    text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
+    access_denied = any(token in text for token in ("access is denied", "拒绝访问", "存取被拒"))
+    already_exited = any(token in text for token in ("not found", "not running", "没有找到", "找不到", "未找到"))
+
+    result["access_denied"] = access_denied
+    result["already_exited"] = already_exited
+    if already_exited:
+        result["ok"] = True
+        result["method"] = result.get("method", "taskkill") + "_already_exited"
+        result["retry_suggested"] = False
+        result["suggestion"] = "Process already exited before taskkill completed."
+    elif access_denied:
+        result["retry_suggested"] = False
+        result["suggestion"] = (
+            "Taskkill was denied. Run ue-cli from an elevated administrator shell, "
+            "or close the UnrealEditor.exe process manually from Task Manager."
+        )
+    elif not result.get("ok"):
+        result["retry_suggested"] = True
+        result["suggestion"] = (
+            "Taskkill failed. Retry editor close once; if it repeats, inspect the pid "
+            "and close UnrealEditor.exe manually."
+        )
+    return result
+
+
+def _kill_process_tree_result(pid: int) -> dict:
+    """Kill a process tree and return diagnostic details."""
+    if sys.platform != "win32":
+        try:
+            import signal
+            os.kill(pid, signal.SIGKILL)
+            return {
+                "ok": True,
+                "pid": pid,
+                "method": "os.kill",
+                "retry_suggested": False,
+            }
+        except ProcessLookupError as exc:
+            return {
+                "ok": True,
+                "pid": pid,
+                "method": "os.kill_already_exited",
+                "error": str(exc),
+                "already_exited": True,
+                "retry_suggested": False,
+                "suggestion": "Process already exited.",
+            }
+        except PermissionError as exc:
+            return {
+                "ok": False,
+                "pid": pid,
+                "method": "os.kill",
+                "error": str(exc),
+                "access_denied": True,
+                "retry_suggested": False,
+                "suggestion": "Permission denied while killing process; rerun with sufficient privileges.",
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "pid": pid,
+                "method": "os.kill",
+                "error": str(exc),
+                "retry_suggested": True,
+                "suggestion": "Process kill failed; retry or close the process manually.",
+            }
+
+    cmd = ["taskkill", "/F", "/T", "/PID", str(pid)]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=False,
+            timeout=10,
+        )
+        result = {
+            "ok": proc.returncode == 0,
+            "pid": pid,
+            "method": "taskkill",
+            "command": cmd,
+            "returncode": proc.returncode,
+            "stdout": _decode_process_output(proc.stdout).strip(),
+            "stderr": _decode_process_output(proc.stderr).strip(),
+        }
+        return _classify_kill_result(result)
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "pid": pid,
+            "method": "taskkill",
+            "command": cmd,
+            "error": str(exc),
+            "timeout": True,
+            "retry_suggested": True,
+            "suggestion": "Taskkill timed out. Retry editor close; if it repeats, close UnrealEditor.exe manually.",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "pid": pid,
+            "method": "taskkill",
+            "command": cmd,
+            "error": str(exc),
+            "retry_suggested": True,
+            "suggestion": "Taskkill failed before completion. Retry or close UnrealEditor.exe manually.",
+        }
+
+
 def _kill_process_tree(pid: int) -> bool:
     """Kill a process and all its descendants using taskkill /F /T.
 
@@ -438,22 +561,7 @@ def _kill_process_tree(pid: int) -> bool:
     Returns:
         True if the kill command succeeded.
     """
-    if sys.platform != "win32":
-        try:
-            import signal
-            os.kill(pid, signal.SIGKILL)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
-
-    try:
-        result = subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(pid)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    return bool(_kill_process_tree_result(pid).get("ok"))
 
 
 def _windows_cmdline_to_argv(cmdline: str) -> list[str]:

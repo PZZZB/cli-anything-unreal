@@ -464,6 +464,31 @@ class TestSession:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def test_kill_process_tree_result_reports_access_denied():
+    from cli_anything.unreal.utils import ue_backend
+    from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
+
+    proc = subprocess.CompletedProcess(
+        ["taskkill", "/F", "/T", "/PID", "49272"],
+        5,
+        stdout=b"",
+        stderr="ERROR: Access is denied.".encode("utf-8"),
+    )
+
+    with patch.object(ue_backend.sys, "platform", "win32"), \
+         patch("cli_anything.unreal.utils.ue_backend.subprocess.run", return_value=proc):
+        result = _kill_process_tree_result(49272)
+
+    assert result["ok"] is False
+    assert result["pid"] == 49272
+    assert result["method"] == "taskkill"
+    assert result["returncode"] == 5
+    assert result["access_denied"] is True
+    assert result["retry_suggested"] is False
+    assert "Access is denied" in result["stderr"]
+    assert "administrator" in result["suggestion"].lower()
+
+
 class TestHTTPAPI:
     """Tests for utils/ue_http_api.py — mocked HTTP calls."""
 

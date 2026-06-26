@@ -469,7 +469,7 @@ def test_editor_close_kills_matching_zombie_project_process(mini_project):
              {"pid": 1234, "project": mini_project},
              {"pid": 5678, "project": other_project},
          ]), \
-         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True) as kill_process:
+         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree_result", return_value={"ok": True}) as kill_process:
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "close",
@@ -498,7 +498,7 @@ def test_editor_close_kills_matching_project_process_after_graceful_timeout(mini
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 1234, "project": mini_project},
          ]), \
-         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True) as kill_process:
+         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree_result", return_value={"ok": True}) as kill_process:
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "close",
@@ -546,6 +546,49 @@ def test_editor_close_waits_for_process_exit_after_api_closes(mini_project):
     assert data["status"] == "success"
     assert data["result"]["status"] == "closed"
     assert data["result"]["method"] == "process_exit"
+
+
+def test_editor_close_failure_reports_kill_diagnostics(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    mock_api = MagicMock()
+    mock_api.is_alive.side_effect = [True, False]
+
+    kill_detail = {
+        "ok": False,
+        "pid": 49272,
+        "method": "taskkill",
+        "returncode": 5,
+        "stdout": "",
+        "stderr": "ERROR: Access is denied.",
+        "access_denied": True,
+        "retry_suggested": False,
+        "suggestion": "Run from an elevated administrator shell or close the process manually.",
+    }
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 49272, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.commands.editor.time.time", side_effect=[0, 0, 0, 61, 122]), \
+         patch("cli_anything.unreal.commands.editor.time.sleep"), \
+         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree_result", return_value=kill_detail):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 3
+    data = json.loads(result.output)
+    assert data["status"] == "error"
+    assert data["code"] == "EDITOR_CLOSE_FAILED"
+    failed = data["details"]["failed_processes"][0]
+    assert failed["pid"] == 49272
+    assert failed["kill_result"]["access_denied"] is True
+    assert failed["kill_result"]["retry_suggested"] is False
+    assert "administrator" in data["details"]["suggestion"].lower()
 
 
 def test_editor_close_timeout_without_matching_process_returns_error(mini_project):
