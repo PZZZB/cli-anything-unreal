@@ -715,6 +715,21 @@ class TestMaterialEditing:
         assert "save_loaded_asset(mat" in script
         assert "save_dirty_packages(False, True)" in script
 
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_get_param_uses_material_resolver(self, mock_run):
+        from cli_anything.unreal.core.materials import get_material_param
+
+        mock_run.return_value = {"status": "ok", "action": "get_param"}
+
+        get_material_param(MagicMock(), "/Game/Env/MI_Test.MI_Test", "Roughness")
+
+        script = mock_run.call_args.args[1]
+        assert 'material_path = "/Game/Env/MI_Test.MI_Test"' in script
+        assert 'material_candidates = ["/Game/Env/MI_Test.MI_Test", "/Game/Env/MI_Test"]' in script
+        assert "mat, loaded_asset_path, tried_asset_paths = _cli_load_material" in script
+        assert "unreal.EditorAssetLibrary.load_asset(material_path)" not in script
+        assert '"material": loaded_asset_path' in script
+
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_set_param_vector(self, mock_exec):
         from cli_anything.unreal.core.materials import set_material_param
@@ -942,6 +957,31 @@ class TestMaterialEditing:
             data = json.loads(result.output)
             assert data["status"] == "success"
             assert data["result"]["status"] == "ok"
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_get_param_cli_error_is_top_level_error(self, mock_exec):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec.return_value = {
+            "error": "Material not found: /Game/Missing",
+            "tried": ["/Game/Missing", "/Game/Missing.Missing"],
+        }
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.material.require_editor") as mock_editor:
+            mock_editor.return_value = MagicMock()
+            result = runner.invoke(cli, [
+                "--output", "json", "material", "get-param", "/Game/Missing",
+                "--name", "Roughness",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "MATERIAL_PARAM_FAILED"
+        assert data["message"] == "Material not found: /Game/Missing"
+        assert data["details"]["tried"] == ["/Game/Missing", "/Game/Missing.Missing"]
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_recompile_cli(self, mock_exec):

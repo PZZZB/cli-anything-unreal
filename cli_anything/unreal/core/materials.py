@@ -717,13 +717,14 @@ import unreal
 import json
 
 material_path = "{material_path}"
+material_candidates = {material_path_candidates_json}
 param_name = "{param_name}"
 
-mat = unreal.EditorAssetLibrary.load_asset(material_path)
+mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, material_candidates)
 if mat is None:
-    result = {{"error": "Material not found: " + material_path}}
+    result = {{"error": "Material not found: " + material_path, "tried": tried_asset_paths}}
 elif not isinstance(mat, unreal.MaterialInstanceConstant):
-    result = {{"error": "Asset is not a MaterialInstanceConstant (get-param only works on MI): " + material_path}}
+    result = {{"error": "Asset is not a MaterialInstanceConstant (get-param only works on MI): " + loaded_asset_path}}
 else:
     mel = unreal.MaterialEditingLibrary
     try:
@@ -760,7 +761,7 @@ else:
                     break
 
         if found:
-            result = {{"status": "ok", "action": "get_param", "material": material_path, "param": param_name, "type": param_type, "value": val}}
+            result = {{"status": "ok", "action": "get_param", "material": loaded_asset_path, "param": param_name, "type": param_type, "value": val}}
         else:
             result = {{"error": "Parameter not found: " + param_name}}
             

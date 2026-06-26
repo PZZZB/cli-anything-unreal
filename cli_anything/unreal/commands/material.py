@@ -4,7 +4,7 @@ import re
 
 import click
 
-from cli_anything.unreal.commands import AppState, handle_error, output, require_editor, require_project
+from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_editor, require_project
 
 
 def _validate_custom_code(code: str) -> list[str]:
@@ -413,6 +413,8 @@ def material_get_param(state: AppState, material_path, param_name):
 
     api = require_editor(state)
     result = get_material_param(api, material_path, param_name, project_dir=state.session.project_dir)
+    if "error" in result:
+        raise AppError("MATERIAL_PARAM_FAILED", result["error"], exit_code=3, details=result)
     output(result, state)
 
 
