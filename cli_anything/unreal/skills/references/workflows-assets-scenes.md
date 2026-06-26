@@ -38,6 +38,10 @@ Editor-only visualizers (gizmos/billboards) filtered by default to match Details
 
 ## Asset Manipulation
 
+`asset list` uses Asset Registry and falls back to a full registry prefix scan when a directory query returns empty. If direct object load works but `EditorAssetLibrary.list_assets()` is unreliable in the current editor context, prefer `asset list` before writing custom UE Python.
+
+For Texture2D source metadata that UE Python does not expose as `Texture2D.source`, use `asset texture-source /Game/Path/T_Name`. It returns source size, format, mip count, disk payload state, and basic alpha/value stats when supported by the bridge plugin.
+
 ```bash
 # Discover asset class and properties (auto-detects class from asset path)
 ue-cli editor api-discover /Game/MyAsset
@@ -101,6 +105,10 @@ ue-cli scene list-components <actor_path>
 ue-cli scene get-material <actor_path>
 ```
 
+## Material Compile Error Reads
+
+`material get-errors` is read-only and uses the bridge already loaded in the editor. It does not deploy or replace `Plugins/CliAnythingBridge` while Unreal may hold the DLL locked. If bridge is missing or old, run `editor status`, then `editor plugin-upgrade`.
+
 ## Blueprint Editing
 
 ```bash
@@ -144,7 +152,15 @@ ue-cli umg add-widget /Game/UI/WBP_Hud --type TextBlock --name TitleText \
 
 # Inspect the design-time tree
 ue-cli umg tree /Game/UI/WBP_Hud
+
+# Update an existing Image widget brush and Canvas slot
+ue-cli umg set-image /Game/UI/WBP_Hud --name CrosshairIcon \
+  --texture /Game/UI/T_Crosshair_SDF --x 0 --y 0 --w 64 --h 64 --z 10
 ```
+
+## Material Custom Node Structs
+
+`editor api-discover CustomInput` can inspect UE Python struct wrappers used by `MaterialExpressionCustom.Inputs` through the bridge plugin. If class reflection reports absent types for material structs, retry by struct name before falling back to ad hoc Python.
 
 ## Operations Without Dedicated Subcommands
 

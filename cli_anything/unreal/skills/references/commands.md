@@ -19,7 +19,7 @@ Workflow examples live in sibling workflow docs.
 | `editor run-script [PATH|-] [-c CODE] [--timeout N] [--no-save]` | Execute Python file, stdin (`-`), or short inline code with result capture | Yes |
 | `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable; `get` errors on missing/unverified empty CVars, negative values are supported (`... set r.X -4` or `... set r.X -- -4`) | Yes |
 | `editor enable-remote` | Enable Remote Control config | No |
-| `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover UE class/API. TARGET: class, asset path, actor path | Yes |
+| `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover UE class/struct/API. TARGET: class, struct, asset path, actor path | Yes |
 | `editor cancel TASK_ID` | Cancel async editor launch | - |
 | `editor plugin-version` | Compare bundled vs loaded plugin | Yes (loaded) |
 | `editor plugin-upgrade` | Deploy -> compile -> restart plugin upgrade | No |
@@ -28,7 +28,7 @@ Workflow examples live in sibling workflow docs.
 
 `api-discover` belongs under `editor`, not top-level.
 
-**TARGET auto-detection**: class name, asset path, actor path:
+**TARGET auto-detection**: class name, struct name (for UE Python structs such as `CustomInput`), asset path, actor path:
 
 ```bash
 # Class name - direct lookup:
@@ -90,6 +90,7 @@ All asset commands require editor.
 | `asset property ASSET_PATH PROP[=VALUE]` | Get/set property |
 | `asset delete ASSET_PATH [--force]` | Delete with ref detection |
 | `asset refs ASSET_PATH` | List referencers |
+| `asset texture-source ASSET_PATH` | Read Texture2D source size/format and basic alpha/value stats through the bridge plugin |
 | `asset duplicate SRC DEST [--force]` | Duplicate asset |
 | `asset rename SRC DEST` | Rename/move asset |
 
@@ -175,7 +176,8 @@ All UMG commands require editor and the CliAnythingBridge plugin.
 |---------|-------------|
 | `umg create WIDGET_PATH [--root-class CLASS] [--root-name NAME] [--force] [--variable]` | Create a Widget Blueprint with a root widget; default root is `CanvasPanel` |
 | `umg add-widget WIDGET_PATH --type CLASS --name NAME [--parent CANVAS] [--text TEXT] [--x X] [--y Y] [--w W] [--h H] [--z Z] [--variable]` | Add a child widget to a CanvasPanel and set its Canvas slot. `WIDGET_PATH` accepts package, object, generated-class, or WidgetTree subobject paths |
-| `umg tree WIDGET_PATH` | Inspect the design-time WidgetTree, including root, child widgets, slots, and TextBlock text. `WIDGET_PATH` accepts package, object, generated-class, or WidgetTree subobject paths |
+| `umg tree WIDGET_PATH` | Inspect the design-time WidgetTree, including root, child widgets, slots, TextBlock text, and Image brush metadata. `WIDGET_PATH` accepts package, object, generated-class, or WidgetTree subobject paths |
+| `umg set-image WIDGET_PATH --name NAME [--texture PATH] [--x X] [--y Y] [--w W] [--h H] [--z Z]` | Edit an existing Image widget brush resource and CanvasPanelSlot layout |
 
 ## screenshot - Screenshot
 

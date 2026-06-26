@@ -243,6 +243,107 @@ else:
     return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
 
 
+def set_widget_image(
+    api: UEEditorAPI,
+    widget_path: str,
+    *,
+    widget_name: str,
+    texture_path: str | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    z_order: int | None = None,
+    project_dir: str | None = None,
+    timeout: float = 60.0,
+) -> dict:
+    """Edit an existing UMG Image widget brush resource and CanvasPanelSlot layout."""
+    set_resource = bool(texture_path)
+    set_position = x is not None or y is not None
+    set_size = width is not None or height is not None
+    set_z_order = z_order is not None
+    script = f"""
+import json
+import unreal
+
+asset_path = {_json(widget_path)}
+asset_candidates = {_json(_widget_asset_path_candidates(widget_path))}
+widget_name = {_json(widget_name)}
+texture_path = {_json(texture_path or "")}
+set_resource = {_json(set_resource)}
+set_position = {_json(set_position)}
+x = float({_json(0.0 if x is None else x)})
+y = float({_json(0.0 if y is None else y)})
+set_size = {_json(set_size)}
+width = float({_json(-1.0 if width is None else width)})
+height = float({_json(-1.0 if height is None else height)})
+set_z_order = {_json(set_z_order)}
+z_order = int({_json(0 if z_order is None else z_order)})
+
+{_WIDGET_BLUEPRINT_RESOLVER}
+
+{_BRIDGE_CHECK}
+
+def _cli_load_object(path):
+    if not path:
+        return None, None, []
+    tried = []
+    base = str(path).strip().split(":", 1)[0]
+    leaf = base.rsplit("/", 1)[-1]
+    candidates = [base] if "." in leaf else [base, base + "." + leaf]
+    for candidate in candidates:
+        if not candidate or candidate in tried:
+            continue
+        tried.append(candidate)
+        obj = None
+        try:
+            obj = unreal.EditorAssetLibrary.load_asset(candidate)
+        except Exception:
+            obj = None
+        if obj is None:
+            try:
+                obj = unreal.load_object(None, candidate)
+            except Exception:
+                obj = None
+        if obj is not None:
+            return obj, candidate, tried
+    return None, None, tried
+
+bridge, bridge_error = _cli_bridge()
+if bridge_error:
+    result = bridge_error
+elif not hasattr(bridge, "set_widget_image_properties"):
+    result = {{"error": "CliAnythingBridgeLibrary is too old for UMG Image editing.", "missing": ["set_widget_image_properties"], "suggestion": "Run editor plugin-upgrade, then relaunch the editor."}}
+else:
+    bp, loaded_asset_path, tried_asset_paths = _cli_load_widget_blueprint(asset_candidates)
+    if not bp:
+        result = {{"error": "WidgetBlueprint not found: " + asset_path, "tried": tried_asset_paths}}
+    else:
+        resource = None
+        resource_path = ""
+        if set_resource:
+            resource, resource_path, resource_tried = _cli_load_object(texture_path)
+            if resource is None:
+                result = {{"error": "Brush resource not found: " + texture_path, "tried": resource_tried}}
+            else:
+                result = None
+        else:
+            result = None
+        if result is None:
+            result = _cli_parse_bridge(
+                bridge.set_widget_image_properties(
+                    bp, widget_name, resource, set_resource,
+                    set_position, x, y, set_size, width, height, set_z_order, z_order
+                )
+            )
+            if result.get("status") == "ok":
+                result["widget_blueprint"] = loaded_asset_path
+                unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+                unreal.EditorAssetLibrary.save_asset(loaded_asset_path, only_if_is_dirty=False)
+"""
+    return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
+
+
 def get_widget_tree(
     api: UEEditorAPI,
     widget_path: str,

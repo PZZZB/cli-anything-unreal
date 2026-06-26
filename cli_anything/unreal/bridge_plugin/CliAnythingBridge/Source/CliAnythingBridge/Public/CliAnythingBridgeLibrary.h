@@ -8,6 +8,8 @@
 class UMaterial;
 class UMaterialExpression;
 class UMaterialInterface;
+class UTexture2D;
+class UScriptStruct;
 class UWidgetBlueprint;
 
 UCLASS()
@@ -62,6 +64,14 @@ public:
 	static FString GetConsoleVariableInfo(const FString& Name);
 
 	/**
+	 * Returns JSON TextureSource metadata for a Texture2D.
+	 * UE Python exposes UTexture2D but not Texture->Source, so SDF/UI
+	 * validation that needs source size/format/channel stats goes through C++.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString GetTextureSourceInfo(UTexture2D* Texture);
+
+	/**
 	 * Writes the material's translated HLSL code to a file (equivalent to Window > HLSL Code).
 	 * Calls FMaterial::GetMaterialExpressionSource() which triggers the material translator.
 	 * This is lightweight — no shader dump or RecompileShaders needed.
@@ -93,6 +103,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString GetClassInfo(const FString& ClassName, bool bIncludeInherited = true);
+
+	/**
+	 * Returns reflected UScriptStruct properties as JSON.
+	 * Used for UE Python structs such as CustomInput that are not UClass types.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString GetStructInfo(UScriptStruct* Struct, bool bIncludeInherited = true);
 
 	/**
 	 * Returns the component tree of an Actor, mirroring what a user sees in the Details
@@ -132,6 +149,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything|UMG")
 	static FString AddWidgetToCanvas(UWidgetBlueprint* Blueprint, const FString& WidgetClassName, const FString& WidgetName, const FString& ParentWidgetName, bool bIsVariable, float X, float Y, float Width, float Height, int32 ZOrder, const FString& Text);
+
+	/**
+	 * Edits an existing UMG Image widget's brush resource and CanvasPanelSlot.
+	 * Python cannot reliably read WidgetBlueprint.WidgetTree because it is protected.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|UMG")
+	static FString SetWidgetImageProperties(UWidgetBlueprint* Blueprint, const FString& WidgetName, UObject* ResourceObject, bool bSetResource, bool bSetPosition, float X, float Y, bool bSetSize, float Width, float Height, bool bSetZOrder, int32 ZOrder);
 
 	/**
 	 * Returns the design-time WidgetTree as JSON, including root, widgets, parent,

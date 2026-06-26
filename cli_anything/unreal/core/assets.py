@@ -94,6 +94,56 @@ else:
 '''
 
 
+_SCRIPT_TEXTURE_SOURCE_INFO = r'''
+import json
+import unreal
+
+asset_path = {asset_path!r}
+
+def _cli_object_path_candidates(path):
+    base = str(path).strip().split(":", 1)[0]
+    if not base:
+        return [base]
+    leaf = base.rsplit("/", 1)[-1]
+    if "." in leaf:
+        return [base]
+    return [base, base + "." + leaf]
+
+def _cli_load_texture(path):
+    tried = []
+    for candidate in _cli_object_path_candidates(path):
+        if not candidate or candidate in tried:
+            continue
+        tried.append(candidate)
+        obj = None
+        try:
+            obj = unreal.EditorAssetLibrary.load_asset(candidate)
+        except Exception:
+            obj = None
+        if obj is None:
+            try:
+                obj = unreal.load_object(None, candidate)
+            except Exception:
+                obj = None
+        if obj is not None:
+            return obj, candidate, tried
+    return None, None, tried
+
+tex, loaded_path, tried_paths = _cli_load_texture(asset_path)
+if tex is None:
+    result = {"error": "Texture asset not found: " + asset_path, "tried": tried_paths}
+elif not isinstance(tex, unreal.Texture2D):
+    result = {"error": "Asset is not a Texture2D: " + loaded_path, "class": tex.get_class().get_name()}
+elif not hasattr(unreal, "CliAnythingBridgeLibrary") or not hasattr(unreal.CliAnythingBridgeLibrary, "get_texture_source_info"):
+    result = {"error": "CliAnythingBridgeLibrary is missing GetTextureSourceInfo. TextureSource inspection requires bridge plugin 1.16+.", "suggestion": "Run editor plugin-upgrade, then relaunch the editor."}
+else:
+    raw = unreal.CliAnythingBridgeLibrary.get_texture_source_info(tex)
+    result = json.loads(raw or "{}")
+    if "error" not in result:
+        result["asset"] = loaded_path
+'''
+
+
 def _exec(api: "UEEditorAPI", script: str, project_dir: str | None, timeout: float = 15.0) -> dict:
     from cli_anything.unreal.core.script_runner import run_python_code
     return run_python_code(api, script, project_dir=project_dir, timeout=timeout, save=False)
@@ -145,7 +195,17 @@ import re as _re
 import unreal as _u
 
 _ar = _u.AssetRegistryHelpers.get_asset_registry()
-_assets = _ar.get_assets_by_path({repr(package_path)}, recursive=True)
+_assets = list(_ar.get_assets_by_path({repr(package_path)}, recursive=True))
+_pkg_prefix = str({repr(package_path)}).rstrip("/")
+if not _assets:
+    try:
+        _all_assets = list(_ar.get_all_assets())
+        _assets = [
+            _ad for _ad in _all_assets
+            if str(_ad.package_name) == _pkg_prefix or str(_ad.package_name).startswith(_pkg_prefix + '/')
+        ]
+    except Exception:
+        _assets = []
 
 _class_filter = {class_repr}
 _name_query = {query_repr}
@@ -206,6 +266,17 @@ def asset_refs(api: "UEEditorAPI", asset_path: str, **_kw) -> dict:
         return {"error": f"Asset not found: {asset_path}"}
     refs = api.find_asset_referencers(asset_path)
     return {"asset": asset_path, "referencers": refs, "count": len(refs)}
+
+
+def texture_source_info(
+    api: "UEEditorAPI",
+    asset_path: str,
+    *,
+    project_dir: str | None = None,
+) -> dict:
+    """Read Texture2D Source size/format and channel stats via the bridge plugin."""
+    script = _SCRIPT_TEXTURE_SOURCE_INFO.replace("{asset_path!r}", repr(asset_path))
+    return _exec(api, script, project_dir, timeout=30.0)
 
 
 def asset_delete(

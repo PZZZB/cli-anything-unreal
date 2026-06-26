@@ -211,6 +211,9 @@ def test_editor_status_online_suggests_plugin_upgrade_on_bridge_mismatch(mini_pr
     assert item["bundled_version"] == "1.14"
     assert item["plugin_match"] is False
     assert item["next_command"] == f'ue-cli --project "{mini_project}" editor plugin-upgrade'
+    assert item["restart_required"] is True
+    assert "running editor loaded" in item["message"]
+    assert "restart" in item["message"]
     assert "plugin-upgrade" in item["suggestion"]
 
 
@@ -487,7 +490,7 @@ def test_editor_close_kills_matching_project_process_after_graceful_timeout(mini
 
     runner = CliRunner()
     mock_api = MagicMock()
-    mock_api.is_alive.side_effect = [True, True]
+    mock_api.is_alive.side_effect = [True, False, True]
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
          patch("cli_anything.unreal.commands.editor.time.time", side_effect=[0, 0, 31]), \
@@ -798,8 +801,9 @@ def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
 
     mock_api = MagicMock()
     # 1st call: editor_was_running check -> True
-    # 2nd call: wait-for-api loop -> True (editor back online)
-    mock_api.is_alive.side_effect = [True, True]
+    # 2nd call: post-close wait -> False
+    # 3rd call: wait-for-api loop -> True (editor back online)
+    mock_api.is_alive.side_effect = [True, False, True]
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
          patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
@@ -832,7 +836,7 @@ def test_plugin_upgrade_uses_editor_close_helper(mini_project):
 
     runner = CliRunner()
     mock_api = MagicMock()
-    mock_api.is_alive.side_effect = [True, True]
+    mock_api.is_alive.side_effect = [True, False, True]
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
          patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
@@ -1070,3 +1074,16 @@ def test_summarize_startup_precheck_includes_bridge_plugin_issues():
     }
     result = _summarize_startup_precheck(check)
     assert "Fixed: CliAnythingBridge plugin not enabled in .uproject" in result["warnings"]
+
+def test_remove_tree_with_retries_handles_locked_dll():
+    from pathlib import Path
+    from unittest.mock import patch
+    from cli_anything.unreal.commands.editor import _remove_tree_with_retries
+
+    with patch("pathlib.Path.exists", return_value=True), \
+         patch("shutil.rmtree", side_effect=[PermissionError("locked"), None]) as mock_rmtree, \
+         patch("time.sleep") as mock_sleep:
+        _remove_tree_with_retries(Path("F:/Test574/Plugins/CliAnythingBridge"), attempts=2, delay=0.01)
+
+    assert mock_rmtree.call_count == 2
+    mock_sleep.assert_called_once_with(0.01)

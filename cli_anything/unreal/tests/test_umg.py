@@ -108,6 +108,36 @@ class TestUMGCore:
         assert "data.get_asset()" in script
 
 
+    @patch("cli_anything.unreal.core.umg._exec_umg_script")
+    def test_set_widget_image(self, mock_exec):
+        from cli_anything.unreal.core.umg import set_widget_image
+
+        mock_exec.return_value = {
+            "status": "ok",
+            "action": "set_image",
+            "widget": {"name": "Icon", "class": "Image"},
+        }
+
+        result = set_widget_image(
+            MagicMock(),
+            "/Game/UI/WBP_Hud",
+            widget_name="Icon",
+            texture_path="/Game/UI/T_Icon",
+            x=12.0,
+            y=24.0,
+            width=64.0,
+            height=32.0,
+            z_order=5,
+        )
+
+        assert result["status"] == "ok"
+        script = mock_exec.call_args.args[1]
+        assert "set_widget_image_properties" in script
+        assert '"/Game/UI/T_Icon"' in script
+        assert "set_position = True" in script
+        assert "set_size = True" in script
+        assert "set_z_order = True" in script
+
 class TestUMGCLI:
     @patch("cli_anything.unreal.core.umg.create_widget_blueprint")
     def test_umg_create_cli(self, mock_create):
@@ -186,3 +216,33 @@ class TestUMGCLI:
         data = json.loads(result.output)
         assert data["status"] == "success"
         assert data["result"]["root"]["class"] == "CanvasPanel"
+
+    @patch("cli_anything.unreal.core.umg.set_widget_image")
+    def test_umg_set_image_cli(self, mock_set):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_set.return_value = {
+            "status": "ok",
+            "action": "set_image",
+            "widget": {"name": "Icon", "class": "Image"},
+        }
+
+        with patch("cli_anything.unreal.commands.umg.require_editor", return_value=MagicMock()):
+            result = CliRunner().invoke(cli, [
+                "--output", "json",
+                "umg", "set-image", "/Game/UI/WBP_Hud",
+                "--name", "Icon",
+                "--texture", "/Game/UI/T_Icon",
+                "--x", "12",
+                "--y", "24",
+                "--w", "64",
+                "--h", "32",
+                "--z", "5",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["widget"]["name"] == "Icon"
+        mock_set.assert_called_once()

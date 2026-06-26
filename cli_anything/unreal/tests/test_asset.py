@@ -38,6 +38,18 @@ class TestAssets:
         assert "_class_filter = 'Blueprint'" in script
         assert "return _cls == _filter or _cls.endswith('Blueprint')" in script
 
+    def test_search_assets_uses_all_assets_fallback(self):
+        from cli_anything.unreal.core.assets import search_assets
+
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"assets": [], "count": 0}
+            search_assets(self._mock_api(), query="SDF", class_name="Texture2D", package_path="/Game/UI/SDF")
+
+        script = mock_run.call_args.args[1]
+        assert "list(_ar.get_assets_by_path" in script
+        assert "get_all_assets" in script
+        assert "startswith(_pkg_prefix + '/')" in script
+
     def test_asset_exists_true(self):
         from cli_anything.unreal.core.assets import asset_exists
 
@@ -87,6 +99,26 @@ class TestAssets:
         result = asset_refs(api, "/Game/M_Unused")
         assert result["count"] == 0
         assert result["referencers"] == []
+
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_texture_source_info_uses_bridge(self, mock_run):
+        from cli_anything.unreal.core.assets import texture_source_info
+
+        mock_run.return_value = {
+            "status": "ok",
+            "asset": "/Game/T_SDF",
+            "source_size": {"x": 128, "y": 64},
+            "source_format": "TSF_BGRA8",
+            "alpha_stats": {"available": True, "min": 0, "max": 255},
+        }
+
+        result = texture_source_info(self._mock_api(), "/Game/T_SDF")
+
+        assert result["status"] == "ok"
+        script = mock_run.call_args.args[1]
+        assert "CliAnythingBridgeLibrary" in script
+        assert "get_texture_source_info" in script
+        assert "Texture2D" in script
 
     def test_asset_delete_not_found(self):
         from cli_anything.unreal.core.assets import asset_delete
@@ -357,6 +389,29 @@ class TestAssetCLI:
             data = json.loads(result.output)
             assert data["status"] == "success"
             assert data["result"]["count"] == 1
+
+    def test_asset_texture_source_cli(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.asset.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.assets.texture_source_info") as mock_info:
+            mock_editor.return_value = MagicMock()
+            mock_info.return_value = {
+                "status": "ok",
+                "asset": "/Game/T_SDF",
+                "source_format": "TSF_BGRA8",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "asset", "texture-source", "/Game/T_SDF",
+            ])
+
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["status"] == "success"
+            assert data["result"]["source_format"] == "TSF_BGRA8"
 
     def test_asset_duplicate_cli(self):
         from click.testing import CliRunner

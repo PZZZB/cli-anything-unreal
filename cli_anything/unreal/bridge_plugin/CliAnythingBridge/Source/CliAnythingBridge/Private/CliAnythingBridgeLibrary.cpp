@@ -3,6 +3,8 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialInterface.h"
+#include "Engine/Texture2D.h"
+#include "Engine/Texture.h"
 #include "MaterialShared.h"
 #include "RHIShaderPlatform.h"
 #include "ShaderCompiler.h"
@@ -25,6 +27,7 @@
 #include "Components/CanvasPanelSlot.h"
 #include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
+#include "Components/Image.h"
 #include "Components/Widget.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "WidgetBlueprint.h"
@@ -146,6 +149,96 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput(UMaterial* 
 	return Json;
 }
 
+FString UCliAnythingBridgeLibrary::GetTextureSourceInfo(UTexture2D* Texture)
+{
+	if (!Texture)
+	{
+		return JsonError(TEXT("Texture is null"));
+	}
+
+	FTextureSource& Source = Texture->Source;
+	const int64 SizeX = Source.GetSizeX();
+	const int64 SizeY = Source.GetSizeY();
+	const int32 NumSlices = Source.GetNumSlices();
+	const int32 NumMips = Source.GetNumMips();
+	const int32 NumLayers = Source.GetNumLayers();
+	const int32 NumBlocks = Source.GetNumBlocks();
+	const int64 SizeOnDisk = Source.GetSizeOnDisk();
+	const bool bHasPayload = Source.HasPayloadData();
+	const ETextureSourceFormat Format = Source.GetFormat();
+	const bool bValidFormat = Format > TSF_Invalid && Format < TSF_MAX;
+	const FTextureSourceFormatInfo& FormatInfo = GTextureSourceFormats[bValidFormat ? Format : TSF_Invalid];
+
+	FString Json = TEXT("{\"status\":\"ok\",\"asset\":\"") + JsonEscape(Texture->GetPathName()) + TEXT("\"");
+	Json += FString::Printf(TEXT(",\"source_size\":{\"x\":%lld,\"y\":%lld,\"slices\":%d}"), SizeX, SizeY, NumSlices);
+	Json += TEXT(",\"source_format\":\"") + JsonEscape(bValidFormat ? FString(FormatInfo.Name) : FString(TEXT("TSF_Invalid"))) + TEXT("\"");
+	Json += FString::Printf(TEXT(",\"source_format_value\":%d"), static_cast<int32>(Format));
+	Json += FString::Printf(TEXT(",\"num_mips\":%d,\"num_layers\":%d,\"num_blocks\":%d"), NumMips, NumLayers, NumBlocks);
+	Json += FString::Printf(TEXT(",\"bytes_per_pixel\":%d,\"num_components\":%d,\"size_on_disk\":%lld"), bValidFormat ? FormatInfo.BytesPerPixel : 0, bValidFormat ? FormatInfo.NumComponents : 0, SizeOnDisk);
+	Json += TEXT(",\"has_payload\":") + FString(bHasPayload ? TEXT("true") : TEXT("false"));
+
+	const uint8* Data = nullptr;
+	int64 MipSize = 0;
+	if (bHasPayload && NumMips > 0 && SizeX > 0 && SizeY > 0)
+	{
+		MipSize = Source.CalcMipSize(0);
+		Data = Source.LockMipReadOnly(0);
+	}
+	Json += FString::Printf(TEXT(",\"mip0_bytes\":%lld"), MipSize);
+
+	auto AppendByteStats = [&Json](const TCHAR* FieldName, const uint8* Bytes, int64 PixelCount, int32 Stride, int32 Offset, int32 FullValue)
+	{
+		if (!Bytes || PixelCount <= 0 || Stride <= 0)
+		{
+			Json += FString::Printf(TEXT(",\"%s\":{\"available\":false}"), FieldName);
+			return;
+		}
+		int32 MinValue = 255;
+		int32 MaxValue = 0;
+		int64 ZeroCount = 0;
+		int64 FullCount = 0;
+		double Sum = 0.0;
+		for (int64 Index = 0; Index < PixelCount; ++Index)
+		{
+			const int32 Value = Bytes[Index * Stride + Offset];
+			MinValue = FMath::Min(MinValue, Value);
+			MaxValue = FMath::Max(MaxValue, Value);
+			ZeroCount += Value == 0 ? 1 : 0;
+			FullCount += Value == FullValue ? 1 : 0;
+			Sum += static_cast<double>(Value);
+		}
+		Json += FString::Printf(
+			TEXT(",\"%s\":{\"available\":true,\"min\":%d,\"max\":%d,\"mean\":%.6f,\"zero_count\":%lld,\"full_count\":%lld,\"nonzero_count\":%lld,\"pixel_count\":%lld}"),
+			FieldName, MinValue, MaxValue, Sum / static_cast<double>(PixelCount), ZeroCount, FullCount, PixelCount - ZeroCount, PixelCount);
+	};
+
+	const int64 PixelCount = SizeX * SizeY * FMath::Max<int32>(NumSlices, 1);
+	if (Data && Format == TSF_BGRA8)
+	{
+		AppendByteStats(TEXT("alpha_stats"), Data, PixelCount, 4, 3, 255);
+	}
+	else
+	{
+		Json += TEXT(",\"alpha_stats\":{\"available\":false,\"reason\":\"alpha stats currently supported for TSF_BGRA8 source data\"}");
+	}
+	if (Data && Format == TSF_G8)
+	{
+		AppendByteStats(TEXT("value_stats"), Data, PixelCount, 1, 0, 255);
+	}
+	else
+	{
+		Json += TEXT(",\"value_stats\":{\"available\":false}");
+	}
+
+	if (Data)
+	{
+		Source.UnlockMip(0);
+	}
+
+	Json += TEXT("}");
+	return Json;
+}
+
 FIntVector4 UCliAnythingBridgeLibrary::GetActiveViewportScreenBounds()
 {
 	FIntVector4 Bounds(0, 0, 0, 0);
@@ -184,7 +277,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.15");
+	return TEXT("1.17");
 }
 
 FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)
@@ -398,6 +491,27 @@ static FString WidgetJson(UWidget* Widget, UWidgetBlueprint* Blueprint)
 		Json += TEXT(",\"text\":\"") + JsonEscape(TextBlock->GetText().ToString()) + TEXT("\"");
 	}
 
+	if (UImage* Image = Cast<UImage>(Widget))
+	{
+		const FSlateBrush& Brush = Image->GetBrush();
+		UObject* Resource = Brush.GetResourceObject();
+		const FVector2D BrushSize = Brush.GetImageSize();
+		Json += TEXT(",\"brush\":{");
+		Json += TEXT("\"resource\":");
+		if (Resource)
+		{
+			Json += TEXT("\"") + JsonEscape(Resource->GetPathName()) + TEXT("\"");
+			Json += TEXT(",\"resource_class\":\"") + JsonEscape(Resource->GetClass()->GetName()) + TEXT("\"");
+		}
+		else
+		{
+			Json += TEXT("null");
+		}
+		Json += FString::Printf(TEXT(",\"image_size\":[%.6g,%.6g]"), BrushSize.X, BrushSize.Y);
+		Json += FString::Printf(TEXT(",\"draw_as\":%d"), static_cast<int32>(Brush.GetDrawType()));
+		Json += TEXT("}");
+	}
+
 	if (UPanelWidget* Panel = Cast<UPanelWidget>(Widget))
 	{
 		Json += TEXT(",\"children\":[");
@@ -519,6 +633,53 @@ FString UCliAnythingBridgeLibrary::AddWidgetToCanvas(UWidgetBlueprint* Blueprint
 	Json += JsonEscape(Canvas->GetName());
 	Json += TEXT("\",\"widget\":");
 	Json += WidgetJson(Child, Blueprint);
+	Json += TEXT("}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::SetWidgetImageProperties(UWidgetBlueprint* Blueprint, const FString& WidgetName, UObject* ResourceObject, bool bSetResource, bool bSetPosition, float X, float Y, bool bSetSize, float Width, float Height, bool bSetZOrder, int32 ZOrder)
+{
+	if (!Blueprint) return JsonError(TEXT("WidgetBlueprint is null."));
+	if (!Blueprint->WidgetTree) return JsonError(TEXT("WidgetBlueprint has no WidgetTree."));
+	if (WidgetName.IsEmpty()) return JsonError(TEXT("Widget name is required."));
+
+	UWidget* Widget = Blueprint->WidgetTree->FindWidget(FName(*WidgetName));
+	if (!Widget) return JsonError(TEXT("Widget not found: ") + WidgetName);
+
+	UImage* Image = Cast<UImage>(Widget);
+	if (!Image) return JsonError(TEXT("Widget is not an Image: ") + WidgetName);
+
+	Image->Modify();
+	if (bSetResource)
+	{
+		if (!ResourceObject) return JsonError(TEXT("Brush resource is null."));
+		Image->SetBrushResourceObject(ResourceObject);
+	}
+
+	if (bSetPosition || bSetSize || bSetZOrder)
+	{
+		UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Image->Slot);
+		if (!CanvasSlot) return JsonError(TEXT("Image widget is not in a CanvasPanelSlot: ") + WidgetName);
+		CanvasSlot->Modify();
+		if (bSetPosition)
+		{
+			CanvasSlot->SetPosition(FVector2D(X, Y));
+		}
+		if (bSetSize)
+		{
+			CanvasSlot->SetSize(FVector2D(Width, Height));
+		}
+		if (bSetZOrder)
+		{
+			CanvasSlot->SetZOrder(ZOrder);
+		}
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	Blueprint->MarkPackageDirty();
+
+	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"set_image\",\"widget\":");
+	Json += WidgetJson(Image, Blueprint);
 	Json += TEXT("}");
 	return Json;
 }
@@ -666,6 +827,60 @@ FString UCliAnythingBridgeLibrary::GetClassInfo(const FString& ClassName, bool b
 	Json += TEXT("]");
 
 	Json += TEXT("}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::GetStructInfo(UScriptStruct* Struct, bool bIncludeInherited)
+{
+	if (!Struct) return TEXT("{}");
+
+	EFieldIteratorFlags::SuperClassFlags SuperFlag = bIncludeInherited
+		? EFieldIteratorFlags::IncludeSuper : EFieldIteratorFlags::ExcludeSuper;
+
+	FString Json = TEXT("{");
+	Json += TEXT("\"struct\":\"") + JsonEscape(Struct->GetName()) + TEXT("\"");
+	Json += TEXT(",\"struct_path\":\"") + JsonEscape(Struct->GetPathName()) + TEXT("\"");
+	Json += TEXT(",\"properties\":[");
+
+	bool bFirst = true;
+	for (TFieldIterator<FProperty> It(Struct, SuperFlag, EFieldIteratorFlags::IncludeDeprecated); It; ++It)
+	{
+		const FProperty* Prop = *It;
+		if (!Prop) continue;
+
+		if (!bFirst) Json += TEXT(",");
+		bFirst = false;
+
+		Json += TEXT("{\"name\":\"") + JsonEscape(Prop->GetName()) + TEXT("\"");
+		Json += TEXT(",\"type\":\"") + JsonEscape(Prop->GetCPPType()) + TEXT("\"");
+		if (const UStruct* OwnerStruct = Prop->GetOwnerStruct())
+		{
+			Json += TEXT(",\"owner\":\"") + JsonEscape(OwnerStruct->GetName()) + TEXT("\"");
+		}
+
+		FString Category = Prop->GetMetaData(TEXT("Category"));
+		if (!Category.IsEmpty())
+		{
+			Json += TEXT(",\"category\":\"") + JsonEscape(Category) + TEXT("\"");
+		}
+
+		FString Tooltip = Prop->GetMetaData(TEXT("Tooltip"));
+		if (!Tooltip.IsEmpty())
+		{
+			Tooltip.ReplaceInline(TEXT("\r\n"), TEXT(" "));
+			Tooltip.ReplaceInline(TEXT("\n"), TEXT(" "));
+			Json += TEXT(",\"tooltip\":\"") + JsonEscape(Tooltip) + TEXT("\"");
+		}
+
+		const EPropertyFlags Flags = Prop->PropertyFlags;
+		Json += TEXT(",\"read\":");
+		Json += (Flags & CPF_BlueprintVisible) ? TEXT("true") : TEXT("false");
+		Json += TEXT(",\"write\":");
+		Json += (Flags & CPF_Edit) ? TEXT("true") : TEXT("false");
+		Json += TEXT("}");
+	}
+
+	Json += TEXT("],\"functions\":[]}");
 	return Json;
 }
 

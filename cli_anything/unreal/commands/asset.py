@@ -61,6 +61,22 @@ def asset_exists_cmd(state: AppState, asset_path):
     output(result, state)
 
 
+@asset_group.command("texture-source")
+@click.argument("asset_path")
+@handle_error
+@click.pass_obj
+def asset_texture_source_cmd(state: AppState, asset_path):
+    """Read Texture2D Source size/format and alpha/value stats via bridge.
+
+    Example: asset texture-source /Game/UI/T_SDF
+    """
+    from cli_anything.unreal.core.assets import texture_source_info
+
+    api = require_editor(state)
+    result = texture_source_info(api, asset_path, project_dir=state.session.project_dir)
+    output(result, state)
+
+
 @asset_group.command("delete")
 @click.argument("asset_path")
 @click.option("--force", is_flag=True, default=False,

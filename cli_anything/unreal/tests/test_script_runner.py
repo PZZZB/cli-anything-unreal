@@ -598,6 +598,82 @@ class TestScriptRunner:
             else:
                 sys.modules.pop("unreal", None)
 
+    def test_api_discover_struct_custom_input(self):
+        """api_discover should inspect UE Python struct wrappers such as CustomInput."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        mock_api = MagicMock()
+
+        import types, sys
+
+        class FakeProp:
+            def __init__(self, name, cpp_type):
+                self._name = name
+                self._cpp_type = cpp_type
+
+            def get_name(self):
+                return self._name
+
+            def get_cpp_type(self):
+                return self._cpp_type
+
+            def get_tool_tip_text(self):
+                return ""
+
+        class FakeStruct:
+            def get_name(self):
+                return "CustomInput"
+
+            def get_path_name(self):
+                return "/Script/Engine.CustomInput"
+
+            def get_properties(self):
+                return [FakeProp("InputName", "FName"), FakeProp("Input", "FExpressionInput")]
+
+        class FakeCustomInput:
+            @staticmethod
+            def static_struct():
+                return FakeStruct()
+
+        class FakeBridge:
+            @staticmethod
+            def get_class_info(class_name, include_inherited):
+                return "{}"
+
+            @staticmethod
+            def get_struct_info(struct_obj, include_inherited):
+                import json as _json
+                return _json.dumps({
+                    "struct": "CustomInput",
+                    "struct_path": "/Script/Engine.CustomInput",
+                    "properties": [
+                        {"name": "InputName", "type": "FName", "owner": "CustomInput"},
+                        {"name": "Input", "type": "FExpressionInput", "owner": "CustomInput"},
+                    ],
+                    "functions": [],
+                })
+
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.CliAnythingBridgeLibrary = FakeBridge
+        fake_unreal.CustomInput = FakeCustomInput
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(mock_api, "CustomInput", timeout=5)
+            assert result["struct"] == "CustomInput"
+            assert result["full_path"] == "unreal.CustomInput"
+            assert result["property_count"] == 2
+            assert "InputName" in result["properties"]
+            assert result["functions"] == []
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
     def test_api_discover_unresolvable_target(self):
         """api_discover should return error for unresolvable target."""
         from cli_anything.unreal.core.script_runner import api_discover

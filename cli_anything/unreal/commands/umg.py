@@ -93,6 +93,40 @@ def umg_add_widget(
     output(result, state)
 
 
+@umg_group.command("set-image")
+@click.argument("widget_path")
+@click.option("--name", "widget_name", required=True, help="Existing Image widget name")
+@click.option("--texture", "texture_path", default=None, help="Brush resource texture/object path")
+@click.option("--x", default=None, type=float, help="Canvas slot X")
+@click.option("--y", default=None, type=float, help="Canvas slot Y")
+@click.option("--w", "width", default=None, type=float, help="Canvas slot width")
+@click.option("--h", "height", default=None, type=float, help="Canvas slot height")
+@click.option("--z", "z_order", default=None, type=int, help="Canvas slot Z order")
+@handle_error
+@click.pass_obj
+def umg_set_image(state: AppState, widget_path, widget_name, texture_path, x, y, width, height, z_order):
+    """Edit an existing Image widget brush resource and CanvasPanelSlot layout.
+
+    WIDGET_PATH accepts package, object, generated-class, or WidgetTree subobject paths.
+    """
+    from cli_anything.unreal.core.umg import set_widget_image
+
+    api = require_editor(state)
+    result = set_widget_image(
+        api,
+        widget_path,
+        widget_name=widget_name,
+        texture_path=texture_path,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        z_order=z_order,
+        project_dir=state.session.project_dir,
+    )
+    output(result, state)
+
+
 @umg_group.command("tree")
 @click.argument("widget_path")
 @handle_error

@@ -211,7 +211,13 @@ def _add_online_bridge_status(entry: dict) -> None:
 
     entry["plugin_match"] = loaded is not None and bundled is not None and loaded == bundled
     if not entry["plugin_match"] and entry.get("project_path"):
-        entry["suggestion"] = "CliAnythingBridge plugin is missing or version-mismatched. Run editor plugin-upgrade for this project."
+        entry["restart_required"] = True
+        entry["message"] = (
+            f"running editor loaded CliAnythingBridge {loaded or 'missing'}, "
+            f"but ue-cli bundles {bundled or 'unknown'}. UE cannot hot-reload this C++ bridge safely; "
+            "run editor plugin-upgrade to deploy, compile, restart, then retry bridge commands."
+        )
+        entry["suggestion"] = "CliAnythingBridge plugin is missing or version-mismatched. Run editor plugin-upgrade; it will restart the editor when needed."
         entry["next_command"] = f'ue-cli --project "{entry["project_path"]}" editor plugin-upgrade'
 
 
@@ -523,6 +529,25 @@ def _check_port_in_use(poll_port, state) -> dict | None:
             "message": f"TCP port {poll_port} is already in use.",
         }
     return None
+
+
+def _remove_tree_with_retries(path: Path, *, attempts: int = 30, delay: float = 1.0) -> None:
+    """Remove a tree, waiting for Unreal to release locked plugin DLLs."""
+    import shutil
+
+    if not path.exists():
+        return
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(str(path))
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(delay)
+    raise last_error
 
 
 def _deploy_bridge(session, state) -> dict:
@@ -1200,9 +1225,13 @@ def editor_plugin_upgrade(state: AppState):
             return
 
         _close_editor_for_project(api, state)
+        for _ in range(30):
+            if not api.is_alive():
+                break
+            time.sleep(1)
 
     if plugin_dir.exists():
-        shutil.rmtree(str(plugin_dir))
+        _remove_tree_with_retries(plugin_dir)
 
     deploy = ensure_plugin_deployed(project_dir)
     if not deploy["deployed"]:
@@ -1211,9 +1240,9 @@ def editor_plugin_upgrade(state: AppState):
     plugin_intermediate = plugin_dir / "Intermediate"
     plugin_binaries = plugin_dir / "Binaries"
     if plugin_intermediate.exists():
-        shutil.rmtree(str(plugin_intermediate))
+        _remove_tree_with_retries(plugin_intermediate)
     if plugin_binaries.exists():
-        shutil.rmtree(str(plugin_binaries))
+        _remove_tree_with_retries(plugin_binaries)
 
     from cli_anything.unreal.core.build import compile_project
     build_result = compile_project(state.session.project_path, engine_root=state.session.engine_root)

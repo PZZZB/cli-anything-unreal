@@ -274,3 +274,8 @@ ue-cli editor api-discover "/Game/Maps/L.L:PersistentLevel.MyActor_0"
 | Timeout | Editor busy: shaders/loading | Run `editor status`; if reachable, wait 10-15s and retry |
 | "modules built with different engine version" | Binary/engine mismatch | `editor preflight` -> `build compile` -> `editor launch` |
 | Screenshot fails | Editor window not visible/minimized | Foreground editor, retry |
+
+
+## Bridge Version Mismatch
+
+If `editor status` reports `plugin_match=false`, the editor has already loaded an older or missing `CliAnythingBridge` DLL. UE cannot safely hot-reload that C++ bridge. Run the reported `editor plugin-upgrade` command so ue-cli can deploy, recompile, restart the editor, then retry bridge-backed commands.

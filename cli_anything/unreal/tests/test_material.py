@@ -810,6 +810,18 @@ class TestMaterialEditing:
         assert "bridge.get_material_compile_errors(mat)" in script
         assert '"material": loaded_asset_path' in script
 
+    @patch("cli_anything.unreal.core.materials.ensure_plugin_deployed")
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_get_errors_does_not_deploy_bridge(self, mock_exec, mock_deploy):
+        from cli_anything.unreal.core.materials import get_material_errors
+
+        mock_exec.return_value = {"errors": [], "has_errors": False, "source": "plugin"}
+
+        result = get_material_errors(MagicMock(), "/Game/M_Test", project_dir="F:/RXGame")
+
+        assert result["source"] == "plugin"
+        mock_deploy.assert_not_called()
+
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_recompile_not_found(self, mock_exec):
         from cli_anything.unreal.core.materials import recompile_material
@@ -1015,18 +1027,21 @@ class TestMaterialErrorsPlugin:
         result = get_material_errors(MagicMock(), "/Game/M_Test", project_dir="/tmp/proj")
         assert "error" in result
         assert "not loaded" in result["error"]
+        assert "plugin-upgrade" in result["error"]
         assert "recompile" in result["error"]
 
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
     @patch("cli_anything.unreal.core.materials.ensure_plugin_deployed")
-    def test_deploy_failure_returns_error(self, mock_deploy):
-        """Returns error when plugin deployment fails."""
+    def test_get_errors_ignores_deploy_failure(self, mock_deploy, mock_exec):
+        """Read-only get-errors never touches plugin deployment state."""
         from cli_anything.unreal.core.materials import get_material_errors
 
         mock_deploy.return_value = {"deployed": False, "error": "Source not found"}
+        mock_exec.return_value = {"errors": [], "warnings": [], "has_errors": False, "source": "plugin"}
 
         result = get_material_errors(MagicMock(), "/Game/M_Test", project_dir="/tmp/proj")
-        assert "error" in result
-        assert "Source not found" in result["error"]
+        assert result["source"] == "plugin"
+        mock_deploy.assert_not_called()
 
 
 

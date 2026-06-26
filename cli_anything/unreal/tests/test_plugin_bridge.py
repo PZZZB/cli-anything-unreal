@@ -133,7 +133,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.15"
+        assert version == "1.17"
 
     def test_bridge_declares_umg_helpers(self):
         """UMG authoring helpers live in the bridge because WidgetTree fields are protected."""
@@ -177,6 +177,61 @@ class TestPluginBridge:
 
         assert "DisconnectMaterialExpressionInput" in header
         assert "DisconnectMaterialExpressionInput" in cpp
+
+    def test_bridge_declares_struct_info_helper(self):
+        """api-discover needs C++ reflection for UScriptStruct types such as CustomInput."""
+        root = Path(__file__).parent.parent / "bridge_plugin" / "CliAnythingBridge"
+        header = (root / "Source" / "CliAnythingBridge" / "Public" / "CliAnythingBridgeLibrary.h").read_text(encoding="utf-8")
+        cpp = (root / "Source" / "CliAnythingBridge" / "Private" / "CliAnythingBridgeLibrary.cpp").read_text(encoding="utf-8")
+
+        assert "GetStructInfo" in header
+        assert "GetStructInfo" in cpp
+        assert "UScriptStruct" in header
+        assert "TFieldIterator<FProperty> It(Struct" in cpp
+
+    def test_bridge_declares_texture_source_helper(self):
+        """TextureSource inspection needs C++ because UE Python hides Texture2D.Source."""
+        plugin_dir = Path(__file__).resolve().parents[1] / "bridge_plugin" / "CliAnythingBridge"
+        header = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Public"
+            / "CliAnythingBridgeLibrary.h"
+        ).read_text(encoding="utf-8")
+        cpp = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+
+        assert "GetTextureSourceInfo" in header
+        assert "GetTextureSourceInfo" in cpp
+        assert "LockMipReadOnly" in cpp
+
+    def test_bridge_declares_umg_image_helper(self):
+        """WidgetBlueprint Image slot/brush editing needs bridge access to WidgetTree."""
+        plugin_dir = Path(__file__).resolve().parents[1] / "bridge_plugin" / "CliAnythingBridge"
+        header = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Public"
+            / "CliAnythingBridgeLibrary.h"
+        ).read_text(encoding="utf-8")
+        cpp = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+
+        assert "SetWidgetImageProperties" in header
+        assert "SetWidgetImageProperties" in cpp
+        assert "SetBrushResourceObject" in cpp
 
     def test_get_loaded_plugin_version(self):
         """get_loaded_plugin_version queries the running editor."""

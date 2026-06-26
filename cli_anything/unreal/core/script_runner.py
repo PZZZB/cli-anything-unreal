@@ -253,10 +253,164 @@ def _execute(
 _DISCOVER_FUNC = '''\
 import json as _cli_json, re as _cli_re, unreal as _cli_unreal
 
-def _cli_discover_class(_class_name, _query=None, _detail=None):
+def _cli_prop_name(_prop):
+    try:
+        return str(_prop.get_name())
+    except Exception:
+        return str(getattr(_prop, "name", ""))
+
+def _cli_prop_type(_prop):
+    try:
+        _fn = getattr(_prop, "get_cpp_type", None)
+        if _fn:
+            return str(_fn())
+    except Exception:
+        pass
+    return str(_prop.__class__.__name__)
+
+def _cli_prop_tooltip(_prop):
+    for _name in ("get_tool_tip_text", "get_tooltip_text"):
+        try:
+            _fn = getattr(_prop, _name, None)
+            if _fn:
+                return str(_fn() or "")
+        except Exception:
+            pass
+    return ""
+
+def _cli_format_discovery(_data, _kind, _name, _query=None, _detail=None, _full_path=None):
+    _props = _data.get("properties", [])
+    _funcs = _data.get("functions", [])
+    _target_name = _data.get(_kind, _name)
+    if _detail:
+        _names = [n.strip() for n in _detail.split(",") if n.strip()]
+        _name_set = set(_names)
+        _items = []
+        _found = set()
+        for _p in _props:
+            if _p["name"] in _name_set:
+                _items.append({"kind": "property", "name": _p["name"], "detail": _p})
+                _found.add(_p["name"])
+        for _f in _funcs:
+            if _f["name"] in _name_set:
+                _items.append({"kind": "function", "name": _f["name"], "detail": _f})
+                _found.add(_f["name"])
+        _out = {_kind: _target_name, "items": _items}
+        _not_found = [n for n in _names if n not in _found]
+        if _not_found:
+            _out["not_found"] = _not_found
+    else:
+        if _query:
+            try:
+                _pat = _cli_re.compile(_query, _cli_re.IGNORECASE)
+            except _cli_re.error as _e:
+                return {"error": "Invalid regex for --query: " + str(_e), "query": _query}
+            _funcs = [f for f in _funcs if _pat.search(f["name"])]
+            _props = [p for p in _props if _pat.search(p["name"])]
+        _out = {
+            _kind: _target_name,
+            "properties": [_p["name"] for _p in _props],
+            "property_count": len(_props),
+            "functions": [_f["name"] for _f in _funcs],
+            "function_count": len(_funcs),
+        }
+    if _full_path:
+        _out["full_path"] = _full_path
+    if _kind == "struct" and _data.get("struct_path"):
+        _out["struct_path"] = _data.get("struct_path")
+    return _out
+
+def _cli_discover_struct(_struct_name, _query=None, _detail=None, _full_path=None):
+    _wrapper = getattr(_cli_unreal, _struct_name, None)
+    _struct = None
+    if _wrapper is not None:
+        try:
+            _static_struct = getattr(_wrapper, "static_struct", None)
+            if _static_struct:
+                _struct = _static_struct()
+        except Exception:
+            _struct = None
+    if _struct is None:
+        return None
+
+    _bridge = getattr(_cli_unreal, "CliAnythingBridgeLibrary", None)
+    _get_struct_info = getattr(_bridge, "get_struct_info", None) if _bridge else None
+    if _get_struct_info:
+        try:
+            _raw = _get_struct_info(_struct, True)
+            if _raw and _raw != "{}":
+                _data = _cli_json.loads(_raw)
+                return _cli_format_discovery(_data, "struct", _struct_name, _query=_query, _detail=_detail, _full_path=_full_path)
+        except Exception as _e:
+            return {"error": "Struct reflection failed: " + _struct_name + " (" + str(_e) + ")"}
+
+    try:
+        _props = list(_struct.get_properties())
+    except Exception as _e:
+        return {"error": "Struct properties not readable: " + _struct_name + " (" + str(_e) + ")"}
+
+    _details = []
+    for _p in _props:
+        _pname = _cli_prop_name(_p)
+        if not _pname:
+            continue
+        _details.append({
+            "name": _pname,
+            "type": _cli_prop_type(_p),
+            "tooltip": _cli_prop_tooltip(_p),
+            "owner": _struct_name,
+        })
+
+    if _detail:
+        _names = [n.strip() for n in _detail.split(",") if n.strip()]
+        _name_set = set(_names)
+        _items = []
+        _found = set()
+        for _p in _details:
+            if _p["name"] in _name_set:
+                _items.append({"kind": "property", "name": _p["name"], "detail": _p})
+                _found.add(_p["name"])
+        _out = {"struct": _struct_name, "items": _items, "functions": [], "function_count": 0}
+        _not_found = [n for n in _names if n not in _found]
+        if _not_found:
+            _out["not_found"] = _not_found
+        if _full_path:
+            _out["full_path"] = _full_path
+        try:
+            _out["struct_path"] = str(_struct.get_path_name())
+        except Exception:
+            pass
+        return _out
+
+    if _query:
+        try:
+            _pat = _cli_re.compile(_query, _cli_re.IGNORECASE)
+        except _cli_re.error as _e:
+            return {"error": "Invalid regex for --query: " + str(_e), "query": _query}
+        _details = [p for p in _details if _pat.search(p["name"])]
+
+    _out = {
+        "struct": _struct_name,
+        "properties": [_p["name"] for _p in _details],
+        "property_count": len(_details),
+        "functions": [],
+        "function_count": 0,
+    }
+    if _full_path:
+        _out["full_path"] = _full_path
+    try:
+        _out["struct_path"] = str(_struct.get_path_name())
+    except Exception:
+        pass
+    return _out
+
+def _cli_discover_class(_class_name, _query=None, _detail=None, _full_path=None):
     _raw = _cli_unreal.CliAnythingBridgeLibrary.get_class_info(_class_name, True)
     if not _raw or _raw == "{}":
-        return {"error": "Class not found: " + _class_name}
+        _struct_result = _cli_discover_struct(_class_name, _query=_query, _detail=_detail, _full_path=_full_path)
+        if _struct_result is not None:
+            return _struct_result
+        return {"error": "Class not found; struct not found: " + _class_name}
 
     _data = _cli_json.loads(_raw)
 
@@ -308,7 +462,7 @@ if _parts[0] != "unreal":
     _parts = ["unreal"] + _parts
 _class_name = _parts[-1]
 
-result = _cli_discover_class(_class_name, _query={query!r}, _detail={detail!r})
+result = _cli_discover_class(_class_name, _query={query!r}, _detail={detail!r}, _full_path=".".join(_parts))
 if "error" not in result and "full_path" not in result:
     result["target_name"] = _class_name
     result["full_path"] = ".".join(_parts)

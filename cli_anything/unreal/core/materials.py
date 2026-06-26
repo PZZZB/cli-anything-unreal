@@ -1105,23 +1105,18 @@ def get_material_errors(
     fresh errors after making changes.
 
     Requires the bridge plugin to be compiled and loaded in the editor.
-    If the plugin is not deployed, it will be auto-deployed and an error
-    returned asking the caller to recompile and restart.
+    This read-only command never deploys or rewrites the project plugin while
+    the editor may hold the bridge DLL locked.
 
     Args:
         api: Connected UEEditorAPI instance.
         material_path: Content path (e.g. /Game/MyMaterial).
-        project_dir: Project directory for auto-deploying the plugin.
+        project_dir: Project directory used only for upgrade guidance.
 
     Returns:
         {"errors": [...], "warnings": [...], "has_errors": bool, "source": "plugin"}
         or {"error": "..."} if plugin not available.
     """
-    if project_dir:
-        deploy_result = ensure_plugin_deployed(project_dir)
-        if not deploy_result["deployed"]:
-            return {"error": deploy_result.get("error", "Plugin deployment failed")}
-
     result = _exec_material_script(
         api,
         _PLUGIN_GET_ERRORS_SCRIPT,
@@ -1133,10 +1128,10 @@ def get_material_errors(
         plugin_dir = f"{project_dir}/Plugins/CliAnythingBridge" if project_dir else "<project>/Plugins/CliAnythingBridge"
         return {
             "error": (
-                "Bridge plugin not loaded. "
-                f"Plugin source has been deployed to {plugin_dir}. "
-                "Run 'editor plugin-upgrade' to compile and activate, "
-                "or manually recompile the project and restart the editor."
+                "Bridge plugin not loaded in this editor. "
+                f"Project plugin path: {plugin_dir}. "
+                "Run 'editor plugin-upgrade' to deploy/recompile/restart, "
+                "then retry material get-errors."
             )
         }
 
