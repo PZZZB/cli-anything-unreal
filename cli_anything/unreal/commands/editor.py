@@ -15,6 +15,10 @@ from cli_anything.unreal.commands import AppError, AppState, handle_error, outpu
 from cli_anything.unreal.core.tasks import cancel_task, load_task, submit_task, task_progress, wait_for_task
 
 
+DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 110
+DEFAULT_EDITOR_LAUNCH_WORKER_TIMEOUT_SECONDS = 300
+
+
 def _load_command_project(state: AppState, project_path: str | None) -> None:
     if not project_path:
         return
@@ -320,6 +324,35 @@ def _filter_editor_status_instances(instances: list[dict], project_path: str | N
         item for item in instances
         if _same_project_path(item.get("project_path"), project_path)
     ]
+
+
+def _launch_wait_timeouts(timeout: int | None) -> tuple[int, int]:
+    if timeout is not None:
+        return timeout, timeout
+    return DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS, DEFAULT_EDITOR_LAUNCH_WORKER_TIMEOUT_SECONDS
+
+
+def _recover_online_launch_result(state: AppState, task_id: str, current_task: dict) -> dict | None:
+    try:
+        instances = _scan_editor_status_instances(state, "30010-30020")
+        instances = _filter_editor_status_instances(instances, state.session.project_path)
+    except Exception:
+        return None
+
+    online = next((item for item in instances if item.get("status") == "online"), None)
+    if online is None:
+        return None
+
+    result = dict(online)
+    result["task_id"] = task_id
+    result["command"] = "editor.launch"
+    result["launch_task_status"] = current_task.get("status", "unknown")
+    result["recovered_from"] = "launch_task_wait"
+    if not result.get("pid") and current_task.get("pid"):
+        result["pid"] = current_task.get("pid")
+    if current_task.get("log_file") and not result.get("log_file"):
+        result["log_file"] = current_task.get("log_file")
+    return result
 
 
 @editor_group.command("status")
@@ -763,6 +796,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, extra_args):
     _load_command_project(state, project_path)
     require_project(state)
+    foreground_timeout, worker_timeout = _launch_wait_timeouts(timeout)
     duplicate = _check_already_running(state.session, state)
     if duplicate is not None:
         if duplicate.get("status") == "already_running":
@@ -776,7 +810,7 @@ def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, ext
         "project_path": state.session.project_path,
         "port": state.session.port,
         "map_path": map_path,
-        "timeout": timeout,
+        "timeout": worker_timeout,
         "extra_args": list(extra_args) if extra_args else [],
     }
     task = submit_task("editor.launch", payload)
@@ -784,21 +818,31 @@ def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, ext
         output({"task_id": task["task_id"], "status": "submitted", "suggested_poll_interval_seconds": 5}, state)
         return
 
-    final_task = wait_for_task(task["task_id"], timeout)
+    final_task = wait_for_task(task["task_id"], foreground_timeout)
     if final_task is None:
         current = load_task(task["task_id"]) or task
+        online_result = _recover_online_launch_result(state, task["task_id"], current)
+        if online_result is not None:
+            output(online_result, state)
+            return
+        progress = task_progress(current)
+        if current.get("status") not in {"completed", "failed", "timeout", "cancelled"}:
+            progress["status"] = "launching"
+            progress["foreground_wait_timeout_seconds"] = foreground_timeout
+            progress["message"] = "Editor launch is still in progress; poll this task or editor status."
+            progress["next_command"] = f'ue-cli --project "{state.session.project_path}" editor status {task["task_id"]}'
         output(
-            {
-                "task_id": task["task_id"],
-                "status": "timeout",
-                "progress": task_progress(current).get("progress", 0),
-                "suggested_poll_interval_seconds": 5,
-            },
+            progress,
             state,
         )
         return
 
     progress = task_progress(final_task)
+    if final_task.get("status") == "timeout":
+        online_result = _recover_online_launch_result(state, task["task_id"], final_task)
+        if online_result is not None:
+            output(online_result, state)
+            return
     if final_task.get("status") == "failed":
         error = final_task.get("error", {})
         raise AppError(error.get("code", "TASK_EXECUTION_FAILED"), error.get("message", "Editor launch failed"), exit_code=3, details=progress)

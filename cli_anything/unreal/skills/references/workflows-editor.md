@@ -23,7 +23,7 @@ Step 4: editor status (verify)
 
 Key points:
 - `editor preflight` verifies Remote Control config and enables the `RemoteControl` plugin when needed.
-- `editor launch` waits until API online or timeout. Do not use `sleep`.
+- `editor launch` waits until API online or timeout. Without `--timeout`, foreground wait is bounded; slow launches return `launching` with a task id instead of hanging until the shell kills ue-cli. Do not use `sleep`.
 - Async: `--no-wait`, then `editor status <task_id>` or `task status <task_id>`.
 - DLL locked build fail -> `editor close`, then compile. If `editor plugin-upgrade` reports `LNK1104` with `locked_file`, close/kill all UnrealEditor processes for that project and retry the reported command. `plugin-upgrade` waits for matching editor processes to exit before compiling, but another stale process can still hold third-party plugin DLLs.
 - `build compile --platform Win64` fails fast with `EDITOR_RUNNING_LOCKS_DLLS` when the same project editor is running. This avoids wasting minutes before UBT reaches a locked `UnrealEditor-*.dll` link step.
