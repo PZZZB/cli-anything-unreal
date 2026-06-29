@@ -225,6 +225,28 @@ def _add_online_bridge_status(entry: dict) -> None:
         entry["next_command"] = f'ue-cli --project "{entry["project_path"]}" editor plugin-upgrade'
 
 
+def _add_online_bridge_statuses(entries: list[dict]) -> None:
+    targets = [
+        entry for entry in entries
+        if entry.get("status") == "online" and entry.get("port")
+    ]
+    if not targets:
+        return
+    if len(targets) == 1:
+        _add_online_bridge_status(targets[0])
+        return
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as executor:
+        futures = [executor.submit(_add_online_bridge_status, entry) for entry in targets]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception:
+                pass
+
+
 def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict]:
     from cli_anything.unreal.utils.ue_backend import find_running_editors
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI, scan_editor_ports
@@ -266,8 +288,28 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
 
     pid_by_port: dict[int, int | None] = {}
     port_by_pid: dict[int, int] = {}
-    for port in sorted(online_by_port):
-        owner_pid = UEEditorAPI._get_pid_listening_on_port(port)
+    ports_to_resolve = sorted(online_by_port)
+    if len(ports_to_resolve) <= 1:
+        resolved = [
+            (port, UEEditorAPI._get_pid_listening_on_port(port))
+            for port in ports_to_resolve
+        ]
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        resolved = []
+        with ThreadPoolExecutor(max_workers=min(8, len(ports_to_resolve))) as executor:
+            futures = {
+                executor.submit(UEEditorAPI._get_pid_listening_on_port, port): port
+                for port in ports_to_resolve
+            }
+            for future in as_completed(futures):
+                port = futures[future]
+                try:
+                    resolved.append((port, future.result()))
+                except Exception:
+                    resolved.append((port, None))
+    for port, owner_pid in resolved:
         pid_by_port[port] = owner_pid
         if owner_pid:
             port_by_pid[int(owner_pid)] = port
@@ -288,7 +330,6 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
         if port is not None:
             used_ports.add(port)
             entry = _compact_editor_entry("online", pid, port, project_path)
-            _add_online_bridge_status(entry)
         else:
             entry = _compact_editor_entry("offline", pid, _project_config_port(project_path), project_path)
             _add_offline_recovery_hint(entry)
@@ -311,9 +352,9 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
             port,
             project_path,
         )
-        _add_online_bridge_status(entry)
         instances.append(entry)
 
+    _add_online_bridge_statuses(instances)
     return instances
 
 

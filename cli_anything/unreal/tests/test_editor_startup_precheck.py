@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -302,6 +304,82 @@ def test_editor_status_bridge_probe_uses_short_timeout(mini_project):
     assert result.exit_code == 0
     assert captured["timeout"] <= 5.0
     assert captured["raise_on_error"] is True
+
+
+def test_editor_status_bridge_probes_online_ports_concurrently():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    calls = []
+    calls_lock = threading.Lock()
+    both_started = threading.Event()
+
+    def fake_loaded(api, timeout=10.0, raise_on_error=False):
+        with calls_lock:
+            calls.append(api.port)
+            if len(calls) == 2:
+                both_started.set()
+        if not both_started.wait(0.5):
+            return None
+        return "1.13"
+
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+            {"port": 30021, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=fake_loaded):
+        start = time.perf_counter()
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status", "--all",
+        ])
+        elapsed = time.perf_counter() - start
+
+    assert result.exit_code == 0, result.output
+    assert sorted(calls) == [30020, 30021]
+    assert elapsed < 0.45
+
+
+def test_editor_status_resolves_online_port_owners_concurrently():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    calls = []
+    calls_lock = threading.Lock()
+    both_started = threading.Event()
+
+    def fake_pid(port):
+        with calls_lock:
+            calls.append(port)
+            if len(calls) == 2:
+                both_started.set()
+        if not both_started.wait(0.5):
+            return None
+        return None
+
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+            {"port": 30021, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", side_effect=fake_pid), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.13"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.13"):
+        start = time.perf_counter()
+        result = runner.invoke(cli, [
+            "--output", "json",
+            "editor", "status", "--all",
+        ])
+        elapsed = time.perf_counter() - start
+
+    assert result.exit_code == 0, result.output
+    assert sorted(calls) == [30020, 30021]
+    assert elapsed < 0.45
 
 
 def test_editor_status_lists_all_editor_processes(mini_project):
