@@ -12,7 +12,7 @@ from pathlib import Path
 import click
 
 from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_editor, require_project
-from cli_anything.unreal.core.tasks import cancel_task, load_task, submit_task, task_progress, wait_for_task
+from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, cancel_task, iter_tasks, load_task, submit_task, task_progress, wait_for_task
 
 
 DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 110
@@ -178,13 +178,56 @@ def _compact_editor_entry(status: str, pid: int | None, port: int | None, projec
     }
 
 
+def _active_launch_task_for_project(project_path: str | None, pid: int | None = None) -> dict | None:
+    if not project_path:
+        return None
+    now = time.time()
+    for task in iter_tasks():
+        if task.get("command") != "editor.launch":
+            continue
+        if task.get("status") in FINAL_TASK_STATUSES:
+            continue
+        if now - float(task.get("updated_at") or task.get("created_at") or 0) > 7200:
+            continue
+        payload = task.get("payload") or {}
+        if not _same_project_path(payload.get("project_path"), project_path):
+            continue
+        task_pid = task.get("pid") or (task.get("result") or {}).get("pid")
+        if pid is not None and task_pid is not None:
+            try:
+                if int(task_pid) != int(pid):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        if pid is not None and task_pid is None:
+            continue
+        return task
+    return None
+
+
+def _add_launching_recovery_hint(entry: dict, task: dict) -> None:
+    entry["status"] = "launching"
+    entry["task_id"] = task.get("task_id")
+    entry["launch_task_status"] = task.get("status")
+    if task.get("worker_pid"):
+        entry["worker_pid"] = task.get("worker_pid")
+    log_file = task.get("log_file") or (task.get("result") or {}).get("log_file")
+    if log_file:
+        entry["log_file"] = log_file
+    entry["message"] = "UnrealEditor process is running for an active launch task, but the Remote Control API is not reachable yet."
+    entry["suggestion"] = "Wait for startup to finish or inspect the launch task; do not start another launch unless the task times out or fails."
+    project_path = entry.get("project_path")
+    if project_path and task.get("task_id"):
+        entry["next_command"] = f'ue-cli --project "{project_path}" editor status {task["task_id"]}'
+
+
 def _add_offline_recovery_hint(entry: dict) -> None:
     entry["message"] = "UnrealEditor process is running, but the Remote Control API is not reachable."
     project_path = entry.get("project_path")
     if project_path:
         entry["suggestion"] = (
-            "Run editor launch for this project. It will terminate a stale matching editor process "
-            "and start a fresh editor if needed."
+            "No active launch task owns this process. Run editor launch to terminate the stale matching "
+            "process and start a fresh editor if needed."
         )
         entry["next_command"] = f'ue-cli --project "{project_path}" editor launch'
     else:
@@ -332,7 +375,11 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
             entry = _compact_editor_entry("online", pid, port, project_path)
         else:
             entry = _compact_editor_entry("offline", pid, _project_config_port(project_path), project_path)
-            _add_offline_recovery_hint(entry)
+            active_launch = _active_launch_task_for_project(project_path, pid)
+            if active_launch:
+                _add_launching_recovery_hint(entry, active_launch)
+            else:
+                _add_offline_recovery_hint(entry)
             log_error = _editor_log_error(project_path)
             if log_error:
                 entry["log_error"] = log_error
@@ -597,6 +644,21 @@ def _check_already_running(session, state) -> dict | None:
                     "project": proc_project,
                     "message": f"Editor is already running for this project (PID {editor_pid}).",
                 }
+            active_launch = _active_launch_task_for_project(proc_project, editor_pid)
+            if active_launch:
+                starting = {
+                    "status": "starting",
+                    "pid": editor_pid,
+                    "project": proc_project,
+                    "port": state.session.port,
+                    "task_id": active_launch.get("task_id"),
+                    "launch_task_status": active_launch.get("status"),
+                    "message": f"Editor launch is already in progress for this project (PID {editor_pid}), but the API is not reachable yet.",
+                    "suggestion": "Wait for the active launch task or inspect it with editor status <task_id> before retrying launch.",
+                }
+                if active_launch.get("task_id"):
+                    starting["next_command"] = f'ue-cli --project "{proc_project}" editor status {active_launch["task_id"]}'
+                return starting
             zombie = {
                 "status": "zombie",
                 "pid": editor_pid,
@@ -877,7 +939,9 @@ def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, ext
     if duplicate is not None:
         if duplicate.get("status") == "already_running":
             raise AppError("ALREADY_RUNNING", duplicate["message"], exit_code=3, details=duplicate)
-        # zombie or starting — auto-kill the stale process and proceed
+        if duplicate.get("status") == "starting":
+            raise AppError("EDITOR_STARTING", duplicate["message"], exit_code=3, details=duplicate)
+        # zombie: auto-kill the stale process and proceed
         from cli_anything.unreal.utils.ue_backend import _kill_process_tree
         _kill_process_tree(int(duplicate["pid"]))
         time.sleep(2)

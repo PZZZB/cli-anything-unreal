@@ -61,6 +61,18 @@ def save_task(task: dict) -> dict:
     return task
 
 
+def iter_tasks() -> list[dict]:
+    """Return readable task records, newest first."""
+    tasks: list[dict] = []
+    for path in _task_root().glob("*.json"):
+        try:
+            tasks.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    tasks.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+    return tasks
+
+
 def task_progress(task: dict) -> dict:
     status = task.get("status", "submitted")
     result = {

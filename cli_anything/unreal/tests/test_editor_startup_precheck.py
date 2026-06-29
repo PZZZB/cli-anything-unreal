@@ -431,6 +431,46 @@ def test_editor_status_lists_all_editor_processes(mini_project):
     assert offline["next_command"] == f'ue-cli --project "{other_project}" editor launch'
 
 
+def test_editor_status_marks_offline_process_as_launching_when_task_active(mini_project, tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import create_task, save_task
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    task = create_task("editor.launch", {"project_path": mini_project, "port": 30011})
+    task["status"] = "running"
+    task["pid"] = 16044
+    task["result"] = {"pid": 16044, "bridge_binary_status": {"ready": True}}
+    save_task(task)
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 16044, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011), \
+         patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+             "ready": True,
+             "engine": {"errors": [], "warnings": []},
+             "project": {"errors": [], "warnings": []},
+         }):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    item = data["result"][0]
+    assert item["status"] == "launching"
+    assert item["pid"] == 16044
+    assert item["port"] == 30011
+    assert item["task_id"] == task["task_id"]
+    assert item["launch_task_status"] == "running"
+    assert "editor status " + task["task_id"] in item["next_command"]
+    assert "editor launch" not in item["suggestion"]
+
+
 def test_editor_status_scans_running_project_config_ports_outside_default_range(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
@@ -969,6 +1009,39 @@ def test_editor_launch_treats_matching_project_process_offline_when_api_owner_di
     kill_proc.assert_called_once_with(60504)
     assert captured["command"] == "editor.launch"
     assert captured["payload"]["project_path"] == mini_project
+
+
+def test_editor_launch_does_not_kill_process_owned_by_active_launch_task(mini_project, tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import create_task, save_task
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    task = create_task("editor.launch", {"project_path": mini_project, "port": 30011})
+    task["status"] = "running"
+    task["pid"] = 16044
+    save_task(task)
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 16044, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+         patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree") as kill_proc, \
+         patch("cli_anything.unreal.commands.editor.submit_task") as submit_task:
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait",
+        ])
+
+    assert result.exit_code == 3
+    data = json.loads(result.output)
+    assert data["status"] == "error"
+    assert data["code"] == "EDITOR_STARTING"
+    assert data["details"]["task_id"] == task["task_id"]
+    kill_proc.assert_not_called()
+    submit_task.assert_not_called()
 
 
 def test_editor_launch_without_timeout_uses_bounded_foreground_wait(mini_project):
