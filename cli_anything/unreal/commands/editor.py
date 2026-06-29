@@ -578,24 +578,38 @@ def _check_already_running(session, state) -> dict | None:
     running = find_running_editors()
     api = UEEditorAPI(port=state.session.port)
     api_alive = api.is_alive()
+    api_owner_pid = None
+    if api_alive:
+        try:
+            api_owner_pid = UEEditorAPI._get_pid_listening_on_port(state.session.port)
+        except Exception:
+            api_owner_pid = None
     dialogs = detect_ue_dialogs() if sys.platform == "win32" else []
     for editor_proc in running:
         proc_project = editor_proc.get("project", "")
         if _same_project_path(proc_project, session.project_path):
-            if api_alive:
+            editor_pid = int(editor_proc["pid"])
+            api_belongs_to_editor = api_alive and (api_owner_pid is None or int(api_owner_pid) == editor_pid)
+            if api_belongs_to_editor:
                 return {
                     "status": "already_running",
-                    "pid": editor_proc["pid"],
+                    "pid": editor_pid,
                     "project": proc_project,
-                    "message": f"Editor is already running for this project (PID {editor_proc['pid']}).",
+                    "message": f"Editor is already running for this project (PID {editor_pid}).",
                 }
             zombie = {
                 "status": "zombie",
-                "pid": editor_proc["pid"],
+                "pid": editor_pid,
                 "project": proc_project,
                 "message": f"Found UnrealEditor.exe for this project but the API is not reachable on port {state.session.port}.",
                 "suggestion": "Stale process will be automatically terminated on next launch. Run editor launch to proceed.",
             }
+            if api_alive and api_owner_pid is not None:
+                zombie["api_owner_pid"] = int(api_owner_pid)
+                zombie["message"] = (
+                    f"Found UnrealEditor.exe for this project (PID {editor_pid}) but Remote Control "
+                    f"port {state.session.port} belongs to PID {api_owner_pid}."
+                )
             if dialogs:
                 zombie["dialogs"] = [{"title": dialog["title"]} for dialog in dialogs]
                 zombie["status"] = "starting"
@@ -1233,6 +1247,23 @@ def editor_exec(state: AppState, timeout, log_wait, command):
     output(result, state)
 
 
+def _is_run_script_transport_disconnect(result: dict) -> bool:
+    """Return True when run-script failed because the editor connection dropped."""
+    if not isinstance(result, dict) or result.get("error_type"):
+        return False
+    text = " ".join(str(result.get(key, "")) for key in ("error", "traceback"))
+    markers = (
+        "ConnectionResetError",
+        "Connection aborted",
+        "RemoteDisconnected",
+        "Connection refused",
+        "forcibly closed",
+        "WinError 10054",
+        "10054",
+    )
+    return any(marker in text for marker in markers)
+
+
 @editor_group.command("run-script")
 @click.argument("script_path", type=click.Path(exists=False), required=False, default=None)
 @click.option("-c", "--code", default=None, help="Short inline Python code; use '-' or a script file for multiline code.")
@@ -1304,6 +1335,27 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
             project_dir=state.session.project_dir,
             timeout=timeout,
             save=not no_save,
+        )
+    if isinstance(result, dict) and result.get("error"):
+        if _is_run_script_transport_disconnect(result):
+            details = dict(result)
+            details["failure_kind"] = "transport_disconnect"
+            raise AppError(
+                "EDITOR_CONNECTION_LOST",
+                "Editor connection was lost while running the script.",
+                exit_code=3,
+                details=details,
+                suggestion=(
+                    "Run editor status to check whether Unreal Editor crashed, exited, or is restarting; "
+                    "relaunch if offline, then retry the script after the editor is online."
+                ),
+            )
+        raise AppError(
+            "SCRIPT_EXECUTION_FAILED",
+            str(result.get("error")),
+            exit_code=3,
+            details=result,
+            suggestion="Fix the UE Python script exception and rerun editor run-script.",
         )
     output(result, state)
 

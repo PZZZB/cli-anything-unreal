@@ -88,6 +88,30 @@ class TestPluginBridge:
         assert "updated" in result["action"]
         assert result["version"] == get_bundled_version()
 
+    def test_ensure_plugin_deployed_locked_update_is_pending(self, tmp_path):
+        """Online editors can lock bridge DLLs; deploy should report pending update instead of raising."""
+        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed, get_bundled_version
+
+        project_dir = str(tmp_path)
+        ensure_plugin_deployed(project_dir)
+
+        uplugin = tmp_path / "Plugins" / "CliAnythingBridge" / "CliAnythingBridge.uplugin"
+        data = json.loads(uplugin.read_text())
+        data["VersionName"] = "0.1"
+        uplugin.write_text(json.dumps(data))
+
+        locked = PermissionError(5, "Access is denied", str(uplugin))
+        with patch("cli_anything.unreal.core.plugin_bridge.shutil.rmtree", side_effect=locked), \
+             patch("cli_anything.unreal.core.plugin_bridge.shutil.copytree") as copytree:
+            result = ensure_plugin_deployed(project_dir)
+
+        assert result["deployed"] is True
+        assert result["action"] == "update_pending_locked"
+        assert result["version"] == "0.1"
+        assert result["bundled_version"] == get_bundled_version()
+        assert result["retry_suggested"] is True
+        copytree.assert_not_called()
+
     def test_get_plugin_binary_status_missing_binary(self, tmp_path):
         """Deployed bridge source is not launch-ready until its editor DLL exists."""
         from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed, get_plugin_binary_status
@@ -133,7 +157,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.17"
+        assert version == "1.18"
 
     def test_bridge_declares_umg_helpers(self):
         """UMG authoring helpers live in the bridge because WidgetTree fields are protected."""

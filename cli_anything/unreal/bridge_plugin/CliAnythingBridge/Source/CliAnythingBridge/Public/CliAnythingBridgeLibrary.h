@@ -155,7 +155,7 @@ public:
 	 * Python cannot reliably read WidgetBlueprint.WidgetTree because it is protected.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything|UMG")
-	static FString SetWidgetImageProperties(UWidgetBlueprint* Blueprint, const FString& WidgetName, UObject* ResourceObject, bool bSetResource, bool bSetPosition, float X, float Y, bool bSetSize, float Width, float Height, bool bSetZOrder, int32 ZOrder);
+	static FString SetWidgetImageProperties(UWidgetBlueprint* Blueprint, const FString& WidgetName, UObject* ResourceObject, bool bSetResource, bool bSetPosition, float X, float Y, bool bSetSize, float Width, float Height, bool bSetZOrder, int32 ZOrder, bool bSetBrushImageSize = false, float ImageWidth = 0.0f, float ImageHeight = 0.0f);
 
 	/**
 	 * Returns the design-time WidgetTree as JSON, including root, widgets, parent,

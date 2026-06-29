@@ -277,7 +277,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.17");
+	return TEXT("1.18");
 }
 
 FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)
@@ -637,7 +637,7 @@ FString UCliAnythingBridgeLibrary::AddWidgetToCanvas(UWidgetBlueprint* Blueprint
 	return Json;
 }
 
-FString UCliAnythingBridgeLibrary::SetWidgetImageProperties(UWidgetBlueprint* Blueprint, const FString& WidgetName, UObject* ResourceObject, bool bSetResource, bool bSetPosition, float X, float Y, bool bSetSize, float Width, float Height, bool bSetZOrder, int32 ZOrder)
+FString UCliAnythingBridgeLibrary::SetWidgetImageProperties(UWidgetBlueprint* Blueprint, const FString& WidgetName, UObject* ResourceObject, bool bSetResource, bool bSetPosition, float X, float Y, bool bSetSize, float Width, float Height, bool bSetZOrder, int32 ZOrder, bool bSetBrushImageSize, float ImageWidth, float ImageHeight)
 {
 	if (!Blueprint) return JsonError(TEXT("WidgetBlueprint is null."));
 	if (!Blueprint->WidgetTree) return JsonError(TEXT("WidgetBlueprint has no WidgetTree."));
@@ -654,6 +654,17 @@ FString UCliAnythingBridgeLibrary::SetWidgetImageProperties(UWidgetBlueprint* Bl
 	{
 		if (!ResourceObject) return JsonError(TEXT("Brush resource is null."));
 		Image->SetBrushResourceObject(ResourceObject);
+	}
+
+	if (bSetBrushImageSize)
+	{
+		if (ImageWidth < 0.0f || ImageHeight < 0.0f)
+		{
+			return JsonError(TEXT("Brush ImageSize must be non-negative."));
+		}
+		FSlateBrush Brush = Image->GetBrush();
+		Brush.ImageSize = FVector2D(ImageWidth, ImageHeight);
+		Image->SetBrush(Brush);
 	}
 
 	if (bSetPosition || bSetSize || bSetZOrder)

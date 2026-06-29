@@ -249,6 +249,7 @@ def set_widget_image(
     *,
     widget_name: str,
     texture_path: str | None = None,
+    image_size: tuple[float, float] | list[float] | None = None,
     x: float | None = None,
     y: float | None = None,
     width: float | None = None,
@@ -257,8 +258,11 @@ def set_widget_image(
     project_dir: str | None = None,
     timeout: float = 60.0,
 ) -> dict:
-    """Edit an existing UMG Image widget brush resource and CanvasPanelSlot layout."""
+    """Edit an existing UMG Image widget brush resource, Brush ImageSize, and CanvasPanelSlot layout."""
     set_resource = bool(texture_path)
+    set_brush_image_size = image_size is not None
+    image_width = float(image_size[0]) if image_size is not None else 0.0
+    image_height = float(image_size[1]) if image_size is not None else 0.0
     set_position = x is not None or y is not None
     set_size = width is not None or height is not None
     set_z_order = z_order is not None
@@ -271,6 +275,9 @@ asset_candidates = {_json(_widget_asset_path_candidates(widget_path))}
 widget_name = {_json(widget_name)}
 texture_path = {_json(texture_path or "")}
 set_resource = {_json(set_resource)}
+set_brush_image_size = {_json(set_brush_image_size)}
+image_width = float({_json(image_width)})
+image_height = float({_json(image_height)})
 set_position = {_json(set_position)}
 x = float({_json(0.0 if x is None else x)})
 y = float({_json(0.0 if y is None else y)})
@@ -330,12 +337,24 @@ else:
         else:
             result = None
         if result is None:
-            result = _cli_parse_bridge(
-                bridge.set_widget_image_properties(
-                    bp, widget_name, resource, set_resource,
-                    set_position, x, y, set_size, width, height, set_z_order, z_order
-                )
-            )
+            call_args = [
+                bp, widget_name, resource, set_resource,
+                set_position, x, y, set_size, width, height, set_z_order, z_order,
+            ]
+            try:
+                if set_brush_image_size:
+                    raw = bridge.set_widget_image_properties(*(call_args + [set_brush_image_size, image_width, image_height]))
+                else:
+                    try:
+                        raw = bridge.set_widget_image_properties(*(call_args + [False, 0.0, 0.0]))
+                    except TypeError:
+                        raw = bridge.set_widget_image_properties(*call_args)
+                result = _cli_parse_bridge(raw)
+            except TypeError as exc:
+                if set_brush_image_size:
+                    result = {{"error": "CliAnythingBridgeLibrary is too old for UMG ImageSize editing.", "missing": ["set_widget_image_properties(image_size)"], "suggestion": "Run editor plugin-upgrade, then relaunch the editor.", "detail": str(exc)}}
+                else:
+                    raise
             if result.get("status") == "ok":
                 result["widget_blueprint"] = loaded_asset_path
                 unreal.BlueprintEditorLibrary.compile_blueprint(bp)

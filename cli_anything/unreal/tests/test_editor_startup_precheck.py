@@ -935,6 +935,42 @@ def test_editor_launch_no_extra_args_yields_empty_list(mini_project):
 # ── plugin-upgrade relaunch uses _build_launch_cmd ──────────────────
 
 
+def test_editor_launch_treats_matching_project_process_offline_when_api_owner_differs(mini_project):
+    """A live API on another PID must not make a same-project offline editor ALREADY_RUNNING."""
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["command"] = command
+        captured["payload"] = payload
+        return {"task_id": "task-xyz", "status": "submitted"}
+
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    running = [
+        {"pid": 60504, "project": mini_project},
+        {"pid": 99999, "project": other_project},
+    ]
+
+    with patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=running), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=True), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=99999), \
+         patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True) as kill_proc, \
+         patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait",
+        ])
+
+    assert result.exit_code == 0, result.output
+    kill_proc.assert_called_once_with(60504)
+    assert captured["command"] == "editor.launch"
+    assert captured["payload"]["project_path"] == mini_project
+
+
 def test_editor_launch_without_timeout_uses_bounded_foreground_wait(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

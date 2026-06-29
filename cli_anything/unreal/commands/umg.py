@@ -97,6 +97,7 @@ def umg_add_widget(
 @click.argument("widget_path")
 @click.option("--name", "widget_name", required=True, help="Existing Image widget name")
 @click.option("--texture", "texture_path", default=None, help="Brush resource texture/object path")
+@click.option("--image-size", "image_size", nargs=2, type=float, metavar="WIDTH HEIGHT", default=None, help="Brush ImageSize; does not change CanvasPanelSlot size")
 @click.option("--x", default=None, type=float, help="Canvas slot X")
 @click.option("--y", default=None, type=float, help="Canvas slot Y")
 @click.option("--w", "width", default=None, type=float, help="Canvas slot width")
@@ -104,8 +105,8 @@ def umg_add_widget(
 @click.option("--z", "z_order", default=None, type=int, help="Canvas slot Z order")
 @handle_error
 @click.pass_obj
-def umg_set_image(state: AppState, widget_path, widget_name, texture_path, x, y, width, height, z_order):
-    """Edit an existing Image widget brush resource and CanvasPanelSlot layout.
+def umg_set_image(state: AppState, widget_path, widget_name, texture_path, image_size, x, y, width, height, z_order):
+    """Edit an existing Image widget brush resource, Brush ImageSize, and CanvasPanelSlot layout.
 
     WIDGET_PATH accepts package, object, generated-class, or WidgetTree subobject paths.
     """
@@ -117,6 +118,7 @@ def umg_set_image(state: AppState, widget_path, widget_name, texture_path, x, y,
         widget_path,
         widget_name=widget_name,
         texture_path=texture_path,
+        image_size=tuple(image_size) if image_size is not None else None,
         x=x,
         y=y,
         width=width,

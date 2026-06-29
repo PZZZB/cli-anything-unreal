@@ -155,7 +155,10 @@ ue-cli umg tree /Game/UI/WBP_Hud
 
 # Update an existing Image widget brush and Canvas slot
 ue-cli umg set-image /Game/UI/WBP_Hud --name CrosshairIcon \
-  --texture /Game/UI/T_Crosshair_SDF --x 0 --y 0 --w 64 --h 64 --z 10
+  --texture /Game/UI/T_Crosshair_SDF --image-size 64 64 --x 0 --y 0 --w 64 --h 64 --z 10
+
+# Update only Brush ImageSize; leave the brush resource and Canvas slot unchanged
+ue-cli umg set-image /Game/UI/WBP_Hud --name CrosshairIcon --image-size 18 18
 ```
 
 ## Material Custom Node Structs

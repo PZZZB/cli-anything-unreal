@@ -175,6 +175,31 @@ class TestUMGCore:
         assert "set_size = True" in script
         assert "set_z_order = True" in script
 
+    @patch("cli_anything.unreal.core.umg._exec_umg_script")
+    def test_set_widget_image_can_update_brush_image_size_without_resource(self, mock_exec):
+        from cli_anything.unreal.core.umg import set_widget_image
+
+        mock_exec.return_value = {
+            "status": "ok",
+            "action": "set_image",
+            "widget": {"name": "Icon", "class": "Image", "brush": {"image_size": [18.0, 18.0]}},
+        }
+
+        result = set_widget_image(
+            MagicMock(),
+            "/Game/UI/WBP_Hud",
+            widget_name="Icon",
+            image_size=(18.0, 18.0),
+        )
+
+        assert result["status"] == "ok"
+        script = mock_exec.call_args.args[1]
+        assert "set_resource = False" in script
+        assert "set_brush_image_size = True" in script
+        assert "image_width = float(18.0)" in script
+        assert "image_height = float(18.0)" in script
+
+
 class TestUMGCLI:
     @patch("cli_anything.unreal.core.umg.create_widget_blueprint")
     def test_umg_create_cli(self, mock_create):
@@ -309,3 +334,28 @@ class TestUMGCLI:
         assert data["status"] == "success"
         assert data["result"]["widget"]["name"] == "Icon"
         mock_set.assert_called_once()
+
+    @patch("cli_anything.unreal.core.umg.set_widget_image")
+    def test_umg_set_image_cli_accepts_image_size(self, mock_set):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_set.return_value = {
+            "status": "ok",
+            "action": "set_image",
+            "widget": {"name": "Icon", "class": "Image"},
+        }
+
+        with patch("cli_anything.unreal.commands.umg.require_editor", return_value=MagicMock()):
+            result = CliRunner().invoke(cli, [
+                "--output", "json",
+                "umg", "set-image", "/Game/UI/WBP_Hud",
+                "--name", "Icon",
+                "--image-size", "18", "18",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        mock_set.assert_called_once()
+        assert mock_set.call_args.kwargs["image_size"] == (18.0, 18.0)

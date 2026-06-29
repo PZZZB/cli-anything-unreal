@@ -71,7 +71,20 @@ def ensure_plugin_deployed(project_dir: str) -> dict:
         action = "fresh_install"
 
     if target_dir.exists():
-        shutil.rmtree(target_dir)
+        try:
+            shutil.rmtree(target_dir)
+        except PermissionError as exc:
+            return {
+                "deployed": True,
+                "action": "update_pending_locked",
+                "version": target_version,
+                "bundled_version": bundled_version,
+                "plugin_dir": str(target_dir),
+                "error": str(exc),
+                "warning": "Bridge plugin is in use and could not be updated while the editor is running.",
+                "suggestion": "Close the editor, then run editor plugin-upgrade to deploy and compile the bundled bridge.",
+                "retry_suggested": True,
+            }
 
     shutil.copytree(str(_BUNDLED_PLUGIN_DIR), str(target_dir))
 

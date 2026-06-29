@@ -1085,6 +1085,60 @@ class TestScriptRunner:
             mock_run.assert_called_once()
             assert mock_run.call_args.args[1] == code
 
+    def test_editor_run_script_error_is_top_level_error(self):
+        """User script exceptions should fail the CLI command."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_editor.return_value = MagicMock()
+            mock_run.return_value = {
+                "stdout": "",
+                "error": "'tuple' object has no attribute 'set_editor_property'",
+                "error_type": "AttributeError",
+                "traceback": "Traceback ...",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script", "-",
+                "--no-save",
+            ], input="raise AttributeError('boom')\n")
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "SCRIPT_EXECUTION_FAILED"
+        assert data["message"] == "'tuple' object has no attribute 'set_editor_property'"
+        assert data["details"]["error_type"] == "AttributeError"
+
+    def test_editor_run_script_connection_reset_is_transport_error(self):
+        """Transport disconnects should not be diagnosed as script exceptions."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_editor.return_value = MagicMock()
+            mock_run.return_value = {
+                "error": "('Connection aborted.', ConnectionResetError(10054, 'remote host forcibly closed', None, 10054, None))",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script", "-",
+                "--no-save",
+            ], input="result = {}\n")
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "EDITOR_CONNECTION_LOST"
+        assert "connection was lost" in data["message"]
+        assert "editor status" in data["suggestion"]
+        assert data["details"]["failure_kind"] == "transport_disconnect"
+
     def test_editor_run_script_missing_file_errors(self):
         """Missing script path should return a structured file error."""
         from click.testing import CliRunner
