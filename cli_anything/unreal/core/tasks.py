@@ -61,6 +61,11 @@ def save_task(task: dict) -> dict:
     return task
 
 
+def task_data_path(name: str) -> Path:
+    """Return a small metadata path beside task JSON files."""
+    return _task_root() / name
+
+
 def iter_tasks() -> list[dict]:
     """Return readable task records, newest first."""
     tasks: list[dict] = []

@@ -44,6 +44,68 @@ def test_editor_status_offline_api_blocked_includes_log_error(mini_project):
     assert data["result"][0]["log_error"] == "Plugin 'libzstd' failed to load"
 
 
+def test_editor_status_transient_unreachable_does_not_suggest_relaunch(mini_project, tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[{"pid": 64644, "project": mini_project}]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011), \
+         patch("cli_anything.unreal.commands.editor._check_log_errors", return_value=None):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0, result.output
+    item = json.loads(result.output)["result"][0]
+    assert item["status"] == "unreachable"
+    assert item["pid"] == 64644
+    assert item["port"] == 30011
+    assert "temporarily unreachable" in item["message"]
+    assert "editor launch" not in item["suggestion"]
+    assert item["next_command"] == f'ue-cli --project "{mini_project}" editor status'
+
+
+def test_editor_status_unreachable_becomes_offline_after_grace(mini_project, tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    runner = CliRunner()
+
+    base_patches = [
+        patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]),
+        patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[{"pid": 64644, "project": mini_project}]),
+        patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011),
+        patch("cli_anything.unreal.commands.editor._check_log_errors", return_value=None),
+    ]
+    with base_patches[0], base_patches[1], base_patches[2], base_patches[3], \
+         patch("cli_anything.unreal.commands.editor.time.time", return_value=1000.0):
+        first = runner.invoke(cli, ["--output", "json", "--project", mini_project, "editor", "status"])
+    assert first.exit_code == 0, first.output
+    assert json.loads(first.output)["result"][0]["status"] == "unreachable"
+
+    base_patches = [
+        patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]),
+        patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[{"pid": 64644, "project": mini_project}]),
+        patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011),
+        patch("cli_anything.unreal.commands.editor._check_log_errors", return_value=None),
+    ]
+    with base_patches[0], base_patches[1], base_patches[2], base_patches[3], \
+         patch("cli_anything.unreal.commands.editor.time.time", return_value=1100.0):
+        stale = runner.invoke(cli, ["--output", "json", "--project", mini_project, "editor", "status"])
+
+    assert stale.exit_code == 0, stale.output
+    item = json.loads(stale.output)["result"][0]
+    assert item["status"] == "offline"
+    assert item["unreachable_seconds"] == 100
+    assert "editor launch" in item["suggestion"]
+    assert item["next_command"] == f'ue-cli --project "{mini_project}" editor launch'
+
+
 def test_editor_status_offline_ignores_other_project_processes(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
@@ -123,9 +185,10 @@ def test_editor_status_all_lists_other_project_processes(mini_project):
     data = json.loads(result.output)
     assert data["status"] == "success"
     instance = data["result"][0]
-    assert instance["status"] == "offline"
+    assert instance["status"] == "unreachable"
     assert instance["pid"] == 5678
     assert instance["project_path"] == other_project
+    assert "editor launch" not in instance["suggestion"]
 
 
 def test_editor_status_filters_online_port_owner_when_other_project(mini_project):
@@ -422,13 +485,13 @@ def test_editor_status_lists_all_editor_processes(mini_project):
         "bundled_version": "1.13",
         "plugin_match": True,
     }
-    assert offline["status"] == "offline"
+    assert offline["status"] == "unreachable"
     assert offline["pid"] == 5678
     assert offline["port"] == 30030
     assert offline["project_path"] == other_project
-    assert "Remote Control API is not reachable" in offline["message"]
-    assert "editor launch" in offline["suggestion"]
-    assert offline["next_command"] == f'ue-cli --project "{other_project}" editor launch'
+    assert "temporarily unreachable" in offline["message"]
+    assert "editor launch" not in offline["suggestion"]
+    assert offline["next_command"] == f'ue-cli --project "{other_project}" editor status'
 
 
 def test_editor_status_marks_offline_process_as_launching_when_task_active(mini_project, tmp_path, monkeypatch):

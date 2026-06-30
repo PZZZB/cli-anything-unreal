@@ -18,7 +18,8 @@ Step 3: editor close (if running) -> build compile -> editor launch
 
 Step 4: editor status (verify)
   Matching instance online? Proceed.
-  Still offline? Report the error to the user.
+  `launching`/`unreachable`? Poll the reported status command and wait.
+  Still `offline` after the stale grace? Report the error to the user.
 ```
 
 Key points:
@@ -29,7 +30,9 @@ Key points:
 - `build compile --platform Win64` fails fast with `EDITOR_RUNNING_LOCKS_DLLS` when the same project editor is running. This avoids wasting minutes before UBT reaches a locked `UnrealEditor-*.dll` link step.
 - CliAnythingBridge missing/stale module -> keep plugin enabled; `editor launch` deploys/enables it and precompiles before starting UE. Do not disable it to bypass startup.
 - User says editor running -> still verify with Step 1.
-- Offline `editor status` item -> use its `next_command`.
+- `unreachable` means the editor process is alive but Remote Control may be busy during PIE/loading/startup. Retry the reported `editor status` command; do not relaunch or kill yet.
+- `launching` means an active `editor.launch` task owns the process. Poll `editor status <task_id>`.
+- `offline` with `next_command` means the process stayed unreachable past the stale grace or has a clearer failure; use its `next_command`.
 - `editor launch` kills zombie `UnrealEditor.exe` (no API). API-alive `ALREADY_RUNNING` blocks.
 
 ### Example
@@ -65,12 +68,12 @@ ue-cli task cancel <task_id>
 ### Status Values
 
 `editor status` without task id returns result array. Each item has:
-- `status`: `online` if Remote Control reachable, else `offline`
+- `status`: `online` if Remote Control reachable; `launching` when an active launch task owns an unreachable process; `unreachable` for temporary Remote Control loss while the process is alive; `offline` only after stale grace or clear failure
 - `pid`: UnrealEditor pid
 - `port`: Remote Control port
 - `project_path`: uproject path
 - `bridge_version` / `bundled_version` / `plugin_match`: online bridge plugin health. `plugin_match` can be `null` if the version probe timed out or the editor is busy.
-- `message` / `suggestion` / `next_command`: recovery hints on offline items, and on online bridge mismatches
+- `message` / `suggestion` / `next_command`: recovery hints. For `unreachable`, retry status; for `launching`, poll the task; for stale `offline`, relaunch/close guidance may be provided; for online bridge mismatches, run plugin-upgrade when shown
 
 With top-level `--project`, `editor status` filters to that project by default. Use `editor status --all` only when you need to inspect editors for other projects too.
 

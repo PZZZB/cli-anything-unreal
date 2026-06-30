@@ -12,11 +12,13 @@ from pathlib import Path
 import click
 
 from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_editor, require_project
-from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, cancel_task, iter_tasks, load_task, submit_task, task_progress, wait_for_task
+from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, cancel_task, iter_tasks, load_task, submit_task, task_data_path, task_progress, wait_for_task
 
 
 DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 110
 DEFAULT_EDITOR_LAUNCH_WORKER_TIMEOUT_SECONDS = 300
+REMOTE_UNREACHABLE_GRACE_SECONDS = 60
+REMOTE_UNREACHABLE_CACHE_TTL_SECONDS = 7200
 
 
 def _load_command_project(state: AppState, project_path: str | None) -> None:
@@ -178,6 +180,70 @@ def _compact_editor_entry(status: str, pid: int | None, port: int | None, projec
     }
 
 
+def _remote_unreachable_cache_path() -> Path:
+    return task_data_path("editor_remote_unreachable.json")
+
+
+def _remote_unreachable_key(project_path: str | None, pid: int | None, port: int | None) -> str:
+    project = str(project_path or "").lower()
+    return f"{project}|{pid or ''}|{port or ''}"
+
+
+def _load_remote_unreachable_cache() -> dict:
+    path = _remote_unreachable_cache_path()
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_remote_unreachable_cache(cache: dict) -> None:
+    path = _remote_unreachable_cache_path()
+    now = time.time()
+    compact = {
+        key: value
+        for key, value in cache.items()
+        if now - float(value.get("last_seen_at") or value.get("first_seen_at") or 0) <= REMOTE_UNREACHABLE_CACHE_TTL_SECONDS
+    }
+    try:
+        path.write_text(json.dumps(compact, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_remote_unreachable_observation(project_path: str | None, pid: int | None, port: int | None) -> None:
+    cache = _load_remote_unreachable_cache()
+    key = _remote_unreachable_key(project_path, pid, port)
+    if key in cache:
+        cache.pop(key, None)
+        _save_remote_unreachable_cache(cache)
+
+
+def _record_remote_unreachable_observation(entry: dict) -> dict:
+    now = time.time()
+    key = _remote_unreachable_key(entry.get("project_path"), entry.get("pid"), entry.get("port"))
+    cache = _load_remote_unreachable_cache()
+    obs = cache.get(key) or {"first_seen_at": now, "count": 0}
+    obs["last_seen_at"] = now
+    obs["count"] = int(obs.get("count") or 0) + 1
+    cache[key] = obs
+    _save_remote_unreachable_cache(cache)
+    obs = dict(obs)
+    obs["unreachable_seconds"] = int(max(0, now - float(obs.get("first_seen_at") or now)))
+    return obs
+
+
+def _add_transient_unreachable_hint(entry: dict, observation: dict) -> None:
+    entry["status"] = "unreachable"
+    entry["message"] = "Remote Control API is temporarily unreachable; UnrealEditor is still running and may be busy with PIE, loading, shader work, or startup."
+    entry["suggestion"] = "Retry editor status before relaunching. Do not terminate the editor unless it remains unreachable past the stale grace period or the process exits."
+    entry["unreachable_seconds"] = observation.get("unreachable_seconds", 0)
+    entry["stale_after_seconds"] = REMOTE_UNREACHABLE_GRACE_SECONDS
+    project_path = entry.get("project_path")
+    if project_path:
+        entry["next_command"] = f'ue-cli --project "{project_path}" editor status'
+
+
 def _active_launch_task_for_project(project_path: str | None, pid: int | None = None) -> dict | None:
     if not project_path:
         return None
@@ -221,13 +287,16 @@ def _add_launching_recovery_hint(entry: dict, task: dict) -> None:
         entry["next_command"] = f'ue-cli --project "{project_path}" editor status {task["task_id"]}'
 
 
-def _add_offline_recovery_hint(entry: dict) -> None:
+def _add_offline_recovery_hint(entry: dict, observation: dict | None = None) -> None:
     entry["message"] = "UnrealEditor process is running, but the Remote Control API is not reachable."
+    if observation:
+        entry["unreachable_seconds"] = observation.get("unreachable_seconds", 0)
+        entry["stale_after_seconds"] = REMOTE_UNREACHABLE_GRACE_SECONDS
     project_path = entry.get("project_path")
     if project_path:
         entry["suggestion"] = (
-            "No active launch task owns this process. Run editor launch to terminate the stale matching "
-            "process and start a fresh editor if needed."
+            "Remote Control has stayed unreachable past the stale grace period. Run editor launch to "
+            "terminate the stale matching process and start a fresh editor if needed."
         )
         entry["next_command"] = f'ue-cli --project "{project_path}" editor launch'
     else:
@@ -373,14 +442,21 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
         if port is not None:
             used_ports.add(port)
             entry = _compact_editor_entry("online", pid, port, project_path)
+            _clear_remote_unreachable_observation(project_path, pid, port)
         else:
             entry = _compact_editor_entry("offline", pid, _project_config_port(project_path), project_path)
             active_launch = _active_launch_task_for_project(project_path, pid)
+            log_error = _editor_log_error(project_path)
             if active_launch:
                 _add_launching_recovery_hint(entry, active_launch)
-            else:
+            elif log_error:
                 _add_offline_recovery_hint(entry)
-            log_error = _editor_log_error(project_path)
+            else:
+                observation = _record_remote_unreachable_observation(entry)
+                if int(observation.get("unreachable_seconds") or 0) < REMOTE_UNREACHABLE_GRACE_SECONDS:
+                    _add_transient_unreachable_hint(entry, observation)
+                else:
+                    _add_offline_recovery_hint(entry, observation)
             if log_error:
                 entry["log_error"] = log_error
         instances.append(entry)
