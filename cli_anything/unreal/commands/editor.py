@@ -1529,10 +1529,14 @@ def editor_enable_remote(state: AppState):
     command execution and remote Python execution. Requires editor
     restart to take effect.
     """
-    from cli_anything.unreal.utils.ue_backend import ensure_remote_control_config
+    from cli_anything.unreal.utils.ue_backend import ensure_remote_control_config, get_editor_binary_prefix
 
     require_project(state)
-    result = ensure_remote_control_config(state.session.project_dir)
+    result = ensure_remote_control_config(
+        state.session.project_dir,
+        engine_root=state.session.engine_root,
+        editor_binary_prefix=get_editor_binary_prefix(state.session.engine_root),
+    )
     output(result, state)
 
 

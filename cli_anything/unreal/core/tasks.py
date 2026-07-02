@@ -321,30 +321,43 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         new_port = resolve_available_port(state.session.project_dir, state.session.port)
         state.session.port = new_port
 
-    deploy_result = _deploy_bridge(state.session, state)
-    if not deploy_result.get("deployed", False):
-        task["status"] = "failed"
-        task["error"] = {
-            "code": "BRIDGE_DEPLOY_FAILED",
-            "message": deploy_result.get("error", "CliAnythingBridge deployment failed"),
-            "details": deploy_result,
-        }
-        return save_task(task)
-
-    # Auto-enable CliAnythingBridge in .uproject
-    from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
-    bridge_enabled_changed = _ensure_plugin_enabled(state.session.project_dir, "CliAnythingBridge")
-
-    from cli_anything.unreal.core.plugin_bridge import get_plugin_binary_status
-    bridge_binary_status = get_plugin_binary_status(
-        state.session.project_dir,
-        engine_root=state.session.engine_root,
-    )
+    editor_binary_prefix = preflight.get("engine", {}).get("details", {}).get("editor_binary_prefix", "UnrealEditor")
+    bridge_enabled_changed = False
+    bridge_binary_status = {"ready": False, "reason": "skipped_ue4", "message": "Bridge plugin skipped for UE4 projects."}
     compile_reason = None
-    if not bridge_binary_status.get("ready", False):
-        compile_reason = bridge_binary_status.get("message") or "Bridge plugin binary is not ready."
-    elif deploy_result.get("action") != "already_up_to_date":
-        compile_reason = f"Bridge plugin source {deploy_result.get('action')} requires compilation."
+    if editor_binary_prefix == "UE4Editor":
+        from cli_anything.unreal.core.plugin_bridge import ensure_project_bridge_disabled_by_default
+
+        deploy_result = {
+            "deployed": False,
+            "action": "skipped_ue4",
+            "skipped": True,
+            "normalize_result": ensure_project_bridge_disabled_by_default(state.session.project_dir),
+        }
+    else:
+        deploy_result = _deploy_bridge(state.session, state)
+        if not deploy_result.get("deployed", False):
+            task["status"] = "failed"
+            task["error"] = {
+                "code": "BRIDGE_DEPLOY_FAILED",
+                "message": deploy_result.get("error", "CliAnythingBridge deployment failed"),
+                "details": deploy_result,
+            }
+            return save_task(task)
+
+        # Auto-enable CliAnythingBridge in .uproject
+        from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
+        bridge_enabled_changed = _ensure_plugin_enabled(state.session.project_dir, "CliAnythingBridge")
+
+        from cli_anything.unreal.core.plugin_bridge import get_plugin_binary_status
+        bridge_binary_status = get_plugin_binary_status(
+            state.session.project_dir,
+            engine_root=state.session.engine_root,
+        )
+        if not bridge_binary_status.get("ready", False):
+            compile_reason = bridge_binary_status.get("message") or "Bridge plugin binary is not ready."
+        elif deploy_result.get("action") != "already_up_to_date":
+            compile_reason = f"Bridge plugin source {deploy_result.get('action')} requires compilation."
 
     if compile_reason:
         task = load_task(task["task_id"]) or task

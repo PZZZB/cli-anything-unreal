@@ -1480,6 +1480,50 @@ def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
     assert result["status"] == "completed"
 
 
+def test_run_editor_launch_task_skips_bridge_for_ue4(tmp_path):
+    """UE4 launch should not deploy or enable the UE5 bridge plugin."""
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "UE4Proj"
+    project_dir.mkdir()
+    uproject = project_dir / "UE4Proj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "4.26"}', encoding="utf-8")
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": [], "details": {"editor_binary_prefix": "UE4Editor"}},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockUE4"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockUE4/Binaries/UE4Editor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge") as mock_deploy, \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled") as mock_enable, \
+         patch("cli_anything.unreal.core.plugin_bridge.ensure_project_bridge_disabled_by_default", return_value={
+             "status": "ok",
+             "changed": True,
+         }), \
+         patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    mock_deploy.assert_not_called()
+    mock_enable.assert_not_called()
+    mock_compile.assert_not_called()
+    assert result["status"] == "completed"
+    assert result["result"]["bridge_deploy"]["action"] == "skipped_ue4"
+
+
 def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
     """_run_editor_launch_task fails with COMPILE_FAILED when auto-compile after plugin load failure fails."""
     from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task

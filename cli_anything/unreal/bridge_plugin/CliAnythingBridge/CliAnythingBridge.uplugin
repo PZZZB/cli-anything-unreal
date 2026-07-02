@@ -6,7 +6,7 @@
 	"Description": "Exposes UE C++ APIs not available to Blueprint/Python alone (e.g. material compile errors, viewport screen bounds, HLSL/shader source code).",
 	"Category": "Editor",
 	"CreatedBy": "CLI Anything",
-	"EnabledByDefault": true,
+	"EnabledByDefault": false,
 	"CanContainContent": false,
 	"IsBetaVersion": false,
 	"Installed": false,

@@ -58,6 +58,8 @@ class TestPluginBridge:
         assert (plugin_dir / "Source" / "CliAnythingBridge" / "Public" / "CliAnythingBridgeLibrary.h").exists()
         assert (plugin_dir / "Source" / "CliAnythingBridge" / "Private" / "CliAnythingBridgeLibrary.cpp").exists()
         assert (plugin_dir / "Source" / "CliAnythingBridge" / "Private" / "CliAnythingBridgeModule.cpp").exists()
+        descriptor = json.loads((plugin_dir / "CliAnythingBridge.uplugin").read_text(encoding="utf-8"))
+        assert descriptor["EnabledByDefault"] is False
 
     def test_ensure_plugin_deployed_already_up_to_date(self, tmp_path):
         """Second deploy is a no-op when versions match."""
@@ -69,6 +71,24 @@ class TestPluginBridge:
 
         assert result["deployed"] is True
         assert result["action"] == "already_up_to_date"
+
+    def test_ensure_plugin_deployed_normalizes_old_enabled_by_default(self, tmp_path):
+        """Old deployed descriptors must not keep loading before the bridge is compiled."""
+        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+
+        project_dir = str(tmp_path)
+        ensure_plugin_deployed(project_dir)
+        uplugin = tmp_path / "Plugins" / "CliAnythingBridge" / "CliAnythingBridge.uplugin"
+        data = json.loads(uplugin.read_text(encoding="utf-8"))
+        data["EnabledByDefault"] = True
+        uplugin.write_text(json.dumps(data), encoding="utf-8")
+
+        result = ensure_plugin_deployed(project_dir)
+
+        assert result["action"] == "already_up_to_date"
+        assert result["descriptor_normalized"] is True
+        data = json.loads(uplugin.read_text(encoding="utf-8"))
+        assert data["EnabledByDefault"] is False
 
     def test_ensure_plugin_deployed_version_update(self, tmp_path):
         """Plugin is updated when bundled version is newer."""
@@ -123,6 +143,21 @@ class TestPluginBridge:
         assert result["ready"] is False
         assert result["reason"] == "missing_binary"
         assert result["dll_path"].endswith("UnrealEditor-CliAnythingBridge.dll")
+
+    def test_get_plugin_binary_status_uses_ue4_prefix(self, tmp_path):
+        """UE4 projects use UE4Editor-* binary names."""
+        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed, get_plugin_binary_status
+
+        engine_root = tmp_path / "UE4Engine"
+        bin_dir = engine_root / "Engine" / "Binaries" / "Win64"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "UE4Editor.exe").write_text("fake", encoding="utf-8")
+        ensure_plugin_deployed(str(tmp_path))
+
+        result = get_plugin_binary_status(str(tmp_path), engine_root=str(engine_root))
+
+        assert result["editor_binary_prefix"] == "UE4Editor"
+        assert result["dll_path"].endswith("UE4Editor-CliAnythingBridge.dll")
 
     def test_is_plugin_loaded_true(self):
         """is_plugin_loaded returns True when probe script succeeds."""

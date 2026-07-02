@@ -230,18 +230,40 @@ def _find_engine_from_registry() -> Optional[str]:
     return None
 
 
-def find_editor_exe(engine_root: str) -> Optional[str]:
-    """Locate UnrealEditor.exe (or UnrealEditor-Cmd.exe)."""
+_EDITOR_BINARY_PREFIXES = ("UnrealEditor", "UE4Editor")
+
+
+def _editor_binary_candidates(engine_root: str | Path) -> list[Path]:
     root = Path(engine_root)
-    candidates = [
-        root / "Engine" / "Binaries" / "Win64" / "UnrealEditor.exe",
-        root / "Engine" / "Binaries" / "Win64" / "UnrealEditor-Cmd.exe",
-        root / "Engine" / "Binaries" / "Win64" / "UE4Editor.exe",
+    bin_dir = root / "Engine" / "Binaries" / "Win64"
+    return [
+        bin_dir / "UnrealEditor.exe",
+        bin_dir / "UnrealEditor-Cmd.exe",
+        bin_dir / "UE4Editor.exe",
+        bin_dir / "UE4Editor-Cmd.exe",
     ]
-    for c in candidates:
+
+
+def find_editor_exe(engine_root: str) -> Optional[str]:
+    """Locate the editor executable for UE5 or UE4."""
+    for c in _editor_binary_candidates(engine_root):
         if c.exists():
             return str(c)
     return None
+
+
+def get_editor_binary_prefix(engine_root: str | None) -> str:
+    """Return the editor binary prefix used by an engine: UnrealEditor or UE4Editor."""
+    if not engine_root:
+        return "UnrealEditor"
+    root = Path(engine_root)
+    bin_dir = root / "Engine" / "Binaries" / "Win64"
+    for prefix in _EDITOR_BINARY_PREFIXES:
+        if (bin_dir / f"{prefix}.exe").exists() or (bin_dir / f"{prefix}-Cmd.exe").exists():
+            return prefix
+        if (bin_dir / f"{prefix}.modules").exists():
+            return prefix
+    return "UnrealEditor"
 
 
 def find_uat(engine_root: str) -> Optional[str]:
@@ -912,7 +934,115 @@ def _ensure_plugin_enabled(project_dir: str, plugin_name: str) -> bool:
     return True
 
 
-def ensure_remote_control_config(project_dir: str) -> dict:
+def _find_plugin_descriptor(
+    project_dir: str,
+    plugin_name: str,
+    engine_root: str | None = None,
+) -> Path | None:
+    """Find a project or engine plugin descriptor without changing files."""
+    candidates = [
+        Path(project_dir) / "Plugins" / plugin_name / f"{plugin_name}.uplugin",
+    ]
+    if engine_root:
+        engine_plugins = Path(engine_root) / "Engine" / "Plugins"
+        candidates.extend([
+            engine_plugins / "VirtualProduction" / plugin_name / f"{plugin_name}.uplugin",
+            engine_plugins / "Experimental" / plugin_name / f"{plugin_name}.uplugin",
+            engine_plugins / "Runtime" / plugin_name / f"{plugin_name}.uplugin",
+            engine_plugins / "Editor" / plugin_name / f"{plugin_name}.uplugin",
+            engine_plugins / plugin_name / f"{plugin_name}.uplugin",
+        ])
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    for root in [Path(project_dir) / "Plugins"]:
+        if root.is_dir():
+            found = next(root.rglob(f"{plugin_name}.uplugin"), None)
+            if found:
+                return found
+    return None
+
+
+def _check_plugin_loadable(
+    project_dir: str,
+    plugin_name: str,
+    engine_root: str | None = None,
+    editor_binary_prefix: str = "UnrealEditor",
+) -> dict:
+    """Check if enabling a plugin is likely to load or compile cleanly."""
+    descriptor = _find_plugin_descriptor(project_dir, plugin_name, engine_root)
+    if descriptor is None:
+        return {
+            "available": False,
+            "plugin": plugin_name,
+            "reason": "descriptor_missing",
+            "message": f"{plugin_name} plugin descriptor was not found in project or engine plugins.",
+        }
+
+    try:
+        data = json.loads(descriptor.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "available": False,
+            "plugin": plugin_name,
+            "descriptor": str(descriptor),
+            "reason": "descriptor_unreadable",
+            "message": f"{plugin_name} plugin descriptor could not be read: {exc}",
+        }
+
+    plugin_dir = descriptor.parent
+    modules = [
+        m.get("Name")
+        for m in data.get("Modules", [])
+        if m.get("Name") and m.get("Type", "Runtime") in {"Runtime", "RuntimeNoCommandlet", "Editor", "Developer"}
+    ]
+    if not modules:
+        return {
+            "available": True,
+            "plugin": plugin_name,
+            "descriptor": str(descriptor),
+            "reason": "content_only_or_no_modules",
+            "modules": [],
+        }
+
+    missing = []
+    for module_name in modules:
+        module_binary = plugin_dir / "Binaries" / "Win64" / f"{editor_binary_prefix}-{module_name}.dll"
+        module_source = plugin_dir / "Source" / module_name / f"{module_name}.Build.cs"
+        if not module_binary.is_file() and not module_source.is_file():
+            missing.append({
+                "module": module_name,
+                "binary": str(module_binary),
+                "source": str(module_source),
+            })
+
+    if missing:
+        return {
+            "available": False,
+            "plugin": plugin_name,
+            "descriptor": str(descriptor),
+            "reason": "module_missing",
+            "modules": modules,
+            "missing_modules": missing,
+            "message": f"{plugin_name} plugin modules are missing for {editor_binary_prefix}.",
+        }
+
+    return {
+        "available": True,
+        "plugin": plugin_name,
+        "descriptor": str(descriptor),
+        "reason": "module_binary_or_source_found",
+        "modules": modules,
+    }
+
+
+def ensure_remote_control_config(
+    project_dir: str,
+    engine_root: str | None = None,
+    editor_binary_prefix: str | None = None,
+) -> dict:
     """Ensure the project has Remote Control configured for CLI use.
 
     Creates or updates DefaultRemoteControl.ini to enable:
@@ -928,9 +1058,28 @@ def ensure_remote_control_config(project_dir: str) -> dict:
     Returns:
         {"status": "ok"|"created"|"updated", "file": str, "changes": [...]}
     """
+    if editor_binary_prefix is None:
+        editor_binary_prefix = get_editor_binary_prefix(engine_root)
     config_dir = Path(project_dir) / "Config"
     config_file = config_dir / "DefaultRemoteControl.ini"
     changes = []
+
+    if engine_root:
+        loadable = _check_plugin_loadable(
+            project_dir,
+            "RemoteControl",
+            engine_root=engine_root,
+            editor_binary_prefix=editor_binary_prefix,
+        )
+        if not loadable.get("available", False):
+            return {
+                "status": "unavailable",
+                "file": str(config_file),
+                "changes": [],
+                "error": "RemoteControl plugin is not available/loadable for this engine; preflight did not modify .uproject or DefaultRemoteControl.ini.",
+                "details": loadable,
+                "suggestion": "Install or compile the engine RemoteControl plugin first, or use an editor automation path that does not require Remote Control.",
+            }
 
     if not config_dir.is_dir():
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -1135,9 +1284,9 @@ def check_engine_build(engine_root: str) -> dict:
     """Check if the engine has been compiled and is ready to run.
 
     Checks for:
-    1. UnrealEditor.exe exists
-    2. UnrealEditor.modules exists (module mappings + BuildId)
-    3. UnrealEditor.target exists (build config)
+    1. Editor executable exists (UnrealEditor* for UE5, UE4Editor* for UE4)
+    2. Editor modules file exists (module mappings + BuildId)
+    3. Editor target file exists (build config)
     4. Build.version is valid
 
     Args:
@@ -1152,28 +1301,36 @@ def check_engine_build(engine_root: str) -> dict:
     warnings = []
     details = {"engine_root": engine_root}
     build_id = ""
+    editor_binary_prefix = get_editor_binary_prefix(engine_root)
+    details["editor_binary_prefix"] = editor_binary_prefix
 
-    # Check 1: UnrealEditor.exe
-    editor_exe = bin_dir / "UnrealEditor.exe"
-    if not editor_exe.exists():
+    # Check 1: editor executable
+    editor_exe = None
+    for candidate in (bin_dir / f"{editor_binary_prefix}.exe", bin_dir / f"{editor_binary_prefix}-Cmd.exe"):
+        if candidate.exists():
+            editor_exe = candidate
+            break
+    if editor_exe is None:
+        checked = ", ".join(p.name for p in _editor_binary_candidates(engine_root))
         errors.append(
-            f"UnrealEditor.exe not found at {bin_dir}. "
+            f"Editor executable not found at {bin_dir} (checked {checked}). "
             "Engine has not been compiled. Build the engine from source first."
         )
     else:
         size = editor_exe.stat().st_size
+        details["editor_exe"] = str(editor_exe)
         details["editor_exe_size"] = size
         if size < 100_000:
             warnings.append(
-                f"UnrealEditor.exe is unusually small ({size} bytes). "
+                f"{editor_exe.name} is unusually small ({size} bytes). "
                 "Engine build may be incomplete."
             )
 
-    # Check 2: UnrealEditor.modules (BuildId + module mappings)
-    modules_file = bin_dir / "UnrealEditor.modules"
+    # Check 2: editor modules file (BuildId + module mappings)
+    modules_file = bin_dir / f"{editor_binary_prefix}.modules"
     if not modules_file.exists():
         errors.append(
-            "UnrealEditor.modules not found. "
+            f"{editor_binary_prefix}.modules not found. "
             "Engine modules have not been compiled."
         )
     else:
@@ -1189,13 +1346,13 @@ def check_engine_build(engine_root: str) -> dict:
                     "Build may be incomplete."
                 )
         except (json.JSONDecodeError, OSError):
-            warnings.append("Could not parse UnrealEditor.modules")
+            warnings.append(f"Could not parse {editor_binary_prefix}.modules")
 
-    # Check 3: UnrealEditor.target (build metadata)
-    target_file = bin_dir / "UnrealEditor.target"
+    # Check 3: editor target file (build metadata)
+    target_file = bin_dir / f"{editor_binary_prefix}.target"
     if not target_file.exists():
         warnings.append(
-            "UnrealEditor.target not found. "
+            f"{editor_binary_prefix}.target not found. "
             "Engine may not have a complete build."
         )
 
@@ -1216,7 +1373,11 @@ def check_engine_build(engine_root: str) -> dict:
     }
 
 
-def check_project_build(uproject_path: str, engine_build_id: str = "") -> dict:
+def check_project_build(
+    uproject_path: str,
+    engine_build_id: str = "",
+    editor_binary_prefix: str = "UnrealEditor",
+) -> dict:
     """Check if a project's C++ code has been compiled and matches the engine.
 
     For Blueprint-only projects (no Source/ dir), compilation is not needed
@@ -1240,10 +1401,14 @@ def check_project_build(uproject_path: str, engine_build_id: str = "") -> dict:
     project_name = path.stem
     errors = []
     warnings = []
-    details = {"project": project_name, "project_path": str(path)}
+    details = {
+        "project": project_name,
+        "project_path": str(path),
+        "editor_binary_prefix": editor_binary_prefix,
+    }
 
     # ── Check BuildId match (critical for custom engine builds) ─────
-    project_modules_file = project_dir / "Binaries" / "Win64" / "UnrealEditor.modules"
+    project_modules_file = project_dir / "Binaries" / "Win64" / f"{editor_binary_prefix}.modules"
     project_build_id = ""
 
     if project_modules_file.exists():
@@ -1269,7 +1434,7 @@ def check_project_build(uproject_path: str, engine_build_id: str = "") -> dict:
     elif engine_build_id and not project_build_id:
         if (project_dir / "Binaries" / "Win64").is_dir():
             warnings.append(
-                "Could not read project BuildId from UnrealEditor.modules. "
+                f"Could not read project BuildId from {editor_binary_prefix}.modules. "
                 "Cannot verify engine/project version match."
             )
 
@@ -1332,7 +1497,7 @@ def check_project_build(uproject_path: str, engine_build_id: str = "") -> dict:
             newest_source_time = mtime
 
     for module_name in modules:
-        dll_path = bin_dir / f"UnrealEditor-{module_name}.dll"
+        dll_path = bin_dir / f"{editor_binary_prefix}-{module_name}.dll"
         if not dll_path.exists():
             missing_modules.append(module_name)
         else:
@@ -1406,17 +1571,47 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
         return result
 
     engine_check = check_engine_build(engine_root)
+    editor_binary_prefix = engine_check.get("details", {}).get(
+        "editor_binary_prefix",
+        get_editor_binary_prefix(engine_root),
+    )
     project_check = check_project_build(
         uproject_path,
         engine_build_id=engine_check.get("build_id", ""),
+        editor_binary_prefix=editor_binary_prefix,
     )
 
     # Check Remote Control config
     project_dir = str(Path(uproject_path).parent)
     rc_check = check_remote_control_config(project_dir)
-    if not rc_check["configured"]:
+    rc_plugin_check = _check_plugin_loadable(
+        project_dir,
+        "RemoteControl",
+        engine_root=engine_root,
+        editor_binary_prefix=editor_binary_prefix,
+    )
+    if not rc_plugin_check.get("available", False):
+        rc_check["configured"] = False
+        rc_check["plugin_loadable"] = rc_plugin_check
+        rc_check.setdefault("issues", []).append(
+            "RemoteControl plugin is not available/loadable for this engine; preflight did not modify project files."
+        )
+        rc_check["auto_fixed"] = False
+        rc_check["fix_result"] = {
+            "status": "unavailable",
+            "file": str(Path(project_dir) / "Config" / "DefaultRemoteControl.ini"),
+            "changes": [],
+            "error": "RemoteControl plugin is not available/loadable for this engine; preflight did not modify .uproject or DefaultRemoteControl.ini.",
+            "details": rc_plugin_check,
+            "suggestion": "Install or compile the engine RemoteControl plugin first, or use an editor automation path that does not require Remote Control.",
+        }
+    elif not rc_check["configured"]:
         # Auto-fix: create/update the config
-        fix_result = ensure_remote_control_config(project_dir)
+        fix_result = ensure_remote_control_config(
+            project_dir,
+            engine_root=engine_root,
+            editor_binary_prefix=editor_binary_prefix,
+        )
         rc_check["auto_fixed"] = fix_result["status"] in ("created", "updated")
         rc_check["fix_result"] = fix_result
         if fix_result["status"] in ("created", "updated"):
@@ -1426,24 +1621,39 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
                 )
 
     # Check bridge plugin readiness (informational — auto-fixed during launch)
-    from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
-    bridge_deploy = ensure_plugin_deployed(project_dir)
-    bridge_enabled = _is_plugin_enabled_in_uproject(project_dir, "CliAnythingBridge")
     bridge_issues = []
-    if not bridge_enabled:
-        bridge_issues.append("CliAnythingBridge plugin not enabled in .uproject")
-    if bridge_deploy.get("action") != "already_up_to_date":
-        bridge_issues.append(f"CliAnythingBridge plugin needs {bridge_deploy.get('action', 'update')}")
-    result["bridge_plugin"] = {
-        "ready": len(bridge_issues) == 0,
-        "issues": bridge_issues,
-        "auto_fixable": True,
-    }
+    if editor_binary_prefix == "UE4Editor":
+        from cli_anything.unreal.core.plugin_bridge import ensure_project_bridge_disabled_by_default
+
+        bridge_normalize = ensure_project_bridge_disabled_by_default(project_dir)
+        bridge_issues.append("CliAnythingBridge is skipped for UE4 projects; UE5 bridge-only commands are unavailable.")
+        result["bridge_plugin"] = {
+            "ready": False,
+            "issues": bridge_issues,
+            "auto_fixable": False,
+            "skipped": True,
+            "normalize_result": bridge_normalize,
+        }
+    else:
+        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+
+        bridge_deploy = ensure_plugin_deployed(project_dir)
+        bridge_enabled = _is_plugin_enabled_in_uproject(project_dir, "CliAnythingBridge")
+        if not bridge_enabled:
+            bridge_issues.append("CliAnythingBridge plugin not enabled in .uproject")
+        if bridge_deploy.get("action") != "already_up_to_date":
+            bridge_issues.append(f"CliAnythingBridge plugin needs {bridge_deploy.get('action', 'update')}")
+        result["bridge_plugin"] = {
+            "ready": len(bridge_issues) == 0,
+            "issues": bridge_issues,
+            "auto_fixable": True,
+        }
 
     result["engine"] = engine_check
     result["project"] = project_check
     result["remote_control"] = rc_check
-    result["ready"] = engine_check["ready"] and project_check["ready"]
+    remote_ready = rc_check["configured"] or rc_check.get("auto_fixed", False)
+    result["ready"] = engine_check["ready"] and project_check["ready"] and remote_ready
     result["engine_root"] = engine_root
 
     return result
@@ -1464,7 +1674,7 @@ def find_running_editors() -> list[dict]:
     # ── Method 1: PowerShell (reliable on modern Windows) ──────────
     try:
         ps_cmd = (
-            'Get-CimInstance Win32_Process -Filter "Name like \'%UnrealEditor%\'" '
+            'Get-CimInstance Win32_Process -Filter "Name like \'%UnrealEditor%\' OR Name like \'%UE4Editor%\'" '
             '| Select-Object ProcessId, CommandLine '
             '| ConvertTo-Json -Compress'
         )
@@ -1494,7 +1704,7 @@ def find_running_editors() -> list[dict]:
     try:
         result = subprocess.run(
             ["wmic", "process", "where",
-             "name like '%UnrealEditor%'",
+             "(name like '%UnrealEditor%' or name like '%UE4Editor%')",
              "get", "ProcessId,CommandLine", "/format:csv"],
             capture_output=True, text=True, timeout=10,
             shell=True,
@@ -1563,7 +1773,7 @@ def detect_ue_dialogs() -> list[dict]:
 
     def _enum_main_windows(hwnd, _lparam):
         title = _get_title(hwnd)
-        if "UnrealEditor" in title:
+        if "UnrealEditor" in title or "UE4Editor" in title:
             ue_main_windows.append(hwnd)
         return True
 

@@ -543,7 +543,7 @@ except Exception as _e:
                 while True:
                     raw_name = bytes(entry.szExeFile).split(b"\0", 1)[0]
                     name = _decode_windows_command_output(raw_name)
-                    if "UnrealEditor" in name:
+                    if "UnrealEditor" in name or "UE4Editor" in name:
                         ue_pids.append(int(entry.th32ProcessID))
                     if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
                         break

@@ -28,6 +28,72 @@ class TestBackend:
         assert exe is not None
         assert "UnrealEditor.exe" in exe
 
+    def test_find_editor_exe_supports_ue4_cmd_binary(self, tmp_path):
+        from cli_anything.unreal.utils.ue_backend import find_editor_exe
+
+        bin_dir = tmp_path / "Engine" / "Binaries" / "Win64"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "UE4Editor-Cmd.exe").write_text("fake", encoding="utf-8")
+
+        exe = find_editor_exe(str(tmp_path))
+
+        assert exe is not None
+        assert exe.endswith("UE4Editor-Cmd.exe")
+
+    def test_check_engine_build_supports_ue4_binary_names(self, tmp_path):
+        from cli_anything.unreal.utils.ue_backend import check_engine_build
+
+        bin_dir = tmp_path / "Engine" / "Binaries" / "Win64"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "UE4Editor.exe").write_bytes(b"0" * 200_000)
+        (bin_dir / "UE4Editor.modules").write_text(
+            json.dumps({"BuildId": "ue4-build", "Modules": {"Core": "UE4Editor-Core.dll"}}),
+            encoding="utf-8",
+        )
+        build_dir = tmp_path / "Engine" / "Build"
+        build_dir.mkdir(parents=True)
+        (build_dir / "Build.version").write_text(
+            json.dumps({"MajorVersion": 4, "MinorVersion": 26, "PatchVersion": 1}),
+            encoding="utf-8",
+        )
+
+        result = check_engine_build(str(tmp_path))
+
+        assert result["ready"] is True
+        assert result["build_id"] == "ue4-build"
+        assert result["details"]["editor_binary_prefix"] == "UE4Editor"
+        assert result["errors"] == []
+
+    def test_check_project_build_supports_ue4_binary_names(self, tmp_path):
+        from cli_anything.unreal.utils.ue_backend import check_project_build
+
+        project_dir = tmp_path / "UE4Game"
+        source_dir = project_dir / "Source" / "UAGame"
+        source_dir.mkdir(parents=True)
+        (source_dir / "UAGame.cpp").write_text("// cpp", encoding="utf-8")
+        (source_dir / "UAGame.h").write_text("// h", encoding="utf-8")
+        uproject = project_dir / "UAGame.uproject"
+        uproject.write_text(
+            json.dumps({"FileVersion": 3, "Modules": [{"Name": "UAGame", "Type": "Runtime"}]}),
+            encoding="utf-8",
+        )
+        bin_dir = project_dir / "Binaries" / "Win64"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "UE4Editor.modules").write_text(
+            json.dumps({"BuildId": "ue4-build", "Modules": {"UAGame": "UE4Editor-UAGame.dll"}}),
+            encoding="utf-8",
+        )
+        dll = bin_dir / "UE4Editor-UAGame.dll"
+        dll.write_bytes(b"0" * 10)
+        os.utime(dll, (time.time() + 10, time.time() + 10))
+
+        result = check_project_build(str(uproject), engine_build_id="ue4-build", editor_binary_prefix="UE4Editor")
+
+        assert result["ready"] is True
+        assert result["needs_compile"] is False
+        assert result["details"]["editor_binary_prefix"] == "UE4Editor"
+        assert result["errors"] == []
+
     def test_find_uat(self, mock_engine_root):
         from cli_anything.unreal.utils.ue_backend import find_uat
 
@@ -807,6 +873,11 @@ def test_preflight_enables_remote_control_plugin_when_ini_already_valid(tmp_path
              "warnings": [],
              "details": {},
          }), \
+         patch("cli_anything.unreal.utils.ue_backend._check_plugin_loadable", return_value={
+             "available": True,
+             "plugin": "RemoteControl",
+             "reason": "test",
+          }), \
          patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
              "deployed": True,
              "action": "already_up_to_date",
@@ -819,6 +890,77 @@ def test_preflight_enables_remote_control_plugin_when_ini_already_valid(tmp_path
         "Fixed: RemoteControl plugin is not enabled" in warning
         for warning in result["project"]["warnings"]
     )
+
+
+def test_preflight_does_not_enable_unavailable_remote_control_plugin(tmp_path):
+    """UE4/custom engines can lack RemoteControl modules; preflight must not brick startup."""
+    from cli_anything.unreal.utils.ue_backend import _is_plugin_enabled_in_uproject, preflight_check
+
+    project_dir = tmp_path / "UE4Game"
+    project_dir.mkdir()
+    uproject = project_dir / "UAGame.uproject"
+    uproject.write_text(
+        json.dumps({"FileVersion": 3, "EngineAssociation": "4.26", "Plugins": []}),
+        encoding="utf-8",
+    )
+    engine_root = tmp_path / "UE4Engine"
+    bin_dir = engine_root / "Engine" / "Binaries" / "Win64"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "UE4Editor.exe").write_bytes(b"0" * 200_000)
+    (bin_dir / "UE4Editor.modules").write_text(
+        json.dumps({"BuildId": "ue4-build", "Modules": {"Core": "UE4Editor-Core.dll"}}),
+        encoding="utf-8",
+    )
+    build_dir = engine_root / "Engine" / "Build"
+    build_dir.mkdir(parents=True)
+    (build_dir / "Build.version").write_text(
+        json.dumps({"MajorVersion": 4, "MinorVersion": 26, "PatchVersion": 1}),
+        encoding="utf-8",
+    )
+
+    with patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
+        "deployed": True,
+        "action": "already_up_to_date",
+    }):
+        result = preflight_check(str(uproject), engine_root=str(engine_root))
+
+    assert _is_plugin_enabled_in_uproject(str(project_dir), "RemoteControl") is False
+    assert not (project_dir / "Config" / "DefaultRemoteControl.ini").exists()
+    assert result["remote_control"]["auto_fixed"] is False
+    assert result["remote_control"]["fix_result"]["status"] == "unavailable"
+    assert "RemoteControl plugin is not available" in result["remote_control"]["fix_result"]["error"]
+    assert result["ready"] is False
+    assert result["bridge_plugin"]["skipped"] is True
+    assert not (project_dir / "Plugins" / "CliAnythingBridge").exists()
+
+
+def test_preflight_rejects_already_enabled_but_unavailable_remote_control(tmp_path):
+    """A previously auto-enabled RemoteControl entry is still unsafe if engine modules are missing."""
+    from cli_anything.unreal.utils.ue_backend import preflight_check
+
+    project_dir = tmp_path / "RemoteOnly"
+    uproject = _write_remote_control_project(project_dir, remote_enabled=True)
+    engine_root = tmp_path / "UE4Engine"
+    bin_dir = engine_root / "Engine" / "Binaries" / "Win64"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "UE4Editor.exe").write_bytes(b"0" * 200_000)
+    (bin_dir / "UE4Editor.modules").write_text(
+        json.dumps({"BuildId": "ue4-build", "Modules": {"Core": "UE4Editor-Core.dll"}}),
+        encoding="utf-8",
+    )
+    build_dir = engine_root / "Engine" / "Build"
+    build_dir.mkdir(parents=True)
+    (build_dir / "Build.version").write_text(
+        json.dumps({"MajorVersion": 4, "MinorVersion": 26, "PatchVersion": 1}),
+        encoding="utf-8",
+    )
+
+    result = preflight_check(str(uproject), engine_root=str(engine_root))
+
+    assert result["ready"] is False
+    assert result["remote_control"]["configured"] is False
+    assert result["remote_control"]["fix_result"]["status"] == "unavailable"
+    assert any("RemoteControl plugin is not available" in issue for issue in result["remote_control"]["issues"])
 
 
 class TestHTTPAPIAssets:

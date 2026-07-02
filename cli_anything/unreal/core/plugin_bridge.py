@@ -35,6 +35,35 @@ def get_bundled_version() -> str | None:
     return _read_uplugin_version(bundled_uplugin)
 
 
+def _ensure_disabled_by_default(uplugin_path: Path) -> bool:
+    try:
+        data = json.loads(uplugin_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if data.get("EnabledByDefault") is False:
+        return False
+    data["EnabledByDefault"] = False
+    uplugin_path.write_text(json.dumps(data, indent="\t") + "\n", encoding="utf-8")
+    return True
+
+
+def ensure_project_bridge_disabled_by_default(project_dir: str) -> dict:
+    """Disable descriptor-level autoload for an already deployed bridge plugin."""
+    target_uplugin = Path(project_dir) / "Plugins" / _PLUGIN_NAME / f"{_PLUGIN_NAME}.uplugin"
+    if not target_uplugin.exists():
+        return {
+            "status": "missing",
+            "changed": False,
+            "plugin_dir": str(target_uplugin.parent),
+        }
+    changed = _ensure_disabled_by_default(target_uplugin)
+    return {
+        "status": "ok",
+        "changed": changed,
+        "plugin_dir": str(target_uplugin.parent),
+    }
+
+
 def ensure_plugin_deployed(project_dir: str) -> dict:
     """Ensure the bridge plugin source is deployed to the project.
 
@@ -60,11 +89,13 @@ def ensure_plugin_deployed(project_dir: str) -> dict:
     if target_uplugin.exists():
         target_version = _read_uplugin_version(target_uplugin)
         if target_version == bundled_version:
+            normalized = _ensure_disabled_by_default(target_uplugin)
             return {
                 "deployed": True,
                 "action": "already_up_to_date",
                 "version": target_version,
                 "plugin_dir": str(target_dir),
+                "descriptor_normalized": normalized,
             }
         action = f"updated_{target_version}_to_{bundled_version}"
     else:
@@ -87,12 +118,14 @@ def ensure_plugin_deployed(project_dir: str) -> dict:
             }
 
     shutil.copytree(str(_BUNDLED_PLUGIN_DIR), str(target_dir))
+    normalized = _ensure_disabled_by_default(target_uplugin)
 
     return {
         "deployed": True,
         "action": action,
         "version": bundled_version,
         "plugin_dir": str(target_dir),
+        "descriptor_normalized": normalized,
     }
 
 
@@ -133,11 +166,19 @@ def get_plugin_binary_status(project_dir: str, engine_root: str | None = None) -
     """
     plugin_dir = Path(project_dir) / "Plugins" / _PLUGIN_NAME
     bin_dir = plugin_dir / "Binaries" / "Win64"
-    dll_path = bin_dir / f"UnrealEditor-{_PLUGIN_NAME}.dll"
-    modules_path = bin_dir / "UnrealEditor.modules"
+    editor_binary_prefix = "UnrealEditor"
+    if engine_root:
+        try:
+            from cli_anything.unreal.utils.ue_backend import get_editor_binary_prefix
+            editor_binary_prefix = get_editor_binary_prefix(engine_root)
+        except Exception:
+            editor_binary_prefix = "UnrealEditor"
+    dll_path = bin_dir / f"{editor_binary_prefix}-{_PLUGIN_NAME}.dll"
+    modules_path = bin_dir / f"{editor_binary_prefix}.modules"
 
     base = {
         "plugin_dir": str(plugin_dir),
+        "editor_binary_prefix": editor_binary_prefix,
         "dll_path": str(dll_path),
         "modules_path": str(modules_path),
     }
@@ -163,7 +204,7 @@ def get_plugin_binary_status(project_dir: str, engine_root: str | None = None) -
             **base,
             "ready": False,
             "reason": "missing_modules_file",
-            "message": "Bridge plugin UnrealEditor.modules file is missing.",
+            "message": f"Bridge plugin {editor_binary_prefix}.modules file is missing.",
         }
 
     try:
@@ -192,7 +233,7 @@ def get_plugin_binary_status(project_dir: str, engine_root: str | None = None) -
         }
 
     if engine_root:
-        engine_modules = Path(engine_root) / "Engine" / "Binaries" / "Win64" / "UnrealEditor.modules"
+        engine_modules = Path(engine_root) / "Engine" / "Binaries" / "Win64" / f"{editor_binary_prefix}.modules"
         engine_build_id = _read_modules_build_id(engine_modules)
         plugin_build_id = _read_modules_build_id(modules_path)
         if engine_build_id and plugin_build_id and engine_build_id != plugin_build_id:
