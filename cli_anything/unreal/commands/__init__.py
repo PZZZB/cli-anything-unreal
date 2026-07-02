@@ -174,6 +174,17 @@ def require_project(state: AppState):
         )
 
 
+@click.command("preflight")
+@handle_error
+@click.pass_obj
+def preflight_cmd(state: AppState):
+    """Run editor startup preflight checks."""
+    from cli_anything.unreal.utils.ue_backend import preflight_check
+
+    require_project(state)
+    output(preflight_check(state.session.project_path, state.session.engine_root), state)
+
+
 def _same_project_path(left: str | None, right: str | None) -> bool:
     if not left or not right:
         return False
@@ -274,6 +285,7 @@ def register_commands(cli_group: click.Group):
     cli_group.add_command(umg_group)
     cli_group.add_command(screenshot_group)
     cli_group.add_command(editor_group)
+    cli_group.add_command(preflight_cmd)
     cli_group.add_command(session_group)
     register_skills(cli_group)
     register_repl(cli_group)

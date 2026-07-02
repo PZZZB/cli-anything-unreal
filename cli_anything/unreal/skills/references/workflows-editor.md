@@ -9,7 +9,7 @@ Step 1: editor status
   Matching instance online? Proceed to your task.
   No matching online instance? Continue to Step 2.
 
-Step 2: editor preflight
+Step 2: preflight (or editor preflight)
   Ready? editor launch
   BuildId mismatch? Continue to Step 3.
 
@@ -23,7 +23,7 @@ Step 4: editor status (verify)
 ```
 
 Key points:
-- `editor preflight` verifies Remote Control config and enables the `RemoteControl` plugin when needed.
+- `preflight` (`editor preflight` also works) verifies Remote Control config and enables the `RemoteControl` plugin when safe.
 - `editor launch` waits until API online or timeout. Without `--timeout`, foreground wait is bounded; slow launches return `launching` with a task id instead of hanging until the shell kills ue-cli. Do not use `sleep`.
 - Async: `--no-wait`, then `editor status <task_id>` or `task status <task_id>`.
 - DLL locked build fail -> `editor close`, then compile. If `editor plugin-upgrade` reports `LNK1104` with `locked_file`, close/kill all UnrealEditor processes for that project and retry the reported command. `plugin-upgrade` waits for matching editor processes to exit before compiling, but another stale process can still hold third-party plugin DLLs.
@@ -39,7 +39,7 @@ Key points:
 
 ```bash
 # 1. Preflight - catches build mismatches before they cause hangs
-ue-cli --project F:\MyGame\MyGame.uproject editor preflight
+ue-cli --project F:\MyGame\MyGame.uproject preflight
 
 # 2. If BuildId mismatch, compile first
 ue-cli --project F:\MyGame\MyGame.uproject build compile

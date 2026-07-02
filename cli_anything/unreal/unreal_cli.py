@@ -65,6 +65,15 @@ COMMAND_SPECS = [
         ],
     },
     {
+        "name": "preflight",
+        "description": "Check engine/project build and Remote Control readiness before launching.",
+        "async_supported": False,
+        "estimated_duration": "<5s",
+        "parameters": [
+            {"name": "--project", "required": True},
+        ],
+    },
+    {
         "name": "editor launch",
         "description": "Launch the Unreal Editor and wait for Remote Control API readiness.",
         "async_supported": True,

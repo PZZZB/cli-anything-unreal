@@ -84,6 +84,7 @@ class TestCLI:
         assert result.exit_code == 0
         names = {item["name"] for item in json.loads(result.output)}
         assert {"umg create", "umg add-widget", "umg tree"}.issubset(names)
+        assert "preflight" in names
         assert "slate create" not in names
 
     def test_setup_metadata_uses_ue_cli_name(self):
@@ -363,6 +364,29 @@ class TestCLI:
         assert data["status"] == "success"
         assert data["result"]["status"] == "submitted"
         assert "task_id" in data["result"]
+
+    @patch("cli_anything.unreal.utils.ue_backend.preflight_check")
+    def test_top_level_preflight_alias(self, mock_preflight, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_preflight.return_value = {
+            "ready": True,
+            "engine": {"ready": True, "errors": [], "warnings": []},
+            "project": {"ready": True, "errors": [], "warnings": []},
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", temp_project["uproject"],
+            "preflight",
+        ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["ready"] is True
+        mock_preflight.assert_called_once()
 
     @patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None)
     @patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None)
