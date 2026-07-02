@@ -14,7 +14,7 @@ Benchmark failures: locks, corruption, modal dialogs, wasted turns.
 | `os.remove()` for .uasset in Python | `EditorAssetLibrary.delete_asset()` | Direct deletion corrupts in-memory asset registry |
 | `taskkill` / `kill` editor process | `editor close` | Dirty shutdown leaves locks/corrupt state |
 | Editing `.ini` config files directly | `project config set` | CLI preserves UE formatting/reload assumptions |
-| `LevelEditorSubsystem.new_level` or `save_current_level` in Python | `editor new-level` or `editor save-level` | UE HTTP tick-thread crash risk |
+| `LevelEditorSubsystem.new_level`, `EditorLoadingAndSavingUtils.load_map`, or `save_current_level` in Python | `editor new-level`, `editor open-level`, or `editor save-level` | UE world transition / HTTP tick-thread crash risk |
 
 **General rule:** all UE ops through CLI. Direct file manipulation bypasses locks/reference tracking.
 

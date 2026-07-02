@@ -85,6 +85,7 @@ class TestCLI:
         names = {item["name"] for item in json.loads(result.output)}
         assert {"umg create", "umg add-widget", "umg tree"}.issubset(names)
         assert "preflight" in names
+        assert "editor open-level" in names
         assert "slate create" not in names
 
     def test_setup_metadata_uses_ue_cli_name(self):

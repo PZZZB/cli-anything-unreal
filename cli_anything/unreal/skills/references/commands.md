@@ -12,11 +12,12 @@ Workflow examples live in sibling workflow docs.
 | `preflight` / `editor preflight` | Check engine/project build compatibility | No |
 | `editor launch [--map MAP] [--no-wait] [--timeout N]` | Launch editor; waits until ready; kills zombies. Without `--timeout`, foreground wait is bounded so shells do not kill the command; if the editor is still starting, the command returns a pollable `launching` task. | No |
 | `editor close` | Gracefully close editor, then waits for same-project UnrealEditor process exit (kills stale lock holder if needed) | No |
-| `editor new-level PATH [--template PATH]` | Safely create/open new level | Yes |
-| `editor save-level` | Safely save current level | Yes |
+| `editor new-level PATH [--template PATH]` | Safely create/open new level; editor disconnects return top-level `EDITOR_CONNECTION_LOST` | Yes |
+| `editor open-level PATH` | Safely open an existing level via `LevelEditorSubsystem.LoadLevel`; use this instead of `EditorLoadingAndSavingUtils.load_map` in `run-script` | Yes |
+| `editor save-level` | Safely save current level; editor disconnects return top-level `EDITOR_CONNECTION_LOST` | Yes |
 | `editor exec [--timeout SEC] [--log-wait SEC] COMMAND` | Run UE console command and return captured Output Log text when available (`stat unit`, `r.DumpRenderTargetPoolMemory`, `renderdoc.captureframe`) | Yes |
 | `editor viewport bookmark jump --index N [--timeout SEC]` | Jump Level Viewport bookmark 0-9; Windows only | Yes |
-| `editor run-script [PATH|-] [-c CODE] [--timeout N] [--no-save]` | Execute Python file, stdin (`-`), or short inline code with result capture | Yes |
+| `editor run-script [PATH|-] [-c CODE] [--timeout N] [--no-save]` | Execute Python file, stdin (`-`), or short inline code with result capture. Blocks known-crashy map transitions via `EditorLoadingAndSavingUtils.new_blank_map`/`load_map`; use `editor new-level` or `editor open-level` first, then run actor setup scripts. | Yes |
 | `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable; `get` errors on missing/unverified empty CVars, negative values are supported (`... set r.X -4` or `... set r.X -- -4`) | Yes |
 | `editor enable-remote` | Enable Remote Control config | No |
 | `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover UE class/struct/API. TARGET: class, struct, asset path, loaded UObject/subobject path, actor path | Yes |

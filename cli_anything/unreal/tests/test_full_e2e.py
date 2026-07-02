@@ -1053,21 +1053,9 @@ class TestMaterialHlslShaderSourceE2E:
     def test_hlsl_code_cli(self, cli_runner, project_path, api_port):
         """Test material hlsl-code CLI command."""
         from cli_anything.unreal.unreal_cli import cli
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
-        # First get a material path
-        result = cli_runner.invoke(cli, [
-            "--output", "json", "--project", project_path, "--port", str(api_port),
-            "material", "list",
-        ])
-        if result.exit_code != 0:
-            pytest.skip("Could not list materials")
-
-        data = json.loads(result.output)
-        result_data = data.get("result", data)
-        if not result_data.get("materials"):
-            pytest.skip("No materials in project")
-
-        mat_path = result_data["materials"][0]["path"]
+        mat_path = self._get_test_material(UEEditorAPI(port=api_port), project_path)
 
         result = cli_runner.invoke(cli, [
             "--output", "json", "--project", project_path, "--port", str(api_port),
@@ -1086,20 +1074,9 @@ class TestMaterialHlslShaderSourceE2E:
     def test_shader_source_cli(self, cli_runner, project_path, api_port):
         """Test material shader-source CLI command."""
         from cli_anything.unreal.unreal_cli import cli
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
-        result = cli_runner.invoke(cli, [
-            "--output", "json", "--project", project_path, "--port", str(api_port),
-            "material", "list",
-        ])
-        if result.exit_code != 0:
-            pytest.skip("Could not list materials")
-
-        data = json.loads(result.output)
-        result_data = data.get("result", data)
-        if not result_data.get("materials"):
-            pytest.skip("No materials in project")
-
-        mat_path = result_data["materials"][0]["path"]
+        mat_path = self._get_test_material(UEEditorAPI(port=api_port), project_path)
 
         result = cli_runner.invoke(cli, [
             "--output", "json", "--project", project_path, "--port", str(api_port),

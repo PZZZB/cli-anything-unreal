@@ -1387,8 +1387,8 @@ def editor_exec(state: AppState, timeout, log_wait, command):
     output(result, state)
 
 
-def _is_run_script_transport_disconnect(result: dict) -> bool:
-    """Return True when run-script failed because the editor connection dropped."""
+def _is_transport_disconnect_result(result: dict) -> bool:
+    """Return True when a command failed because the editor connection dropped."""
     if not isinstance(result, dict) or result.get("error_type"):
         return False
     text = " ".join(str(result.get(key, "")) for key in ("error", "traceback"))
@@ -1402,6 +1402,77 @@ def _is_run_script_transport_disconnect(result: dict) -> bool:
         "10054",
     )
     return any(marker in text for marker in markers)
+
+
+def _raise_editor_connection_lost(result: dict, operation: str) -> None:
+    details = dict(result)
+    details["failure_kind"] = "transport_disconnect"
+    details["operation"] = operation
+    raise AppError(
+        "EDITOR_CONNECTION_LOST",
+        f"Editor connection was lost while running {operation}.",
+        exit_code=3,
+        details=details,
+        suggestion=(
+            "Run editor status to check whether Unreal Editor crashed, exited, or is restarting; "
+            "relaunch if offline, then retry after the editor is online."
+        ),
+    )
+
+
+def _unsafe_run_script_operation(code: str) -> dict | None:
+    """Detect UE Python operations known to crash unattended editor sessions."""
+    if not code:
+        return None
+    patterns = (
+        r"\bEditorLoadingAndSavingUtils\s*\.\s*new_blank_map\s*\(",
+        r"\bEditorLoadingAndSavingUtils\s*\.\s*load_map\s*\(",
+        r"\bnew_blank_map\s*\(",
+        r"\bload_map\s*\(",
+    )
+    if any(re.search(pattern, code) for pattern in patterns):
+        operation = (
+            "EditorLoadingAndSavingUtils.load_map"
+            if re.search(r"\b(?:EditorLoadingAndSavingUtils\s*\.\s*)?load_map\s*\(", code)
+            else "EditorLoadingAndSavingUtils.new_blank_map"
+        )
+        return {
+            "operation": operation,
+            "reason": "known_world_teardown_crash",
+            "safe_workflow": [
+                "ue-cli --project <Project.uproject> editor new-level /Game/Path/Level",
+                "ue-cli --project <Project.uproject> editor open-level /Game/Path/Level",
+                "ue-cli --project <Project.uproject> editor run-script <actor_setup.py>",
+                "ue-cli --project <Project.uproject> editor save-level",
+            ],
+        }
+    for match in re.finditer(r"open\s*\(\s*r?[\"']([^\"']+\.py)[\"']", code):
+        source_path = Path(match.group(1))
+        if not source_path.is_file():
+            continue
+        try:
+            nested_code = source_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        unsafe = _unsafe_run_script_operation(nested_code)
+        if unsafe:
+            unsafe = dict(unsafe)
+            unsafe["source_path"] = str(source_path)
+            return unsafe
+    return None
+
+
+def _raise_unsafe_run_script_operation(unsafe: dict) -> None:
+    raise AppError(
+        "UNSAFE_RUN_SCRIPT_OPERATION",
+        f"{unsafe['operation']} is blocked in editor run-script because it can crash unattended editor sessions.",
+        exit_code=2,
+        details=unsafe,
+        suggestion=(
+            "Use editor new-level or editor open-level for map transitions, then run a separate script "
+            "for actor/content setup and save with editor save-level."
+        ),
+    )
 
 
 @editor_group.command("run-script")
@@ -1460,6 +1531,16 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
                 suggestion="Pass an existing .py file, '-' for stdin, or -c for a short one-liner.",
             )
 
+    if code is not None or stdin_code is not None:
+        unsafe = _unsafe_run_script_operation(code if code is not None else stdin_code)
+        if unsafe:
+            _raise_unsafe_run_script_operation(unsafe)
+    else:
+        script_code = Path(script_path).read_text(encoding="utf-8")
+        unsafe = _unsafe_run_script_operation(script_code)
+        if unsafe:
+            _raise_unsafe_run_script_operation(unsafe)
+
     api = require_editor(state)
 
     if code is not None or stdin_code is not None:
@@ -1477,19 +1558,8 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
             save=not no_save,
         )
     if isinstance(result, dict) and result.get("error"):
-        if _is_run_script_transport_disconnect(result):
-            details = dict(result)
-            details["failure_kind"] = "transport_disconnect"
-            raise AppError(
-                "EDITOR_CONNECTION_LOST",
-                "Editor connection was lost while running the script.",
-                exit_code=3,
-                details=details,
-                suggestion=(
-                    "Run editor status to check whether Unreal Editor crashed, exited, or is restarting; "
-                    "relaunch if offline, then retry the script after the editor is online."
-                ),
-            )
+        if _is_transport_disconnect_result(result):
+            _raise_editor_connection_lost(result, "editor run-script")
         raise AppError(
             "SCRIPT_EXECUTION_FAILED",
             str(result.get("error")),
@@ -1763,6 +1833,22 @@ def editor_new_level(state: AppState, level_path, template):
     from cli_anything.unreal.core.scene import new_level
     api = require_editor(state)
     result = new_level(api, level_path, template)
+    if _is_transport_disconnect_result(result):
+        _raise_editor_connection_lost(result, "editor new-level")
+    output(result, state)
+
+
+@editor_group.command("open-level")
+@click.argument("level_path")
+@handle_error
+@click.pass_obj
+def editor_open_level(state: AppState, level_path):
+    """Open an existing level."""
+    from cli_anything.unreal.core.scene import open_level
+    api = require_editor(state)
+    result = open_level(api, level_path)
+    if _is_transport_disconnect_result(result):
+        _raise_editor_connection_lost(result, "editor open-level")
     output(result, state)
 
 
@@ -1774,4 +1860,6 @@ def editor_save_level(state: AppState):
     from cli_anything.unreal.core.scene import save_level
     api = require_editor(state)
     result = save_level(api)
+    if _is_transport_disconnect_result(result):
+        _raise_editor_connection_lost(result, "editor save-level")
     output(result, state)

@@ -296,6 +296,24 @@ class TestAssets:
         # Should have called exec_python_ex twice (once to load, once to save)
         assert api.exec_python_ex.call_count == 2
 
+    def test_asset_property_set_loads_when_exists_probe_is_stale(self):
+        from cli_anything.unreal.core.assets import set_asset_property
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = False
+        api.exec_python_ex.return_value = {
+            "LogOutput": [{"Output": "LOADED_OBJECT:/Game/M_Test.M_Test"}]
+        }
+        api.set_property.return_value = {"status": "ok"}
+
+        result = set_asset_property(api, "/Game/M_Test", "BlendMode", "Masked")
+        assert result["status"] == "ok"
+        assert api.set_property.call_args.args == (
+            "/Game/M_Test.M_Test",
+            "BlendMode",
+            "Masked",
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Test ue_http_api.py — asset & GC methods (mocked)

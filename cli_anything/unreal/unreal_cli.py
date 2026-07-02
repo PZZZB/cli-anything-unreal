@@ -97,6 +97,32 @@ COMMAND_SPECS = [
         ],
     },
     {
+        "name": "editor new-level",
+        "description": "Create and open a new level via LevelEditorSubsystem.",
+        "async_supported": False,
+        "estimated_duration": "5-30s",
+        "parameters": [
+            {"name": "LEVEL_PATH", "required": True},
+            {"name": "--template", "required": False},
+        ],
+    },
+    {
+        "name": "editor open-level",
+        "description": "Open an existing level via LevelEditorSubsystem.",
+        "async_supported": False,
+        "estimated_duration": "5-30s",
+        "parameters": [
+            {"name": "LEVEL_PATH", "required": True},
+        ],
+    },
+    {
+        "name": "editor save-level",
+        "description": "Save the current level via LevelEditorSubsystem.",
+        "async_supported": False,
+        "estimated_duration": "5-30s",
+        "parameters": [],
+    },
+    {
         "name": "umg create",
         "description": "Create a Widget Blueprint with a root widget.",
         "async_supported": False,

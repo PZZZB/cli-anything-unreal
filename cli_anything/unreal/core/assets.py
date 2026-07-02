@@ -406,12 +406,19 @@ if asset:
 
 def set_asset_property(api: "UEEditorAPI", asset_path: str, property_name: str, value) -> dict:
     """Set a property value on a UAsset and mark it dirty."""
-    if not api.does_asset_exist(asset_path):
-        return {"error": f"Asset not found: {asset_path}"}
+    exists_probe = api.does_asset_exist(asset_path)
         
     script = f'''
 import unreal
-asset = unreal.EditorAssetLibrary.load_asset('{asset_path}')
+asset_path = {asset_path!r}
+asset = unreal.EditorAssetLibrary.load_asset(asset_path)
+if asset is None and "." not in asset_path.rsplit("/", 1)[-1]:
+    asset = unreal.EditorAssetLibrary.load_asset(asset_path + "." + asset_path.rsplit("/", 1)[-1])
+if asset is None:
+    try:
+        asset = unreal.load_object(None, asset_path)
+    except Exception:
+        asset = None
 if asset:
     unreal.log(f'LOADED_OBJECT:{{asset.get_path_name()}}')
 '''
@@ -423,6 +430,8 @@ if asset:
             object_path = line.split(":", 1)[1].strip()
             
     if not object_path:
+        if exists_probe is False:
+            return {"error": f"Asset not found: {asset_path}"}
         return {"error": f"Failed to load asset into memory: {asset_path}"}
         
     set_res = api.set_property(object_path, property_name, value)

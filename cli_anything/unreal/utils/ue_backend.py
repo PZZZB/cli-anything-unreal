@@ -1008,15 +1008,38 @@ def _check_plugin_loadable(
         }
 
     missing = []
+    source_only = []
     for module_name in modules:
         module_binary = plugin_dir / "Binaries" / "Win64" / f"{editor_binary_prefix}-{module_name}.dll"
         module_source = plugin_dir / "Source" / module_name / f"{module_name}.Build.cs"
-        if not module_binary.is_file() and not module_source.is_file():
+        if module_binary.is_file():
+            continue
+        if module_source.is_file():
+            source_only.append({
+                "module": module_name,
+                "binary": str(module_binary),
+                "source": str(module_source),
+            })
+        else:
             missing.append({
                 "module": module_name,
                 "binary": str(module_binary),
                 "source": str(module_source),
             })
+
+    if source_only:
+        return {
+            "available": False,
+            "plugin": plugin_name,
+            "descriptor": str(descriptor),
+            "reason": "source_only_modules_uncompiled",
+            "modules": modules,
+            "source_only_modules": source_only,
+            "message": (
+                f"{plugin_name} plugin has source but no {editor_binary_prefix} module binaries. "
+                "Preflight will not enable it automatically because the editor cannot load uncompiled plugin modules."
+            ),
+        }
 
     if missing:
         return {
@@ -1050,7 +1073,8 @@ def ensure_remote_control_config(
     - Remote Python execution
     - Allow all origins
 
-    Also enables the RemoteControl plugin in the .uproject file.
+    Also enables the RemoteControl plugin in the .uproject file, but only
+    after verifying that the plugin has loadable editor module binaries.
 
     Args:
         project_dir: Path to project root directory.
@@ -1593,9 +1617,9 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
     if not rc_plugin_check.get("available", False):
         rc_check["configured"] = False
         rc_check["plugin_loadable"] = rc_plugin_check
-        rc_check.setdefault("issues", []).append(
+        rc_check["issues"] = [
             "RemoteControl plugin is not available/loadable for this engine; preflight did not modify project files."
-        )
+        ]
         rc_check["auto_fixed"] = False
         rc_check["fix_result"] = {
             "status": "unavailable",

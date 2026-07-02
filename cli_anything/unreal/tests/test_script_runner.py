@@ -1139,6 +1139,190 @@ class TestScriptRunner:
         assert "editor status" in data["suggestion"]
         assert data["details"]["failure_kind"] == "transport_disconnect"
 
+    def test_editor_new_level_connection_reset_is_top_level_error(self):
+        """Level creation transport disconnects should not be wrapped as success."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.new_level") as mock_new_level:
+            mock_editor.return_value = MagicMock()
+            mock_new_level.return_value = {
+                "error": "('Connection aborted.', ConnectionResetError(10054, 'remote host forcibly closed', None, 10054, None))",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "new-level", "/Game/Test/L_Test",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "EDITOR_CONNECTION_LOST"
+        assert "connection was lost" in data["message"]
+        assert "editor status" in data["suggestion"]
+        assert data["details"]["failure_kind"] == "transport_disconnect"
+        assert data["details"]["operation"] == "editor new-level"
+
+    def test_editor_save_level_connection_reset_is_top_level_error(self):
+        """Level save transport disconnects should not be wrapped as success."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.save_level") as mock_save_level:
+            mock_editor.return_value = MagicMock()
+            mock_save_level.return_value = {
+                "error": "('Connection aborted.', ConnectionResetError(10054, 'remote host forcibly closed', None, 10054, None))",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "save-level",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_CONNECTION_LOST"
+        assert data["details"]["operation"] == "editor save-level"
+
+    def test_editor_open_level_connection_reset_is_top_level_error(self):
+        """Level open transport disconnects should not be wrapped as success."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.open_level") as mock_open_level:
+            mock_editor.return_value = MagicMock()
+            mock_open_level.return_value = {
+                "error": "('Connection aborted.', ConnectionResetError(10054, 'remote host forcibly closed', None, 10054, None))",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "open-level", "/Game/Test/L_Test",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_CONNECTION_LOST"
+        assert data["details"]["operation"] == "editor open-level"
+
+    def test_editor_open_level_success(self):
+        """The open-level CLI should expose the safe LevelEditorSubsystem path."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.open_level") as mock_open_level:
+            mock_editor.return_value = MagicMock()
+            mock_open_level.return_value = {
+                "status": "ok",
+                "success": True,
+                "path": "/Game/Test/L_Test",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "open-level", "/Game/Test/L_Test",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"]["status"] == "ok"
+        mock_open_level.assert_called_once()
+
+    def test_editor_run_script_blocks_load_map_inline_code(self):
+        """Known-crashy map loading APIs should be blocked before contacting the editor."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script",
+                "-c", "import unreal; unreal.EditorLoadingAndSavingUtils.load_map('/Game/Test/L_Test')",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "UNSAFE_RUN_SCRIPT_OPERATION"
+        assert "load_map" in data["message"]
+        assert "editor open-level" in data["suggestion"]
+        mock_editor.assert_not_called()
+        mock_run.assert_not_called()
+
+    def test_editor_run_script_blocks_new_blank_map_inline_code(self):
+        """Known-crashy map creation APIs should be blocked before contacting the editor."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script",
+                "-c", "import unreal; unreal.EditorLoadingAndSavingUtils.new_blank_map(False)",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "UNSAFE_RUN_SCRIPT_OPERATION"
+        assert "new_blank_map" in data["message"]
+        assert "editor new-level" in data["suggestion"]
+        mock_editor.assert_not_called()
+        mock_run.assert_not_called()
+
+    def test_editor_run_script_blocks_new_blank_map_script_file(self, tmp_path):
+        """Script files are inspected for known-crashy map creation APIs."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        script = tmp_path / "make_scene.py"
+        script.write_text(
+            "import unreal\nunreal.EditorLoadingAndSavingUtils.new_blank_map(False)\n",
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script", str(script),
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "UNSAFE_RUN_SCRIPT_OPERATION"
+        assert "editor new-level" in data["suggestion"]
+        mock_editor.assert_not_called()
+
+    def test_editor_run_script_blocks_new_blank_map_inline_exec_file(self, tmp_path):
+        """Inline exec(open(...)) is inspected so unsafe code cannot hide in another file."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        script = tmp_path / "make_scene.py"
+        script.write_text(
+            "import unreal\nunreal.EditorLoadingAndSavingUtils.new_blank_map(False)\n",
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script",
+                "-c", f"exec(open(r'{script}').read())",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "UNSAFE_RUN_SCRIPT_OPERATION"
+        assert data["details"]["source_path"] == str(script)
+        mock_editor.assert_not_called()
+
     def test_editor_run_script_missing_file_errors(self):
         """Missing script path should return a structured file error."""
         from click.testing import CliRunner

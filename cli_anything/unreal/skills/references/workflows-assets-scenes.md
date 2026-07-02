@@ -215,10 +215,13 @@ result = {"status": "ok", "actor": actor.get_path_name()}
 # Create and open a new level
 ue-cli editor new-level /Game/Maps/NewLevel
 
+# Open an existing level
+ue-cli editor open-level /Game/Maps/ExistingLevel
+
 # Save the current level
 ue-cli editor save-level
 ```
 
 Existing level path -> command refuses to avoid modal. Use `asset delete` first or choose different path.
 
-**Known limitation:** after Python-based commands in same session (`scene list`, actor-path `api-discover`, `run-script`), `new-level` may crash editor due UE PythonScriptPlugin retained UObject refs (`World Memory Leaks` assert). Workaround: relaunch editor before creating level, or create levels early.
+**Known limitation:** creating/loading levels inside `editor run-script` can crash due UE PythonScriptPlugin retained UObject refs (`World Memory Leaks` assert / connection reset). Use `editor new-level` or `editor open-level` for map transitions, then run separate actor/content setup scripts.

@@ -934,6 +934,63 @@ def test_preflight_does_not_enable_unavailable_remote_control_plugin(tmp_path):
     assert not (project_dir / "Plugins" / "CliAnythingBridge").exists()
 
 
+def test_preflight_does_not_enable_ue4_source_only_remote_control(tmp_path):
+    """UE4 RemoteControl source without compiled editor DLLs is not safe to auto-enable."""
+    from cli_anything.unreal.utils.ue_backend import _is_plugin_enabled_in_uproject, preflight_check
+
+    project_dir = tmp_path / "UE4Game"
+    project_dir.mkdir()
+    uproject = project_dir / "UAGame.uproject"
+    uproject.write_text(
+        json.dumps({"FileVersion": 3, "EngineAssociation": "4.26", "Plugins": []}),
+        encoding="utf-8",
+    )
+    engine_root = tmp_path / "UE4Engine"
+    bin_dir = engine_root / "Engine" / "Binaries" / "Win64"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "UE4Editor.exe").write_bytes(b"0" * 200_000)
+    (bin_dir / "UE4Editor.modules").write_text(
+        json.dumps({"BuildId": "ue4-build", "Modules": {"Core": "UE4Editor-Core.dll"}}),
+        encoding="utf-8",
+    )
+    build_dir = engine_root / "Engine" / "Build"
+    build_dir.mkdir(parents=True)
+    (build_dir / "Build.version").write_text(
+        json.dumps({"MajorVersion": 4, "MinorVersion": 26, "PatchVersion": 1}),
+        encoding="utf-8",
+    )
+    plugin_dir = engine_root / "Engine" / "Plugins" / "VirtualProduction" / "RemoteControl"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "RemoteControl.uplugin").write_text(
+        json.dumps({
+            "FileVersion": 3,
+            "Modules": [
+                {"Name": "RemoteControl", "Type": "Runtime"},
+                {"Name": "WebRemoteControl", "Type": "Runtime"},
+                {"Name": "RemoteControlUI", "Type": "Editor"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    for module_name in ("RemoteControl", "WebRemoteControl", "RemoteControlUI"):
+        source_dir = plugin_dir / "Source" / module_name
+        source_dir.mkdir(parents=True)
+        (source_dir / f"{module_name}.Build.cs").write_text("// source only", encoding="utf-8")
+
+    before = uproject.read_text(encoding="utf-8")
+    result = preflight_check(str(uproject), engine_root=str(engine_root))
+    after = uproject.read_text(encoding="utf-8")
+
+    assert before == after
+    assert _is_plugin_enabled_in_uproject(str(project_dir), "RemoteControl") is False
+    assert result["ready"] is False
+    assert result["remote_control"]["auto_fixed"] is False
+    assert result["remote_control"]["fix_result"]["status"] == "unavailable"
+    assert result["remote_control"]["fix_result"]["details"]["reason"] == "source_only_modules_uncompiled"
+    assert not any("enable-remote" in issue for issue in result["remote_control"]["issues"])
+    assert not (project_dir / "Config" / "DefaultRemoteControl.ini").exists()
+
+
 def test_preflight_rejects_already_enabled_but_unavailable_remote_control(tmp_path):
     """A previously auto-enabled RemoteControl entry is still unsafe if engine modules are missing."""
     from cli_anything.unreal.utils.ue_backend import preflight_check

@@ -384,6 +384,25 @@ def new_level(api, path: str, template: str | None = None) -> dict:
     return {"status": "ok" if success else "failed", "success": success, "path": path}
 
 
+def open_level(api, path: str) -> dict:
+    """Open an existing level via LevelEditorSubsystem.LoadLevel.
+
+    This avoids running world-transition APIs from PythonScriptPlugin, which
+    can retain references across map loads and crash unattended editor sessions.
+    """
+    result = api.call_function(
+        _LEVEL_EDITOR_SUBSYSTEM,
+        "LoadLevel",
+        {"AssetPath": path},
+    )
+
+    if "error" in result:
+        return result
+
+    success = result.get("ReturnValue", False)
+    return {"status": "ok" if success else "failed", "success": success, "path": path}
+
+
 def save_level(api) -> dict:
     """Save the current level via Remote Control call_function.
 
