@@ -10,6 +10,8 @@ Key Remote Control endpoints used:
   PUT /remote/object/describe  — List all properties & functions on an object
 """
 
+import time
+
 from typing import Optional
 
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
@@ -344,7 +346,77 @@ else:
 _LEVEL_EDITOR_SUBSYSTEM = "/Script/LevelEditor.Default__LevelEditorSubsystem"
 
 
-def new_level(api, path: str, template: str | None = None) -> dict:
+def _level_package_path(path: str) -> str:
+    base = str(path).strip().split(":", 1)[0]
+    leaf = base.rsplit("/", 1)[-1]
+    if "." in leaf:
+        base = base.rsplit(".", 1)[0]
+    return base
+
+
+def _current_level(api, *, timeout: float = 5.0) -> dict:
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    script = r'''
+import unreal
+world = unreal.EditorLevelLibrary.get_editor_world()
+if world is None:
+    result = {"error": "No editor world is active."}
+else:
+    outermost = world.get_outermost()
+    result = {
+        "status": "ok",
+        "world": world.get_path_name(),
+        "package": outermost.get_name() if outermost else "",
+        "name": world.get_name(),
+    }
+'''
+    return run_python_code(api, script, timeout=timeout, save=False)
+
+
+def _verify_current_level(api, expected_path: str, *, verify_timeout: float = 5.0) -> dict:
+    expected_package = _level_package_path(expected_path)
+    deadline = time.monotonic() + max(0.0, float(verify_timeout))
+    last = None
+    while True:
+        current = _current_level(api)
+        last = current
+        if current.get("package") == expected_package:
+            return {"status": "ok", "expected_package": expected_package, "active_world": current}
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+    return {
+        "status": "failed",
+        "error": "Active editor world did not match requested level.",
+        "expected_package": expected_package,
+        "active_world": last,
+    }
+
+
+def _level_transition_recovered(api, path: str, original_error: dict, *, verify_timeout: float) -> dict | None:
+    verification = _verify_current_level(api, path, verify_timeout=verify_timeout)
+    if verification.get("status") == "ok":
+        return {
+            "status": "ok",
+            "success": True,
+            "path": path,
+            "active_world": verification.get("active_world"),
+            "recovered_after_disconnect": True,
+            "transition_error": original_error,
+        }
+    return {
+        "status": "failed",
+        "success": False,
+        "path": path,
+        "error": original_error.get("error", "Level transition failed."),
+        "recovery_attempted": True,
+        "active_world_verification": verification,
+        "transition_error": original_error,
+    }
+
+
+def new_level(api, path: str, template: str | None = None, *, verify_timeout: float = 5.0) -> dict:
     """Create and open a new level via Remote Control.
 
     Uses ``LevelEditorSubsystem.NewLevel`` via ``call_function`` on the
@@ -378,13 +450,32 @@ def new_level(api, path: str, template: str | None = None) -> dict:
         )
 
     if "error" in result:
+        recovered = _level_transition_recovered(api, path, result, verify_timeout=verify_timeout)
+        if recovered:
+            return recovered
         return result
 
     success = result.get("ReturnValue", False)
-    return {"status": "ok" if success else "failed", "success": success, "path": path}
+    if not success:
+        return {"status": "failed", "success": False, "path": path}
+
+    verification = _verify_current_level(api, path, verify_timeout=verify_timeout)
+    if verification.get("status") != "ok":
+        return {
+            "status": "failed",
+            "success": False,
+            "path": path,
+            **verification,
+        }
+    return {
+        "status": "ok",
+        "success": True,
+        "path": path,
+        "active_world": verification.get("active_world"),
+    }
 
 
-def open_level(api, path: str) -> dict:
+def open_level(api, path: str, *, verify_timeout: float = 5.0) -> dict:
     """Open an existing level via LevelEditorSubsystem.LoadLevel.
 
     This avoids running world-transition APIs from PythonScriptPlugin, which
@@ -397,10 +488,29 @@ def open_level(api, path: str) -> dict:
     )
 
     if "error" in result:
+        recovered = _level_transition_recovered(api, path, result, verify_timeout=verify_timeout)
+        if recovered:
+            return recovered
         return result
 
     success = result.get("ReturnValue", False)
-    return {"status": "ok" if success else "failed", "success": success, "path": path}
+    if not success:
+        return {"status": "failed", "success": False, "path": path}
+
+    verification = _verify_current_level(api, path, verify_timeout=verify_timeout)
+    if verification.get("status") != "ok":
+        return {
+            "status": "failed",
+            "success": False,
+            "path": path,
+            **verification,
+        }
+    return {
+        "status": "ok",
+        "success": True,
+        "path": path,
+        "active_world": verification.get("active_world"),
+    }
 
 
 def save_level(api) -> dict:

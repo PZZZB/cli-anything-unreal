@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess as sp
@@ -1404,6 +1405,21 @@ def _is_transport_disconnect_result(result: dict) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _is_transport_timeout_result(result: dict) -> bool:
+    """Return True when a command timed out waiting for an editor HTTP response."""
+    if not isinstance(result, dict) or result.get("error_type"):
+        return False
+    text = " ".join(str(result.get(key, "")) for key in ("error", "traceback")).lower()
+    markers = (
+        "read timed out",
+        "read timeout",
+        "readtimeout",
+        "timed out",
+        "timeouterror",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _raise_editor_connection_lost(result: dict, operation: str) -> None:
     details = dict(result)
     details["failure_kind"] = "transport_disconnect"
@@ -1420,22 +1436,42 @@ def _raise_editor_connection_lost(result: dict, operation: str) -> None:
     )
 
 
+def _raise_editor_script_timeout(result: dict, operation: str, timeout: int) -> None:
+    details = dict(result)
+    details["failure_kind"] = "transport_timeout"
+    details["operation"] = operation
+    details["timeout_seconds"] = timeout
+    details["completion_state"] = "unknown"
+    raise AppError(
+        "EDITOR_SCRIPT_TIMEOUT",
+        f"Editor script timed out after {timeout} seconds without returning a result.",
+        exit_code=3,
+        details=details,
+        suggestion=(
+            f"Run editor status to verify the editor is still online. If the script is expected to run longer, "
+            f"rerun with editor run-script --timeout <seconds> greater than {timeout}. "
+            "Check the project Output Log because the script may still have completed in-editor after the HTTP timeout."
+        ),
+    )
+
+
+def _raise_level_command_failed(result: dict, operation: str, code: str) -> None:
+    raise AppError(
+        code,
+        str(result.get("error") or f"{operation} failed."),
+        exit_code=3,
+        details=result,
+        suggestion="Run editor status, verify the active editor world, then retry the level command after the editor is online.",
+    )
+
+
 def _unsafe_run_script_operation(code: str) -> dict | None:
     """Detect UE Python operations known to crash unattended editor sessions."""
     if not code:
         return None
-    patterns = (
-        r"\bEditorLoadingAndSavingUtils\s*\.\s*new_blank_map\s*\(",
-        r"\bEditorLoadingAndSavingUtils\s*\.\s*load_map\s*\(",
-        r"\bnew_blank_map\s*\(",
-        r"\bload_map\s*\(",
-    )
-    if any(re.search(pattern, code) for pattern in patterns):
-        operation = (
-            "EditorLoadingAndSavingUtils.load_map"
-            if re.search(r"\b(?:EditorLoadingAndSavingUtils\s*\.\s*)?load_map\s*\(", code)
-            else "EditorLoadingAndSavingUtils.new_blank_map"
-        )
+
+    operation = _unsafe_top_level_call(code)
+    if operation:
         return {
             "operation": operation,
             "reason": "known_world_teardown_crash",
@@ -1460,6 +1496,67 @@ def _unsafe_run_script_operation(code: str) -> dict | None:
             unsafe["source_path"] = str(source_path)
             return unsafe
     return None
+
+
+def _unsafe_top_level_call(code: str) -> str | None:
+    """Find top-level map transition calls while allowing reusable helper defs."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        patterns = (
+            r"\bEditorLoadingAndSavingUtils\s*\.\s*new_blank_map\s*\(",
+            r"\bEditorLoadingAndSavingUtils\s*\.\s*load_map\s*\(",
+            r"\bnew_blank_map\s*\(",
+            r"\bload_map\s*\(",
+        )
+        if any(re.search(pattern, code) for pattern in patterns):
+            return (
+                "EditorLoadingAndSavingUtils.load_map"
+                if re.search(r"\b(?:EditorLoadingAndSavingUtils\s*\.\s*)?load_map\s*\(", code)
+                else "EditorLoadingAndSavingUtils.new_blank_map"
+            )
+        return None
+
+    class Visitor(ast.NodeVisitor):
+        found: str | None = None
+
+        def visit_FunctionDef(self, node):  # noqa: N802
+            return
+
+        def visit_AsyncFunctionDef(self, node):  # noqa: N802
+            return
+
+        def visit_ClassDef(self, node):  # noqa: N802
+            return
+
+        def visit_Lambda(self, node):  # noqa: N802
+            return
+
+        def visit_Call(self, node):  # noqa: N802
+            name = _call_name(node.func)
+            if name in {"load_map", "EditorLoadingAndSavingUtils.load_map", "unreal.EditorLoadingAndSavingUtils.load_map"}:
+                self.found = "EditorLoadingAndSavingUtils.load_map"
+                return
+            if name in {"new_blank_map", "EditorLoadingAndSavingUtils.new_blank_map", "unreal.EditorLoadingAndSavingUtils.new_blank_map"}:
+                self.found = "EditorLoadingAndSavingUtils.new_blank_map"
+                return
+            self.generic_visit(node)
+
+    visitor = Visitor()
+    for statement in tree.body:
+        if visitor.found:
+            break
+        visitor.visit(statement)
+    return visitor.found
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _call_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
 
 
 def _raise_unsafe_run_script_operation(unsafe: dict) -> None:
@@ -1560,6 +1657,8 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
     if isinstance(result, dict) and result.get("error"):
         if _is_transport_disconnect_result(result):
             _raise_editor_connection_lost(result, "editor run-script")
+        if _is_transport_timeout_result(result):
+            _raise_editor_script_timeout(result, "editor run-script", timeout)
         raise AppError(
             "SCRIPT_EXECUTION_FAILED",
             str(result.get("error")),
@@ -1835,6 +1934,8 @@ def editor_new_level(state: AppState, level_path, template):
     result = new_level(api, level_path, template)
     if _is_transport_disconnect_result(result):
         _raise_editor_connection_lost(result, "editor new-level")
+    if isinstance(result, dict) and (result.get("error") or result.get("status") == "failed"):
+        _raise_level_command_failed(result, "editor new-level", "EDITOR_NEW_LEVEL_FAILED")
     output(result, state)
 
 
@@ -1849,6 +1950,8 @@ def editor_open_level(state: AppState, level_path):
     result = open_level(api, level_path)
     if _is_transport_disconnect_result(result):
         _raise_editor_connection_lost(result, "editor open-level")
+    if isinstance(result, dict) and (result.get("error") or result.get("status") == "failed"):
+        _raise_level_command_failed(result, "editor open-level", "EDITOR_OPEN_LEVEL_FAILED")
     output(result, state)
 
 

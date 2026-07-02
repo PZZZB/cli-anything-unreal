@@ -276,6 +276,89 @@ class TestScene:
         assert result["rotation"]["Yaw"] == 45
         assert result["scale"]["X"] == 1
 
+    def test_open_level_verifies_active_world_matches_requested_package(self):
+        from cli_anything.unreal.core.scene import open_level
+
+        api = self._mock_api()
+        api.call_function.return_value = {"ReturnValue": True}
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "status": "ok",
+                "package": "/Game/Maps/L_Test",
+                "world": "/Game/Maps/L_Test.L_Test",
+            }
+
+            result = open_level(api, "/Game/Maps/L_Test", verify_timeout=0)
+
+        assert result["status"] == "ok"
+        assert result["success"] is True
+        assert result["active_world"]["package"] == "/Game/Maps/L_Test"
+
+    def test_open_level_fails_when_active_world_stays_untitled(self):
+        from cli_anything.unreal.core.scene import open_level
+
+        api = self._mock_api()
+        api.call_function.return_value = {"ReturnValue": True}
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "status": "ok",
+                "package": "/Temp/Untitled_3",
+                "world": "/Temp/Untitled_3.Untitled",
+            }
+
+            result = open_level(api, "/Game/Maps/L_Test", verify_timeout=0)
+
+        assert result["status"] == "failed"
+        assert result["success"] is False
+        assert result["error"] == "Active editor world did not match requested level."
+        assert result["expected_package"] == "/Game/Maps/L_Test"
+        assert result["active_world"]["package"] == "/Temp/Untitled_3"
+
+    def test_new_level_recovers_when_transition_resets_connection_but_level_opens(self):
+        from cli_anything.unreal.core.scene import new_level
+
+        api = self._mock_api()
+        api.does_asset_exist.side_effect = [False, True]
+        api.call_function.return_value = {
+            "error": "('Connection aborted.', ConnectionResetError(10054, 'remote host forcibly closed', None, 10054, None))",
+        }
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "status": "ok",
+                "package": "/Game/Maps/L_Test",
+                "world": "/Game/Maps/L_Test.L_Test",
+            }
+
+            result = new_level(api, "/Game/Maps/L_Test", verify_timeout=0)
+
+        assert result["status"] == "ok"
+        assert result["success"] is True
+        assert result["recovered_after_disconnect"] is True
+        assert result["active_world"]["package"] == "/Game/Maps/L_Test"
+
+    def test_new_level_reports_verification_when_disconnect_does_not_recover(self):
+        from cli_anything.unreal.core.scene import new_level
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = False
+        api.call_function.return_value = {
+            "error": "('Connection aborted.', ConnectionResetError(10054, 'remote host forcibly closed', None, 10054, None))",
+        }
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "status": "ok",
+                "package": "/Temp/Untitled_3",
+                "world": "/Temp/Untitled_3.Untitled",
+            }
+
+            result = new_level(api, "/Game/Maps/L_Test", verify_timeout=0)
+
+        assert result["status"] == "failed"
+        assert result["success"] is False
+        assert result["recovery_attempted"] is True
+        assert "ConnectionResetError" in result["error"]
+        assert result["active_world_verification"]["active_world"]["package"] == "/Temp/Untitled_3"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Test assets.py (mocked API)

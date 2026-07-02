@@ -29,7 +29,7 @@ Key points:
 - DLL locked build fail -> `editor close`, then compile. If `editor plugin-upgrade` reports `LNK1104` with `locked_file`, close/kill all UnrealEditor processes for that project and retry the reported command. `plugin-upgrade` waits for matching editor processes to exit before compiling, but another stale process can still hold third-party plugin DLLs.
 - `build compile --platform Win64` fails fast with `EDITOR_RUNNING_LOCKS_DLLS` when the same project editor is running. This avoids wasting minutes before UBT reaches a locked `UnrealEditor-*.dll` link step.
 - CliAnythingBridge missing/stale module -> keep plugin enabled; `editor launch` deploys/enables it and precompiles before starting UE. Do not disable it to bypass startup.
-- Do not create or load maps inside `editor run-script` with `EditorLoadingAndSavingUtils.new_blank_map` or `load_map`; ue-cli blocks these known-crashy world teardown paths. Use `editor new-level /Game/Path/Level` or `editor open-level /Game/Path/Level`, then run a separate actor/content setup script, then `editor save-level`. If a level command reports `EDITOR_CONNECTION_LOST`, run `editor status` before retrying.
+- Do not create or load maps at module top level inside `editor run-script` with `EditorLoadingAndSavingUtils.new_blank_map` or `load_map`; ue-cli blocks these known-crashy world teardown paths. Reusable helper functions may contain offline/commandlet map-load branches as long as they are not called at top level. Use `editor new-level /Game/Path/Level` or `editor open-level /Game/Path/Level`, then run a separate actor/content setup script, then `editor save-level`. Level commands verify the active editor world after transition and try to recover if the HTTP bridge resets.
 - User says editor running -> still verify with Step 1.
 - `unreachable` means the editor process is alive but Remote Control may be busy during PIE/loading/startup. Retry the reported `editor status` command; do not relaunch or kill yet.
 - `launching` means an active `editor.launch` task owns the process. Poll `editor status <task_id>`.
@@ -114,6 +114,11 @@ ue-cli editor run-script build_scene.py --timeout 60
 # Read-only script - skip auto-save
 ue-cli editor run-script query.py --no-save
 ```
+
+For long scripts that save or modify many assets, pass a larger `--timeout`
+(for example `--timeout 300`). `EDITOR_SCRIPT_TIMEOUT` means the CLI stopped
+waiting for the HTTP response; the editor completion state is unknown, so run
+`editor status` and inspect the project Output Log before retrying.
 
 ### Console Commands
 
@@ -251,7 +256,8 @@ UE Python functions live on Library/Subsystem helpers, not usually objects thems
 |--------------|-----------|
 | Spawn/delete/duplicate actors | `EditorActorSubsystem` |
 | Move/rotate/scale actors | `EditorLevelLibrary` |
-| Save packages, load maps | `EditorLoadingAndSavingUtils` |
+| Save packages | `EditorLoadingAndSavingUtils` |
+| Open/create levels | `editor open-level` / `editor new-level` (`LevelEditorSubsystem`) |
 | Load/save/delete/rename assets | `EditorAssetLibrary` |
 | Create material nodes, connect pins | `MaterialEditingLibrary` |
 | Create new asset | `AssetToolsHelpers.get_asset_tools()` -> `create_asset()` |

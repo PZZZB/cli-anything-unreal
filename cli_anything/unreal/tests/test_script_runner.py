@@ -1139,6 +1139,35 @@ class TestScriptRunner:
         assert "editor status" in data["suggestion"]
         assert data["details"]["failure_kind"] == "transport_disconnect"
 
+    def test_editor_run_script_read_timeout_is_timeout_error(self):
+        """HTTP read timeouts should not be diagnosed as Python exceptions."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_editor.return_value = MagicMock()
+            mock_run.return_value = {
+                "error": "HTTPConnectionPool(host='localhost', port=30021): Read timed out. (read timeout=30)",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script", "-",
+                "--no-save",
+            ], input="result = {}\n")
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "EDITOR_SCRIPT_TIMEOUT"
+        assert "timed out" in data["message"]
+        assert "--timeout" in data["suggestion"]
+        assert "editor status" in data["suggestion"]
+        assert data["details"]["failure_kind"] == "transport_timeout"
+        assert data["details"]["operation"] == "editor run-script"
+        assert data["details"]["timeout_seconds"] == 30
+
     def test_editor_new_level_connection_reset_is_top_level_error(self):
         """Level creation transport disconnects should not be wrapped as success."""
         from click.testing import CliRunner
@@ -1233,6 +1262,34 @@ class TestScriptRunner:
         assert data["result"]["status"] == "ok"
         mock_open_level.assert_called_once()
 
+    def test_editor_open_level_mismatch_is_top_level_error(self):
+        """Open-level active-world verification failures should fail the CLI."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.open_level") as mock_open_level:
+            mock_editor.return_value = MagicMock()
+            mock_open_level.return_value = {
+                "status": "failed",
+                "success": False,
+                "path": "/Game/Test/L_Test",
+                "error": "Active editor world did not match requested level.",
+                "expected_package": "/Game/Test/L_Test",
+                "active_world": {"package": "/Temp/Untitled_3"},
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "open-level", "/Game/Test/L_Test",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "EDITOR_OPEN_LEVEL_FAILED"
+        assert data["details"]["active_world"]["package"] == "/Temp/Untitled_3"
+
     def test_editor_run_script_blocks_load_map_inline_code(self):
         """Known-crashy map loading APIs should be blocked before contacting the editor."""
         from click.testing import CliRunner
@@ -1253,6 +1310,35 @@ class TestScriptRunner:
         assert "editor open-level" in data["suggestion"]
         mock_editor.assert_not_called()
         mock_run.assert_not_called()
+
+    def test_editor_run_script_allows_load_map_inside_unused_helper(self):
+        """Reusable helpers may define offline load_map paths without executing them."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        code = """
+import unreal
+
+def commandlet_only_load():
+    return unreal.EditorLoadingAndSavingUtils.load_map('/Game/Test/L_Test')
+
+result = {'status': 'live_editor_ok'}
+"""
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_editor.return_value = MagicMock()
+            mock_run.return_value = {"status": "live_editor_ok"}
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script", "-",
+            ], input=code)
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"]["status"] == "live_editor_ok"
+        mock_editor.assert_called_once()
+        mock_run.assert_called_once()
 
     def test_editor_run_script_blocks_new_blank_map_inline_code(self):
         """Known-crashy map creation APIs should be blocked before contacting the editor."""
