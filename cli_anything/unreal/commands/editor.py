@@ -946,16 +946,13 @@ def _read_log_tail(log_file: Path, max_bytes: int = 128 * 1024) -> str:
         return ""
 
 
-def _extract_remote_control_health_hints(text: str, *, limit: int = 8) -> dict:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return {}
-
+def _remote_control_health_from_lines(lines: list[str], *, limit: int = 8) -> dict:
     falcon_lines = [line for line in lines if re.search(r"FalconTunnel|connect failed", line, re.IGNORECASE)]
     http_restart_lines = [
         line for line in lines
         if re.search(r"LogHttpServerModule:.*(Stopping all listeners|All listeners stopped|Starting all listeners|All listeners started)", line, re.IGNORECASE)
-        or re.search(r"StartHttpServer on port", line, re.IGNORECASE)
+        or re.search(r"Start(Http|Gateway|Websocket)Server on port", line, re.IGNORECASE)
+        or re.search(r"HttpListener.*(unable to bind|Created new HttpListener)", line, re.IGNORECASE)
     ]
     remote_lines = [
         line for line in lines
@@ -991,7 +988,46 @@ def _extract_remote_control_health_hints(text: str, *, limit: int = 8) -> dict:
     return result
 
 
-def _diagnose_api_unreachable(log_file: Path, port: int) -> dict:
+def _extract_remote_control_health_hints(text: str, *, limit: int = 8) -> dict:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return {}
+    return _remote_control_health_from_lines(lines, limit=limit)
+
+
+def _extract_remote_control_health_hints_from_log(log_file: Path, *, since_offset: int | None = None, limit: int = 8) -> dict:
+    if not log_file.exists():
+        return {}
+    matched: list[str] = []
+    try:
+        size = log_file.stat().st_size
+        offset = int(since_offset or 0)
+        if offset < 0 or offset > size:
+            offset = 0
+        with log_file.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(offset)
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if re.search(
+                    r"FalconTunnel|connect failed|RemoteControl|WebRemoteControl|WebSocket|"
+                    r"LogHttpServerModule:.*(Stopping all listeners|All listeners stopped|Starting all listeners|All listeners started)|"
+                    r"Start(Http|Gateway|Websocket)Server on port|"
+                    r"HttpListener.*(unable to bind|Created new HttpListener)",
+                    line,
+                    re.IGNORECASE,
+                ):
+                    matched.append(line)
+    except OSError:
+        return {}
+
+    if not matched:
+        return {}
+    return _remote_control_health_from_lines(matched, limit=limit)
+
+
+def _diagnose_api_unreachable(log_file: Path, port: int, *, since_offset: int | None = None) -> dict:
     port_listening = _tcp_port_accepts_connection(port)
     result = {
         "port_listening": port_listening,
@@ -1009,7 +1045,9 @@ def _diagnose_api_unreachable(log_file: Path, port: int) -> dict:
             "or Remote Control may not have bound the configured port."
         )
 
-    hints = _extract_remote_control_health_hints(_read_log_tail(log_file))
+    hints = _extract_remote_control_health_hints_from_log(log_file, since_offset=since_offset)
+    if not hints:
+        hints = _extract_remote_control_health_hints(_read_log_tail(log_file))
     result.update(hints)
     return result
 
@@ -1035,7 +1073,8 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
     heartbeat_interval = 60.0
     next_beat = start_time + heartbeat_interval
     result = {}
-    log_offset = log_file.stat().st_size if log_file.exists() else 0
+    startup_log_offset = log_file.stat().st_size if log_file.exists() else 0
+    log_offset = startup_log_offset
 
     while time.time() < deadline:
         if proc.poll() is not None:
@@ -1081,7 +1120,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
         log_error = _check_log_errors(log_file)
     if log_error:
         result["error"] += f" Log hint: {log_error}"
-    diagnostics = _diagnose_api_unreachable(log_file, poll_port)
+    diagnostics = _diagnose_api_unreachable(log_file, poll_port, since_offset=startup_log_offset)
     result.update(diagnostics)
     return result
 

@@ -1616,6 +1616,70 @@ def test_wait_for_api_timeout_reports_listening_port_with_http_server_log_hints(
     assert "port is listening" in result["suggestion"]
 
 
+def test_api_unreachable_diagnostics_find_http_server_hints_outside_log_tail(tmp_path):
+    from cli_anything.unreal.commands.editor import _diagnose_api_unreachable
+
+    log_file = tmp_path / "RXGame.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                "LogHttpServerModule: Stopping all listeners...",
+                "LogHttpServerModule: All listeners stopped",
+                "LogFalconTunnel: StartHttpServer on port 8262",
+                "LogFalconTunnel: StartGatewayServer on port 31010",
+                "LogHttpServerModule: Starting all listeners...",
+                "LogHttpListener: Error: HttpListener unable to bind to 127.0.0.1:30010",
+                "LogHttpListener: Created new HttpListener on 127.0.0.1:31010",
+                "LogFalconTunnel: StartWebsocketServer on port 8263",
+                "LogNoise: " + ("x" * (200 * 1024)),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True):
+        result = _diagnose_api_unreachable(log_file, 30010)
+
+    assert result["likely_cause"] == "http_server_restarted_by_project_plugin"
+    assert any("FalconTunnel" in hint for hint in result["log_hints"])
+    assert any("unable to bind to 127.0.0.1:30010" in hint for hint in result["log_hints"])
+
+
+def test_wait_for_api_timeout_keeps_startup_log_window_for_diagnostics(tmp_path):
+    from cli_anything.unreal.commands.editor import _wait_for_api
+
+    log_file = tmp_path / "RXGame.log"
+    log_file.write_text("", encoding="utf-8")
+    proc = MagicMock()
+    proc.poll.return_value = None
+    state = MagicMock()
+    state.json_output = True
+
+    def write_unhealthy_log():
+        log_file.write_text(
+            "\n".join(
+                [
+                    "LogHttpServerModule: Stopping all listeners...",
+                    "LogFalconTunnel: StartHttpServer on port 8262",
+                    "LogHttpListener: Error: HttpListener unable to bind to 127.0.0.1:30010",
+                    "LogNoise: " + ("x" * (200 * 1024)),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return False
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", side_effect=write_unhealthy_log), \
+         patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True), \
+         patch("cli_anything.unreal.commands.editor.time.time", side_effect=[100.0, 100.1, 103.1, 103.1, 104.0]), \
+         patch("cli_anything.unreal.commands.editor.time.sleep"):
+        result = _wait_for_api(proc, 30010, 3, log_file, state)
+
+    assert result["status"] == "timeout"
+    assert result["likely_cause"] == "http_server_restarted_by_project_plugin"
+    assert any("FalconTunnel" in hint for hint in result["log_hints"])
+
+
 def test_summarize_startup_precheck_includes_bridge_plugin_issues():
     """_summarize_startup_precheck includes bridge_plugin issues as warnings."""
     from cli_anything.unreal.commands.editor import _summarize_startup_precheck
