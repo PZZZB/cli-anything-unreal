@@ -1575,6 +1575,47 @@ def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
     assert result["error"]["code"] == "COMPILE_FAILED"
 
 
+def test_wait_for_api_timeout_reports_listening_port_with_http_server_log_hints(tmp_path):
+    from cli_anything.unreal.commands.editor import _wait_for_api
+
+    log_dir = tmp_path / "Saved" / "Logs"
+    log_dir.mkdir(parents=True)
+    log_file = log_dir / "RXGame.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                "LogRemoteControl: Display: Remote Control HTTP server started on port 30010",
+                "LogRemoteControl: Display: WebSocket server started on port 30020",
+                "LogHttpServerModule: Stopping all listeners...",
+                "LogHttpServerModule: All listeners stopped",
+                "LogFalconTunnel: StartHttpServer on port 14632",
+                "LogHttpServerModule: Starting all listeners...",
+                "LogHttpServerModule: All listeners started",
+                "LogFalconTunnel: OnServiceConnected: pid:90524, err:connect failed",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    proc = MagicMock()
+    proc.poll.return_value = None
+    state = MagicMock()
+    state.json_output = True
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+         patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True), \
+         patch("cli_anything.unreal.commands.editor.time.time", side_effect=[100.0, 101.0, 101.0]), \
+         patch("cli_anything.unreal.commands.editor.time.sleep"):
+        result = _wait_for_api(proc, 30010, 1, log_file, state)
+
+    assert result["status"] == "timeout"
+    assert result["failure_kind"] == "api_route_unhealthy"
+    assert result["port_listening"] is True
+    assert result["api_route_healthy"] is False
+    assert result["likely_cause"] == "http_server_restarted_by_project_plugin"
+    assert "FalconTunnel" in result["log_hints"][0]
+    assert "port is listening" in result["suggestion"]
+
+
 def test_summarize_startup_precheck_includes_bridge_plugin_issues():
     """_summarize_startup_precheck includes bridge_plugin issues as warnings."""
     from cli_anything.unreal.commands.editor import _summarize_startup_precheck

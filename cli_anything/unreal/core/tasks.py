@@ -485,11 +485,13 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         task["error"] = {
             "code": "TASK_TIMEOUT",
             "message": wait_result.get("error", "Editor startup timed out"),
+            "details": wait_result,
         }
     else:
         task["status"] = "failed"
         task["error"] = {
             "code": "TASK_EXECUTION_FAILED",
             "message": wait_result.get("error", "Editor startup failed"),
+            "details": wait_result,
         }
     return save_task(task)

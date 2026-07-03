@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import socket
 import subprocess as sp
 import sys
 import time
@@ -923,6 +924,96 @@ def _check_log_errors_incremental(log_file: Path, offset: int) -> tuple[str | No
         return None, offset
 
 
+def _tcp_port_accepts_connection(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _read_log_tail(log_file: Path, max_bytes: int = 128 * 1024) -> str:
+    if not log_file.exists():
+        return ""
+    try:
+        size = log_file.stat().st_size
+        with log_file.open("rb") as handle:
+            if size > max_bytes:
+                handle.seek(size - max_bytes)
+            data = handle.read()
+        return data.decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _extract_remote_control_health_hints(text: str, *, limit: int = 8) -> dict:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return {}
+
+    falcon_lines = [line for line in lines if re.search(r"FalconTunnel|connect failed", line, re.IGNORECASE)]
+    http_restart_lines = [
+        line for line in lines
+        if re.search(r"LogHttpServerModule:.*(Stopping all listeners|All listeners stopped|Starting all listeners|All listeners started)", line, re.IGNORECASE)
+        or re.search(r"StartHttpServer on port", line, re.IGNORECASE)
+    ]
+    remote_lines = [
+        line for line in lines
+        if re.search(r"RemoteControl|WebRemoteControl|WebSocket", line, re.IGNORECASE)
+    ]
+
+    hints: list[str] = []
+    for group in (falcon_lines, http_restart_lines, remote_lines):
+        for line in group[-limit:]:
+            if line not in hints:
+                hints.append(line)
+            if len(hints) >= limit:
+                break
+        if len(hints) >= limit:
+            break
+
+    if not hints:
+        return {}
+
+    result = {"log_hints": hints}
+    if falcon_lines and http_restart_lines:
+        result["likely_cause"] = "http_server_restarted_by_project_plugin"
+        result["cause_hint"] = (
+            "A project plugin appears to restart Unreal's HttpServer after Remote Control starts, "
+            "leaving the TCP port reachable while Remote Control routes are unhealthy."
+        )
+    elif http_restart_lines:
+        result["likely_cause"] = "http_server_restarted"
+        result["cause_hint"] = "Unreal's HttpServer listeners were restarted while waiting for Remote Control."
+    elif remote_lines:
+        result["likely_cause"] = "remote_control_started_but_not_reachable"
+        result["cause_hint"] = "Remote Control logged startup lines, but its HTTP route did not answer."
+    return result
+
+
+def _diagnose_api_unreachable(log_file: Path, port: int) -> dict:
+    port_listening = _tcp_port_accepts_connection(port)
+    result = {
+        "port_listening": port_listening,
+        "api_route_healthy": False,
+        "failure_kind": "api_route_unhealthy" if port_listening else "api_not_listening",
+    }
+    if port_listening:
+        result["suggestion"] = (
+            f"Remote Control port is listening on {port}, but the HTTP route did not answer. "
+            "Check project plugins that restart Unreal's HttpServer or bind competing HTTP listeners, then retry editor status/launch."
+        )
+    else:
+        result["suggestion"] = (
+            f"Port {port} is not accepting TCP connections yet. The editor may still be starting, blocked by a dialog, "
+            "or Remote Control may not have bound the configured port."
+        )
+
+    hints = _extract_remote_control_health_hints(_read_log_tail(log_file))
+    result.update(hints)
+    return result
+
+
 def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
     from cli_anything.unreal.utils.ue_backend import _emit_heartbeat
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
@@ -990,6 +1081,8 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
         log_error = _check_log_errors(log_file)
     if log_error:
         result["error"] += f" Log hint: {log_error}"
+    diagnostics = _diagnose_api_unreachable(log_file, poll_port)
+    result.update(diagnostics)
     return result
 
 
