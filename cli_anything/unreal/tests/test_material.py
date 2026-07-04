@@ -123,6 +123,69 @@ class TestMaterials:
         assert len(result["texture_parameters"]) == 1
         assert result["texture_parameters"][0]["texture"] == "/Game/Textures/T_Diffuse"
 
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_get_material_info_detail_uses_resolver_for_package_path(self, mock_run):
+        from cli_anything.unreal.core.materials import get_material_info
+
+        mock_run.return_value = {
+            "nodes": [],
+            "node_count": 0,
+            "path": "/Game/Drone/MI_Drone.MI_Drone",
+            "class": "MaterialInstanceConstant",
+        }
+        mock_api = self._make_mock_api(
+            assets={
+                "Assets": [{"Name": "MI_Drone", "Path": "/Game/Drone/MI_Drone.MI_Drone",
+                            "Class": "/Script/Engine.MaterialInstanceConstant", "Metadata": {}}]
+            }
+        )
+
+        result = get_material_info(mock_api, "/Game/Drone/MI_Drone")
+
+        script = mock_run.call_args.args[1]
+        assert "mat, loaded_asset_path, tried_asset_paths = _cli_load_material" in script
+        assert 'material_candidates = ["/Game/Drone/MI_Drone", "/Game/Drone/MI_Drone.MI_Drone"]' in script
+        assert "detail_note" not in result
+
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_material_hlsl_code_uses_resolver_for_package_path(self, mock_run):
+        from cli_anything.unreal.core.materials import get_material_hlsl_code
+
+        mock_run.return_value = {
+            "material": "/Game/Drone/MA_Glow.MA_Glow",
+            "file": "F:/Proj/Saved/CliAnything/MA_Glow.ush",
+            "lines": 12,
+            "source": "plugin",
+        }
+
+        result = get_material_hlsl_code(MagicMock(), "/Game/Drone/MA_Glow")
+
+        assert result["source"] == "plugin"
+        script = mock_run.call_args.args[1]
+        assert "mat, loaded_asset_path, tried_asset_paths = _cli_load_material" in script
+        assert 'material_candidates = ["/Game/Drone/MA_Glow", "/Game/Drone/MA_Glow.MA_Glow"]' in script
+        assert '"material": loaded_asset_path' in script
+        compile(script, "<material-hlsl-script>", "exec")
+
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_material_shader_source_script_is_valid_python(self, mock_run):
+        from cli_anything.unreal.core.materials import get_material_shader_source
+
+        mock_run.return_value = {
+            "material": "/Game/Drone/MA_Glow.MA_Glow",
+            "shader_count": 0,
+            "shaders": [],
+            "output_dir": "F:/Proj/Saved/CliAnything/MA_Glow_shaders",
+            "source": "plugin",
+        }
+
+        get_material_shader_source(MagicMock(), "/Game/Drone/MA_Glow")
+
+        script = mock_run.call_args.args[1]
+        assert "mat, loaded_asset_path, tried_asset_paths = _cli_load_material" in script
+        assert '"material": loaded_asset_path' in script
+        compile(script, "<material-shader-source-script>", "exec")
+
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_get_material_info_script_fallback(self, mock_exec_script):
         """Test graceful fallback when Python script is unavailable."""

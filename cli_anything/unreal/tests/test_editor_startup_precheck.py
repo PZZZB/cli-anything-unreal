@@ -1,4 +1,4 @@
-import json
+﻿import json
 import threading
 import time
 from pathlib import Path
@@ -280,6 +280,39 @@ def test_editor_status_online_suggests_plugin_upgrade_on_bridge_mismatch(mini_pr
     assert "running editor loaded" in item["message"]
     assert "restart" in item["message"]
     assert "plugin-upgrade" in item["suggestion"]
+
+
+def test_editor_status_online_missing_bridge_reports_remote_control_only_mode(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value=None), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.18"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[{"pid": 1234, "project": mini_project}]):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0
+    item = json.loads(result.output)["result"][0]
+    assert item["status"] == "online"
+    assert item["bridge_version"] is None
+    assert item["bundled_version"] == "1.18"
+    assert item["plugin_match"] is False
+    assert item["bridge_status"] == "missing_or_unversioned"
+    assert item["degraded_mode"] == "remote_control_only"
+    assert item["read_only_commands_available"] is True
+    assert item["bridge_commands_available"] is False
+    assert "restart_required" not in item
+    assert "next_command" not in item
+    assert "upgrade_command" in item
+    assert "Non-bridge read-only" in item["suggestion"]
 
 
 def test_editor_status_online_without_project_still_includes_bridge_versions():
@@ -883,7 +916,7 @@ def test_editor_launch_success_includes_startup_precheck(mini_project):
     assert "task_id" in data["result"]
 
 
-# ── _build_launch_cmd unit tests ────────────────────────────────────
+# 鈹€鈹€ _build_launch_cmd unit tests 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
 def test_build_launch_cmd_without_map():
@@ -1035,7 +1068,7 @@ def test_editor_launch_no_extra_args_yields_empty_list(mini_project):
     assert captured["payload"]["extra_args"] == []
 
 
-# ── plugin-upgrade relaunch uses _build_launch_cmd ──────────────────
+# 鈹€鈹€ plugin-upgrade relaunch uses _build_launch_cmd 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
 def test_editor_launch_treats_matching_project_process_offline_when_api_owner_differs(mini_project):
@@ -1260,7 +1293,7 @@ def test_plugin_upgrade_uses_editor_close_helper(mini_project):
     mock_api.exec_console.assert_not_called()
 
 
-# ── auto-compile on plugin load failure / skip when OK ────────────────
+# 鈹€鈹€ auto-compile on plugin load failure / skip when OK 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
 def test_plugin_upgrade_kills_residual_project_editor_before_compile(mini_project):
@@ -1696,6 +1729,7 @@ def test_summarize_startup_precheck_includes_bridge_plugin_issues():
     }
     result = _summarize_startup_precheck(check)
     assert "Fixed: CliAnythingBridge plugin not enabled in .uproject" in result["warnings"]
+
 
 def test_remove_tree_with_retries_handles_locked_dll():
     from pathlib import Path

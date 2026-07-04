@@ -515,37 +515,113 @@ else:
 _RESOLVE_ASSET = '''\
 _cli_resolve_ok = False
 _cli_asset_path = {asset_path!r}
+
+
+def _cli_asset_path_candidates(_path):
+    _base = str(_path).strip().split(":", 1)[0]
+    if not _base:
+        return [_base]
+    _candidates = []
+
+    def _add(_candidate):
+        if _candidate and _candidate not in _candidates:
+            _candidates.append(_candidate)
+
+    _leaf = _base.rsplit("/", 1)[-1]
+    if "." in _leaf:
+        _add(_base)
+        _add(_base.rsplit(".", 1)[0])
+    else:
+        _add(_base)
+        _add(_base + "." + _leaf)
+    return _candidates
+
+
+def _cli_is_package_object(_obj):
+    try:
+        return _obj.__class__.__name__ == "Package"
+    except Exception:
+        return False
+
+
+def _cli_object_context(_obj, _requested_path):
+    _ctx = {{
+        "object": _requested_path,
+        "object_path": _obj.get_path_name(),
+    }}
+    try:
+        _ctx["object_name"] = _obj.get_name()
+    except Exception:
+        pass
+    if ":" not in _requested_path:
+        _ctx["asset"] = _requested_path
+    return _ctx
+
+
+def _cli_asset_context(_asset, _requested_path):
+    _ctx = {{
+        "asset": _requested_path,
+        "object_path": _asset.get_path_name(),
+    }}
+    try:
+        _ctx["object_name"] = _asset.get_name()
+    except Exception:
+        pass
+    return _ctx
+
 _cli_obj = None
 try:
     _cli_obj = _cli_unreal.find_object(None, _cli_asset_path)
 except Exception:
     _cli_obj = None
 
-if _cli_obj is not None:
+if _cli_obj is not None and not _cli_is_package_object(_cli_obj):
     _resolved_class = _cli_obj.__class__.__name__
-    _instance_context = {{
-        "object": _cli_asset_path,
-        "object_path": _cli_obj.get_path_name(),
-    }}
-    try:
-        _instance_context["object_name"] = _cli_obj.get_name()
-    except Exception:
-        pass
-    if ":" not in _cli_asset_path:
-        _instance_context["asset"] = _cli_asset_path
+    _instance_context = _cli_object_context(_cli_obj, _cli_asset_path)
     _cli_resolve_ok = True
-elif not _cli_unreal.EditorAssetLibrary.does_asset_exist(_cli_asset_path):
-    result = {{"error": "Asset not found: " + {asset_path!r}}}
+elif ":" in _cli_asset_path:
+    result = {{"error": "Object not found: " + {asset_path!r}}}
 else:
-    _asset = _cli_unreal.EditorAssetLibrary.load_asset(_cli_asset_path)
+    _asset = None
+    _loaded_asset_path = None
+    _tried_asset_paths = []
+    for _candidate in _cli_asset_path_candidates(_cli_asset_path):
+        if not _candidate or _candidate in _tried_asset_paths:
+            continue
+        _tried_asset_paths.append(_candidate)
+        try:
+            _asset = _cli_unreal.EditorAssetLibrary.load_asset(_candidate)
+        except Exception:
+            _asset = None
+        if _asset is None:
+            try:
+                _asset = _cli_unreal.load_asset(_candidate)
+            except Exception:
+                _asset = None
+        if _asset is None:
+            try:
+                _asset = _cli_unreal.load_object(None, _candidate)
+            except Exception:
+                _asset = None
+        if _asset is None:
+            try:
+                _asset = _cli_unreal.find_object(None, _candidate)
+            except Exception:
+                _asset = None
+        if _asset is not None and not _cli_is_package_object(_asset):
+            _loaded_asset_path = _candidate
+            break
+        _asset = None
+
     if _asset is None:
-        result = {{"error": "Failed to load asset: " + {asset_path!r}}}
+        result = {{
+            "error": "Asset not found: " + {asset_path!r},
+            "tried": _tried_asset_paths,
+            "suggestion": "Use a package path like /Game/A or a full object path like /Game/A.A.",
+        }}
     else:
         _resolved_class = _asset.__class__.__name__
-        _instance_context = {{
-            "asset": _cli_asset_path,
-            "object_path": _asset.get_path_name(),
-        }}
+        _instance_context = _cli_asset_context(_asset, _cli_asset_path)
         _cli_resolve_ok = True
 '''
 

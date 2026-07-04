@@ -928,6 +928,50 @@ class TestScriptRunner:
         finally:
             cleanup()
 
+    def test_inspect_instance_asset_package_path_skips_package_object(self):
+        """api_discover should load the primary asset when find_object returns its Package."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        bridge_data = {
+            "MaterialInstanceConstant": {
+                "class": "MaterialInstanceConstant",
+                "properties": [
+                    {"name": "Parent", "type": "UMaterialInterface*",
+                     "owner": "MaterialInstanceConstant", "read": True, "write": False},
+                ],
+                "functions": [],
+            },
+            "Package": {"class": "Package", "properties": [], "functions": []},
+        }
+
+        fake_package = MagicMock()
+        fake_package.__class__ = type("Package", (), {})
+        fake_package.get_path_name.return_value = "/Game/Materials/MI_Water"
+        fake_package.get_name.return_value = "MI_Water"
+
+        fake_asset = MagicMock()
+        fake_asset.__class__ = type("MaterialInstanceConstant", (), {})
+        fake_asset.get_path_name.return_value = "/Game/Materials/MI_Water.MI_Water"
+        fake_asset.get_name.return_value = "MI_Water"
+
+        mock_api, fake_unreal, cleanup = self._setup_instance_discover(
+            bridge_data, assets={"/Game/Materials/MI_Water": fake_asset},
+        )
+        fake_unreal.find_object = lambda outer, path: fake_package if path == "/Game/Materials/MI_Water" else None
+        try:
+            result = api_discover(
+                mock_api,
+                "/Game/Materials/MI_Water",
+                timeout=5,
+            )
+            assert "error" not in result
+            assert result["class"] == "MaterialInstanceConstant"
+            assert result["asset"] == "/Game/Materials/MI_Water"
+            assert result["object_path"] == "/Game/Materials/MI_Water.MI_Water"
+            assert "Parent" in result["properties"]
+        finally:
+            cleanup()
+
     def test_inspect_instance_asset_not_found(self):
         """api_discover should return error for non-existent asset path."""
         from cli_anything.unreal.core.script_runner import api_discover

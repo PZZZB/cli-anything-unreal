@@ -327,16 +327,37 @@ def _add_online_bridge_status(entry: dict) -> None:
         entry["plugin_match"] = None
         return
 
-    entry["plugin_match"] = loaded is not None and bundled is not None and loaded == bundled
-    if not entry["plugin_match"] and entry.get("project_path"):
-        entry["restart_required"] = True
+    project_path = entry.get("project_path")
+    if loaded is None:
+        entry["plugin_match"] = False
+        entry["bridge_status"] = "missing_or_unversioned"
+        entry["degraded_mode"] = "remote_control_only"
+        entry["read_only_commands_available"] = True
+        entry["bridge_commands_available"] = False
         entry["message"] = (
-            f"running editor loaded CliAnythingBridge {loaded or 'missing'}, "
+            "Editor is online via Remote Control, but CliAnythingBridge is missing or does not expose a version. "
+            "Bridge-only commands may fail until the plugin is upgraded and the editor is restarted."
+        )
+        entry["suggestion"] = (
+            "Non-bridge read-only commands can still run in remote-control-only mode. "
+            "Schedule editor plugin-upgrade when bridge commands are needed and a restart is acceptable."
+        )
+        if project_path:
+            entry["upgrade_command"] = f'ue-cli --project "{project_path}" editor plugin-upgrade'
+        return
+
+    entry["plugin_match"] = bundled is not None and loaded == bundled
+    if not entry["plugin_match"] and project_path:
+        entry["restart_required"] = True
+        entry["bridge_status"] = "version_mismatch"
+        entry["bridge_commands_available"] = False
+        entry["message"] = (
+            f"running editor loaded CliAnythingBridge {loaded}, "
             f"but ue-cli bundles {bundled or 'unknown'}. UE cannot hot-reload this C++ bridge safely; "
             "run editor plugin-upgrade to deploy, compile, restart, then retry bridge commands."
         )
-        entry["suggestion"] = "CliAnythingBridge plugin is missing or version-mismatched. Run editor plugin-upgrade; it will restart the editor when needed."
-        entry["next_command"] = f'ue-cli --project "{entry["project_path"]}" editor plugin-upgrade'
+        entry["suggestion"] = "CliAnythingBridge plugin is version-mismatched. Run editor plugin-upgrade; it will restart the editor when needed."
+        entry["next_command"] = f'ue-cli --project "{project_path}" editor plugin-upgrade'
 
 
 def _add_online_bridge_statuses(entries: list[dict]) -> None:

@@ -47,13 +47,31 @@ _MATERIAL_RESOLVER = '''
 def _cli_load_material(asset_path, asset_candidates):
     tried = []
 
+    def _is_package(obj):
+        try:
+            return obj.__class__.__name__ == "Package"
+        except Exception:
+            return False
+
     def _try_load(candidate):
         if not candidate or candidate in tried:
             return None, None
         tried.append(candidate)
         try:
             mat = unreal.EditorAssetLibrary.load_asset(candidate)
-            if mat is not None:
+            if mat is not None and not _is_package(mat):
+                return mat, candidate
+        except Exception:
+            pass
+        try:
+            mat = unreal.load_asset(candidate)
+            if mat is not None and not _is_package(mat):
+                return mat, candidate
+        except Exception:
+            pass
+        try:
+            mat = unreal.load_object(None, candidate)
+            if mat is not None and not _is_package(mat):
                 return mat, candidate
         except Exception:
             pass
@@ -61,7 +79,7 @@ def _cli_load_material(asset_path, asset_candidates):
             data = unreal.EditorAssetLibrary.find_asset_data(candidate)
             if data and data.is_valid():
                 mat = data.get_asset()
-                if mat is not None:
+                if mat is not None and not _is_package(mat):
                     return mat, candidate
         except Exception:
             pass
@@ -118,13 +136,14 @@ import unreal
 import json
 
 asset_path = "{material_path}"
-mat = unreal.EditorAssetLibrary.load_asset(asset_path)
+material_candidates = {material_path_candidates_json}
+mat, loaded_asset_path, tried_asset_paths = _cli_load_material(asset_path, material_candidates)
 if mat is None:
-    result = {{"error": "Material not found: " + asset_path}}
+    result = {{"error": "Material not found: " + asset_path, "tried": tried_asset_paths}}
 else:
     result = {{
         "name": mat.get_name(),
-        "path": asset_path,
+        "path": loaded_asset_path,
         "class": mat.get_class().get_name(),
     }}
 
@@ -1039,22 +1058,24 @@ else:
 _PLUGIN_GET_HLSL_CODE_SCRIPT = r'''import unreal
 import os
 
-mat = unreal.EditorAssetLibrary.load_asset("{material_path}")
+material_path = "{material_path}"
+material_candidates = {material_path_candidates_json}
+mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, material_candidates)
 if mat is None:
-    result = {{"error": "Material not found: {material_path}"}}
+    result = {{"error": "Material not found: " + material_path, "tried": tried_asset_paths}}
 else:
     bridge = unreal.CliAnythingBridgeLibrary
     # Construct output path under project Saved/CliAnything/
     _saved = unreal.Paths.project_saved_dir()
     output_path = os.path.join(_saved, "CliAnything", "{mat_name}.ush")
-    output_path = output_path.replace("\\\\", "/")
+    output_path = output_path.replace("\\", "/")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     ret = bridge.get_material_hlsl_code(mat, output_path)
     if ret:
         with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = len(f.readlines())
         result = {{
-            "material": "{material_path}",
+            "material": loaded_asset_path,
             "file": output_path,
             "lines": lines,
             "source": "plugin",
@@ -1066,15 +1087,17 @@ else:
 _PLUGIN_GET_SHADER_SOURCE_SCRIPT = r'''import unreal
 import os
 
-mat = unreal.EditorAssetLibrary.load_asset("{material_path}")
+material_path = "{material_path}"
+material_candidates = {material_path_candidates_json}
+mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, material_candidates)
 if mat is None:
-    result = {{"error": "Material not found: {material_path}"}}
+    result = {{"error": "Material not found: " + material_path, "tried": tried_asset_paths}}
 else:
     bridge = unreal.CliAnythingBridgeLibrary
     # Construct output dir under project Saved/CliAnything/
     _saved = unreal.Paths.project_saved_dir()
     output_dir = os.path.join(_saved, "CliAnything", "{mat_name}_shaders")
-    output_dir = output_dir.replace("\\\\", "/")
+    output_dir = output_dir.replace("\\", "/")
     os.makedirs(output_dir, exist_ok=True)
     entries = bridge.get_material_shader_source(mat, output_dir)
     shaders = []
@@ -1085,7 +1108,7 @@ else:
         elif len(parts) >= 2:
             shaders.append({{"name": parts[0], "file": parts[1]}})
     result = {{
-        "material": "{material_path}",
+        "material": loaded_asset_path,
         "shader_count": len(shaders),
         "shaders": shaders,
         "output_dir": output_dir,

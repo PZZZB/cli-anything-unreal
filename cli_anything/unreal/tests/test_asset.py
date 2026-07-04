@@ -80,6 +80,20 @@ class TestAssets:
         assert result["count"] == 2
         assert "/Game/MI_Child" in result["referencers"]
 
+    def test_asset_refs_normalizes_package_path_when_exists_probe_needs_object_path(self):
+        from cli_anything.unreal.core.assets import asset_refs
+
+        api = self._mock_api()
+        api.does_asset_exist.side_effect = lambda path: path == "/Game/Drone/MI_Drone.MI_Drone"
+        api.find_asset_referencers.return_value = ["/Game/Maps/L_Drone"]
+
+        result = asset_refs(api, "/Game/Drone/MI_Drone")
+
+        assert result["asset"] == "/Game/Drone/MI_Drone"
+        assert result["resolved_asset"] == "/Game/Drone/MI_Drone.MI_Drone"
+        assert result["count"] == 1
+        api.find_asset_referencers.assert_called_once_with("/Game/Drone/MI_Drone.MI_Drone")
+
     def test_asset_refs_not_found(self):
         from cli_anything.unreal.core.assets import asset_refs
 

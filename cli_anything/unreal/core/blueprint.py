@@ -44,13 +44,31 @@ _BLUEPRINT_RESOLVER = '''
 def _cli_load_blueprint(asset_path, asset_candidates):
     tried = []
 
+    def _is_package(obj):
+        try:
+            return obj.__class__.__name__ == "Package"
+        except Exception:
+            return False
+
     def _try_load(candidate):
         if not candidate or candidate in tried:
             return None, None
         tried.append(candidate)
         try:
             bp = unreal.EditorAssetLibrary.load_asset(candidate)
-            if bp is not None:
+            if bp is not None and not _is_package(bp):
+                return bp, candidate
+        except Exception:
+            pass
+        try:
+            bp = unreal.load_asset(candidate)
+            if bp is not None and not _is_package(bp):
+                return bp, candidate
+        except Exception:
+            pass
+        try:
+            bp = unreal.load_object(None, candidate)
+            if bp is not None and not _is_package(bp):
                 return bp, candidate
         except Exception:
             pass
@@ -58,7 +76,7 @@ def _cli_load_blueprint(asset_path, asset_candidates):
             data = unreal.EditorAssetLibrary.find_asset_data(candidate)
             if data and data.is_valid():
                 bp = data.get_asset()
-                if bp is not None:
+                if bp is not None and not _is_package(bp):
                     return bp, candidate
         except Exception:
             pass

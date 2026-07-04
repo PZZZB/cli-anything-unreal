@@ -59,6 +59,18 @@ class TestBlueprint:
         assert "registry.get_assets_by_path(parent_path, False, False)" in script
         assert "str(data.asset_name) in wanted_asset_names" in script
 
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_blueprint_resolver_uses_unreal_load_asset_fallback(self, mock_run):
+        from cli_anything.unreal.core.blueprint import get_blueprint_info
+
+        mock_run.return_value = {"name": "BP_Drone", "path": "/Game/Drone/BP_Drone.BP_Drone"}
+
+        get_blueprint_info(MagicMock(), "/Game/Drone/BP_Drone")
+
+        script = mock_run.call_args.args[1]
+        assert "unreal.load_asset(candidate)" in script
+        assert 'asset_candidates = ["/Game/Drone/BP_Drone", "/Game/Drone/BP_Drone.BP_Drone"]' in script
+
     @patch("cli_anything.unreal.core.blueprint._exec_blueprint_script")
     def test_list_blueprints(self, mock_exec):
         from cli_anything.unreal.core.blueprint import list_blueprints

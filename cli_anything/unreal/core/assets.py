@@ -273,12 +273,35 @@ def _asset_object_path(asset_path: str) -> str:
     return base + (sep + suffix if sep else "")
 
 
+def _asset_reference_path_candidates(asset_path: str) -> list[str]:
+    """Return likely reference-query paths for package/object path inputs."""
+    candidates: list[str] = []
+    for path in (str(asset_path).strip(), _asset_object_path(asset_path)):
+        if path and path not in candidates:
+            candidates.append(path)
+    return candidates
+
+
 def asset_refs(api: "UEEditorAPI", asset_path: str, **_kw) -> dict:
     """List all assets that reference the given asset."""
-    if not api.does_asset_exist(asset_path):
-        return {"error": f"Asset not found: {asset_path}"}
-    refs = api.find_asset_referencers(asset_path)
-    return {"asset": asset_path, "referencers": refs, "count": len(refs)}
+    tried = _asset_reference_path_candidates(asset_path)
+    resolved_asset = None
+    for candidate in tried:
+        if api.does_asset_exist(candidate):
+            resolved_asset = candidate
+            break
+    if resolved_asset is None:
+        return {
+            "error": f"Asset not found: {asset_path}",
+            "asset": asset_path,
+            "tried": tried,
+            "suggestion": "Use a package path like /Game/A or a full object path like /Game/A.A.",
+        }
+    refs = api.find_asset_referencers(resolved_asset)
+    result = {"asset": asset_path, "referencers": refs, "count": len(refs)}
+    if resolved_asset != asset_path:
+        result["resolved_asset"] = resolved_asset
+    return result
 
 
 def texture_source_info(
