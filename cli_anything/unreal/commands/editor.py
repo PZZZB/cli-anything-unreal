@@ -462,6 +462,30 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
             configured_proc_port = proc_config_port_by_pid.get(pid)
             if configured_proc_port in online_by_port:
                 port = configured_proc_port
+        if port is None and pid is not None and _same_project_path(project_path, state.session.project_path):
+            probe_port = int(
+                state.session.port
+                or proc_config_port_by_pid.get(pid)
+                or _project_config_port(project_path)
+                or 30010
+            )
+            if probe_port not in online_by_port:
+                try:
+                    for item in scan_editor_ports(port_range=(probe_port, probe_port), timeout=3.0):
+                        online_by_port[int(item["port"])] = item
+                except Exception:
+                    pass
+            if probe_port in online_by_port:
+                try:
+                    owner_pid = UEEditorAPI._get_pid_listening_on_port(probe_port)
+                except Exception:
+                    owner_pid = None
+                pid_by_port[probe_port] = owner_pid
+                if owner_pid:
+                    port_by_pid[int(owner_pid)] = probe_port
+                if owner_pid is None or int(owner_pid) == pid:
+                    port = probe_port
+                    port_by_pid[pid] = probe_port
         if port is not None:
             used_ports.add(port)
             entry = _compact_editor_entry("online", pid, port, project_path)

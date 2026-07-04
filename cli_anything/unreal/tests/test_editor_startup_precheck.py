@@ -106,6 +106,40 @@ def test_editor_status_unreachable_becomes_offline_after_grace(mini_project, tmp
     assert item["next_command"] == f'ue-cli --project "{mini_project}" editor launch'
 
 
+def test_editor_status_rechecks_project_port_before_reporting_unreachable(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", side_effect=[
+        [],
+        [{"port": 30010, "alive": True, "info": {"ok": True}}],
+    ]) as scan_ports, \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 100256, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_log_errors", return_value=None), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.18"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.18"):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status",
+        ])
+
+    assert result.exit_code == 0, result.output
+    item = json.loads(result.output)["result"][0]
+    assert item["status"] == "online"
+    assert item["pid"] == 100256
+    assert item["port"] == 30010
+    assert "next_command" not in item
+    assert scan_ports.call_args_list[-1].kwargs == {
+        "port_range": (30010, 30010),
+        "timeout": 3.0,
+    }
+
+
 def test_editor_status_offline_ignores_other_project_processes(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
