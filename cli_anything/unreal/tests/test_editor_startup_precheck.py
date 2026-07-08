@@ -1252,6 +1252,51 @@ def test_editor_launch_returns_online_when_task_wait_times_out_but_editor_is_onl
     assert data["result"]["launch_task_status"] == "running"
 
 
+def test_editor_launch_does_not_recover_map_launch_without_level_verification(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    requested_map = "/Game/Maps/Oregon_Main"
+    running_task = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "running",
+        "payload": {
+            "project_path": mini_project,
+            "map_path": requested_map,
+        },
+        "pid": 68348,
+        "suggested_poll_interval_seconds": 5,
+    }
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", return_value={
+            "task_id": "launch-task",
+            "command": "editor.launch",
+        }), \
+         patch("cli_anything.unreal.commands.editor.wait_for_task", return_value=None), \
+         patch("cli_anything.unreal.commands.editor.load_task", return_value=running_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
+             "status": "online",
+             "pid": 68348,
+             "port": 30011,
+             "project_path": mini_project,
+             "bridge_version": "1.17",
+             "bundled_version": "1.17",
+             "plugin_match": True,
+         }]):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--map", requested_map, "--timeout", "120",
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["result"]["status"] == "launching"
+    assert data["result"]["next_command"] == f'ue-cli --project "{mini_project}" editor status launch-task'
+
+
 def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
     """Verify plugin-upgrade relaunch passes -nosplash -unattended (regression test)."""
     from click.testing import CliRunner
@@ -1546,6 +1591,62 @@ def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
     mock_compile.assert_not_called()
     assert result["status"] == "completed"
 
+
+def test_run_editor_launch_task_fails_when_requested_map_is_not_active(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+    requested_map = "/Game/Maps/Oregon_Main"
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+        "map_path": requested_map,
+    })
+
+    verification = {
+        "status": "failed",
+        "error": "Active editor world did not match requested level.",
+        "expected_package": requested_map,
+        "active_world": {"package": "/Game/Maps/TestMap_3C"},
+    }
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/Win64/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online", "port": 30010}), \
+         patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification) as mock_verify:
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    mock_compile.assert_not_called()
+    mock_verify.assert_called_once()
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "EDITOR_LAUNCH_MAP_MISMATCH"
+    assert result["result"]["requested_map"] == requested_map
+    assert result["result"]["map_verification"]["active_world"]["package"] == "/Game/Maps/TestMap_3C"
 
 def test_run_editor_launch_task_skips_bridge_for_ue4(tmp_path):
     """UE4 launch should not deploy or enable the UE5 bridge plugin."""

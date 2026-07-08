@@ -544,6 +544,9 @@ def _launch_wait_timeouts(timeout: int | None) -> tuple[int, int]:
 
 
 def _recover_online_launch_result(state: AppState, task_id: str, current_task: dict) -> dict | None:
+    if (current_task.get("payload") or {}).get("map_path"):
+        return None
+
     try:
         instances = _scan_editor_status_instances(state, "30010-30020")
         instances = _filter_editor_status_instances(instances, state.session.project_path)

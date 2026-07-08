@@ -472,6 +472,23 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
         wait_result = _wait_for_api(proc, state.session.port, payload.get("timeout"), log_file, state)
 
+    requested_map = payload.get("map_path")
+    if wait_result.get("status") == "online" and requested_map:
+        from cli_anything.unreal.core.scene import _verify_current_level
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        api = UEEditorAPI(port=state.session.port)
+        verify_timeout = min(30.0, max(5.0, float(payload.get("timeout") or 30.0)))
+        try:
+            map_verification = _verify_current_level(api, requested_map, verify_timeout=verify_timeout)
+        except Exception as exc:
+            map_verification = {"status": "failed", "error": str(exc)}
+        wait_result["requested_map"] = requested_map
+        wait_result["map_verification"] = map_verification
+        if map_verification.get("status") != "ok":
+            wait_result["status"] = "map_mismatch"
+            wait_result["error"] = "Editor launched, but active level does not match --map."
+
     task = load_task(task["task_id"]) or task
     task["log_file"] = str(log_file)
     merged_result = dict(task.get("result", {}))
@@ -485,6 +502,13 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         task["error"] = {
             "code": "TASK_TIMEOUT",
             "message": wait_result.get("error", "Editor startup timed out"),
+            "details": wait_result,
+        }
+    elif wait_status == "map_mismatch":
+        task["status"] = "failed"
+        task["error"] = {
+            "code": "EDITOR_LAUNCH_MAP_MISMATCH",
+            "message": wait_result.get("error", "Editor launch map verification failed"),
             "details": wait_result,
         }
     else:
