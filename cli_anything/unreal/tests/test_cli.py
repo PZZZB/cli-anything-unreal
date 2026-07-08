@@ -86,6 +86,7 @@ class TestCLI:
         assert {"umg create", "umg add-widget", "umg tree"}.issubset(names)
         assert "preflight" in names
         assert "editor open-level" in names
+        assert "editor viewport camera" in names
         assert "slate create" not in names
 
     def test_setup_metadata_uses_ue_cli_name(self):
@@ -619,6 +620,30 @@ class TestCLI:
         assert data["result"]["status"] == "jumped"
         assert data["result"]["index"] == 1
         mock_jump.assert_called_once_with("TestProject", 1)
+
+    def test_viewport_camera_cli(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        camera = {"loc": [1, 2, 3], "rot": [4, 5, 6]}
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor", return_value=MagicMock()), \
+             patch("cli_anything.unreal.commands.editor._get_viewport_camera", return_value=camera) as get_camera:
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "editor", "viewport", "camera", "--timeout", "7",
+            ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"] == camera
+        get_camera.assert_called_once()
+        assert get_camera.call_args.args[1] == 7
+
+    def test_viewport_camera_script_has_version_fallback(self):
+        from cli_anything.unreal.commands.editor import _VIEWPORT_CAMERA_SCRIPT
+
+        assert "getattr(unreal.EditorLevelLibrary" in _VIEWPORT_CAMERA_SCRIPT
+        assert "LevelEditorSubsystem" in _VIEWPORT_CAMERA_SCRIPT
 
     def test_viewport_bookmark_jump_unchanged_errors(self, temp_project):
         from click.testing import CliRunner

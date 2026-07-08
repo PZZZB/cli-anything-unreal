@@ -86,6 +86,16 @@ COMMAND_SPECS = [
         ],
     },
     {
+        "name": "editor viewport camera",
+        "description": "Read the active Level Viewport camera.",
+        "async_supported": False,
+        "estimated_duration": "<5s",
+        "parameters": [
+            {"name": "--project", "required": True},
+            {"name": "--timeout", "required": False},
+        ],
+    },
+    {
         "name": "editor viewport bookmark jump",
         "description": "Jump the Level Viewport camera to a saved bookmark using the numeric shortcut.",
         "async_supported": False,

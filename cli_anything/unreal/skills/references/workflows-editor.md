@@ -153,7 +153,13 @@ ue-cli editor exec "BOOKMARK JUMPTO=1"
 ue-cli editor exec "JumpToBookmark1"
 ```
 
-Use dedicated Windows-only command. It finds UE main window, foregrounds it, focuses viewport, sends numeric key `0`-`9`, compares `get_level_viewport_camera_info()` before/after.
+Read active Level Viewport camera with the CLI command. UE Python differs by engine branch; do not call `LevelEditorSubsystem.get_level_viewport_camera_info()` directly.
+
+```bash
+ue-cli --output json --project "F:/path/to/Project.uproject" editor viewport camera
+```
+
+Use dedicated Windows-only bookmark command. It finds UE main window, foregrounds it, focuses viewport, sends numeric key `0`-`9`, then compares active viewport camera before/after.
 
 ```bash
 ue-cli --output json --project "F:/path/to/Project.uproject" editor viewport bookmark jump --index 1

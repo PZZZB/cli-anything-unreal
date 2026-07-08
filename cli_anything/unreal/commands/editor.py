@@ -43,11 +43,24 @@ def _project_option(func):
 
 _VIEWPORT_CAMERA_SCRIPT = """\
 import unreal
-loc, rot = unreal.EditorLevelLibrary.get_level_viewport_camera_info()
-result = {
-    "loc": [loc.x, loc.y, loc.z],
-    "rot": [rot.roll, rot.pitch, rot.yaw],
-}
+_fn = getattr(unreal.EditorLevelLibrary, "get_level_viewport_camera_info", None)
+if _fn is None:
+    _subsystem = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+    _fn = getattr(_subsystem, "get_level_viewport_camera_info", None)
+if _fn is None:
+    result = {
+        "error": "Active Level Viewport camera is not exposed by this UE Python API.",
+        "tried": [
+            "unreal.EditorLevelLibrary.get_level_viewport_camera_info",
+            "unreal.LevelEditorSubsystem.get_level_viewport_camera_info",
+        ],
+    }
+else:
+    loc, rot = _fn()
+    result = {
+        "loc": [loc.x, loc.y, loc.z],
+        "rot": [rot.roll, rot.pitch, rot.yaw],
+    }
 """
 
 
@@ -604,6 +617,16 @@ def editor_preflight(state: AppState):
 @editor_group.group("viewport")
 def viewport_group():
     """Viewport commands."""
+
+
+@viewport_group.command("camera")
+@click.option("--timeout", default=30, type=int, help="Seconds to wait when reading the viewport camera.")
+@handle_error
+@click.pass_obj
+def viewport_camera(state: AppState, timeout):
+    """Read the active Level Viewport camera."""
+    api = require_editor(state)
+    output(_get_viewport_camera(api, timeout), state)
 
 
 @viewport_group.group("bookmark")
