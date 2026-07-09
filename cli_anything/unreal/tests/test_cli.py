@@ -86,6 +86,8 @@ class TestCLI:
         assert {"umg create", "umg add-widget", "umg tree"}.issubset(names)
         assert "preflight" in names
         assert "editor open-level" in names
+        assert "editor run-script" in names
+        assert "editor exec" in names
         assert "editor viewport camera" in names
         assert "slate create" not in names
 

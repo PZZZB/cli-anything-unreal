@@ -1592,6 +1592,72 @@ def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
     assert result["status"] == "completed"
 
 
+def test_run_editor_launch_task_recovers_requested_map_with_open_level(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+    requested_map = "/Game/Maps/Oregon_Main"
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+        "map_path": requested_map,
+    })
+
+    verification = {
+        "status": "failed",
+        "error": "Active editor world did not match requested level.",
+        "expected_package": requested_map,
+        "active_world": {"package": "/Game/Maps/TestMap_3C"},
+    }
+    recovery = {
+        "status": "ok",
+        "success": True,
+        "path": requested_map,
+        "active_world": {"package": requested_map},
+    }
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/Win64/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online", "port": 30010}), \
+         patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification) as mock_verify, \
+         patch("cli_anything.unreal.core.scene.open_level", return_value=recovery) as mock_open_level:
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    mock_compile.assert_not_called()
+    mock_verify.assert_called_once()
+    mock_open_level.assert_called_once()
+    assert result["status"] == "completed"
+    assert result["result"]["status"] == "online"
+    assert result["result"]["requested_map"] == requested_map
+    assert result["result"]["map_recovered_by_open_level"] is True
+    assert result["result"]["map_recovery"]["active_world"]["package"] == requested_map
+
+
 def test_run_editor_launch_task_fails_when_requested_map_is_not_active(tmp_path, monkeypatch):
     from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
 
@@ -1617,6 +1683,11 @@ def test_run_editor_launch_task_fails_when_requested_map_is_not_active(tmp_path,
         "expected_package": requested_map,
         "active_world": {"package": "/Game/Maps/TestMap_3C"},
     }
+    recovery = {
+        "status": "failed",
+        "error": "Open-level did not activate requested map.",
+        "active_world": {"package": "/Game/Maps/TestMap_3C"},
+    }
     with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
         "ready": True,
         "engine": {"errors": [], "warnings": []},
@@ -1638,15 +1709,20 @@ def test_run_editor_launch_task_fails_when_requested_map_is_not_active(tmp_path,
          patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
          patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
          patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online", "port": 30010}), \
-         patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification) as mock_verify:
+         patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification) as mock_verify, \
+         patch("cli_anything.unreal.core.scene.open_level", return_value=recovery) as mock_open_level:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     mock_compile.assert_not_called()
     mock_verify.assert_called_once()
+    mock_open_level.assert_called_once()
     assert result["status"] == "failed"
     assert result["error"]["code"] == "EDITOR_LAUNCH_MAP_MISMATCH"
     assert result["result"]["requested_map"] == requested_map
     assert result["result"]["map_verification"]["active_world"]["package"] == "/Game/Maps/TestMap_3C"
+    assert result["result"]["map_recovery"]["status"] == "failed"
+    assert result["result"]["next_command"].endswith(f"editor open-level {requested_map}")
+
 
 def test_run_editor_launch_task_skips_bridge_for_ue4(tmp_path):
     """UE4 launch should not deploy or enable the UE5 bridge plugin."""

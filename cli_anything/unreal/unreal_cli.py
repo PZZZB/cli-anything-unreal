@@ -176,6 +176,49 @@ COMMAND_SPECS = [
 ]
 
 
+def _iter_click_commands(command: click.Command, prefix: str = ""):
+    if not isinstance(command, click.Group):
+        return
+    for name, subcommand in sorted(command.commands.items()):
+        if getattr(subcommand, "hidden", False):
+            continue
+        full_name = f"{prefix} {name}".strip()
+        if isinstance(subcommand, click.Group):
+            yield from _iter_click_commands(subcommand, full_name)
+        else:
+            yield full_name, subcommand
+
+
+def _click_parameter_specs(command: click.Command) -> list[dict]:
+    parameters: list[dict] = []
+    for param in command.params:
+        if isinstance(param, click.Argument):
+            name = param.name.upper() if param.name else "ARG"
+            parameters.append({"name": name, "required": param.required})
+            continue
+        if isinstance(param, click.Option):
+            option_name = next((opt for opt in param.opts if opt.startswith("--")), param.opts[0])
+            parameters.append({"name": option_name, "required": param.required})
+    return parameters
+
+
+def _command_specs() -> list[dict]:
+    """Return curated command metadata plus any callable Click command not curated yet."""
+    specs_by_name = {spec["name"]: dict(spec) for spec in COMMAND_SPECS}
+    for name, command in _iter_click_commands(cli):
+        if name in specs_by_name:
+            continue
+        description = (command.short_help or command.help or "").strip().splitlines()
+        specs_by_name[name] = {
+            "name": name,
+            "description": description[0] if description else "",
+            "async_supported": False,
+            "estimated_duration": None,
+            "parameters": _click_parameter_specs(command),
+        }
+    return [specs_by_name[name] for name in sorted(specs_by_name)]
+
+
 def _fix_argv_msys2():
     import os
 
@@ -249,12 +292,12 @@ def cli(ctx, output_mode, project_path, port, list_commands):
             state.session.port = ini_port
 
     if list_commands:
-        emit_json(COMMAND_SPECS)
+        emit_json(_command_specs())
         return
 
     if ctx.invoked_subcommand is None:
         if state.json_output:
-            emit_json({"name": "ue-cli", "commands": COMMAND_SPECS})
+            emit_json({"name": "ue-cli", "commands": _command_specs()})
         else:
             from cli_anything.unreal.commands.repl import repl_cmd
 

@@ -474,7 +474,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     requested_map = payload.get("map_path")
     if wait_result.get("status") == "online" and requested_map:
-        from cli_anything.unreal.core.scene import _verify_current_level
+        from cli_anything.unreal.core.scene import _verify_current_level, open_level
         from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
         api = UEEditorAPI(port=state.session.port)
@@ -486,8 +486,24 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         wait_result["requested_map"] = requested_map
         wait_result["map_verification"] = map_verification
         if map_verification.get("status") != "ok":
-            wait_result["status"] = "map_mismatch"
-            wait_result["error"] = "Editor launched, but active level does not match --map."
+            try:
+                map_recovery = open_level(api, requested_map, verify_timeout=verify_timeout)
+            except Exception as exc:
+                map_recovery = {"status": "failed", "error": str(exc)}
+            wait_result["map_recovery"] = map_recovery
+            if map_recovery.get("status") == "ok":
+                wait_result["map_recovered_by_open_level"] = True
+                if map_recovery.get("active_world"):
+                    wait_result["active_world"] = map_recovery["active_world"]
+            else:
+                wait_result["status"] = "map_mismatch"
+                wait_result["error"] = (
+                    "Editor launched, but active level does not match --map, "
+                    "and automatic open-level recovery failed."
+                )
+                wait_result["next_command"] = (
+                    f'ue-cli --project "{state.session.project_path}" editor open-level {requested_map}'
+                )
 
     task = load_task(task["task_id"]) or task
     task["log_file"] = str(log_file)
