@@ -206,27 +206,70 @@ class TestScene:
         from cli_anything.unreal.core.scene import get_actor_components
 
         api = self._mock_api()
-        api.describe_object.return_value = {
-            "Properties": [
-                {"Name": "StaticMeshComponent0", "Type": "UStaticMeshComponent*"},
-                {"Name": "RootComponent", "Type": "USceneComponent*"},
-                {"Name": "bHidden", "Type": "bool"},
-            ],
-        }
+        actor_path = "/Game/Map.Map:PersistentLevel.StaticMeshActor_0"
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "components": [
+                    {
+                        "name": "StaticMeshComponent0",
+                        "type": "UStaticMeshComponent*",
+                        "class": "StaticMeshComponent",
+                        "path": actor_path + ".StaticMeshComponent0",
+                    },
+                    {
+                        "name": "RootComponent",
+                        "type": "USceneComponent*",
+                        "class": "SceneComponent",
+                        "path": actor_path + ".RootComponent",
+                    },
+                ],
+                "actor": actor_path,
+            }
+            result = get_actor_components(api, actor_path)
 
-        result = get_actor_components(api, "/Game/Map:Actor_0")
         assert len(result["components"]) == 2
         comp_names = [c["name"] for c in result["components"]]
         assert "StaticMeshComponent0" in comp_names
         assert "RootComponent" in comp_names
+        assert result["components"][0]["path"] == actor_path + ".StaticMeshComponent0"
+        mock_run.assert_called_once()
+
+    def test_get_actor_components_uses_instance_components_not_describe_properties(self):
+        from cli_anything.unreal.core.scene import get_actor_components
+
+        api = self._mock_api()
+        actor_path = "/Game/Map.Map:PersistentLevel.StaticMeshActor_0"
+        api.describe_object.return_value = {
+            "Properties": [
+                {"Name": "InputComponent", "Type": "UInputComponent"},
+                {"Name": "BlueprintCreatedComponents", "Type": "UActorComponent"},
+            ],
+        }
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "components": [
+                    {
+                        "name": "StaticMeshComponent0",
+                        "type": "UStaticMeshComponent*",
+                        "class": "StaticMeshComponent",
+                        "path": actor_path + ".StaticMeshComponent0",
+                    },
+                ],
+                "actor": actor_path,
+            }
+            result = get_actor_components(api, actor_path)
+
+        assert [c["name"] for c in result["components"]] == ["StaticMeshComponent0"]
+        mock_run.assert_called_once()
 
     def test_get_actor_components_error(self):
         from cli_anything.unreal.core.scene import get_actor_components
 
         api = self._mock_api()
-        api.describe_object.return_value = {"error": "Object not found"}
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {"error": "Actor not found: /Game/Map:Missing"}
+            result = get_actor_components(api, "/Game/Map:Missing")
 
-        result = get_actor_components(api, "/Game/Map:Missing")
         assert "error" in result
 
     def test_get_actor_material_single(self):
@@ -495,13 +538,19 @@ class TestSceneCLI:
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor:
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
             mock_api = MagicMock()
-            mock_api.describe_object.return_value = {
-                "Properties": [
-                    {"Name": "StaticMeshComponent0", "Type": "UStaticMeshComponent*"},
-                    {"Name": "bHidden", "Type": "bool"},
+            mock_run.return_value = {
+                "components": [
+                    {
+                        "name": "StaticMeshComponent0",
+                        "type": "UStaticMeshComponent*",
+                        "class": "StaticMeshComponent",
+                        "path": "/Game/Map:Actor_0.StaticMeshComponent0",
+                    },
                 ],
+                "actor": "/Game/Map:Actor_0",
             }
             mock_editor.return_value = mock_api
 

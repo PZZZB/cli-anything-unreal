@@ -199,9 +199,11 @@ def find_actor_by_name(api: UEEditorAPI, name: str) -> dict:
 
 
 def get_actor_components(api: UEEditorAPI, actor_path: str) -> dict:
-    """Get an actor's components by reading the component hierarchy.
+    """Get an actor's actual component instances.
 
-    Uses describe to find component properties.
+    Uses UE Python to enumerate ``Actor.get_components_by_class``. Remote
+    Control ``describe`` only exposes reflected properties and can miss native
+    default subobjects such as ``StaticMeshComponent0`` on ``StaticMeshActor``.
 
     Args:
         api: Connected UEEditorAPI instance.
@@ -210,22 +212,40 @@ def get_actor_components(api: UEEditorAPI, actor_path: str) -> dict:
     Returns:
         {"components": [...]}
     """
-    raw_data = api.describe_object(actor_path)
-    if "error" in raw_data:
-        return raw_data
+    from cli_anything.unreal.core.script_runner import run_python_code
 
-    # Find component-type properties
-    components = []
-    for prop in raw_data.get("Properties", []):
-        prop_type = prop.get("Type", "") if isinstance(prop, dict) else ""
-        if "Component" in prop_type:
-            components.append({
-                "name": prop.get("Name", ""),
-                "type": prop_type,
-                "description": prop.get("Description", ""),
-            })
+    script = f'''\
+import unreal as _u
 
-    return {"components": components, "actor": actor_path}
+_actor_path = {actor_path!r}
+_sub = _u.get_editor_subsystem(_u.EditorActorSubsystem)
+_actor = None
+for _candidate in _sub.get_all_level_actors():
+    if _candidate.get_path_name() == _actor_path:
+        _actor = _candidate
+        break
+
+if _actor is None:
+    result = {{"error": "Actor not found: " + _actor_path}}
+else:
+    _root = _actor.get_root_component()
+    _components = []
+    for _component in _actor.get_components_by_class(_u.ActorComponent):
+        try:
+            _class_name = _component.get_class().get_name()
+        except Exception:
+            _class_name = _component.__class__.__name__
+        _components.append({{
+            "name": _component.get_name(),
+            "type": "U" + _class_name + "*",
+            "class": _class_name,
+            "path": _component.get_path_name(),
+            "is_root": _component == _root,
+            "description": "",
+        }})
+    result = {{"components": _components, "actor": _actor.get_path_name()}}
+'''
+    return run_python_code(api, script, save=False)
 
 
 def get_actor_material(api: UEEditorAPI, actor_path: str,
