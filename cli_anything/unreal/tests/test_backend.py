@@ -636,6 +636,84 @@ class TestHTTPAPI:
 
         assert _select_editor_window_hwnd(candidates) == 2
 
+    def test_select_editor_window_prefers_target_project_pid_over_other_editor(self):
+        from cli_anything.unreal.utils.ue_http_api import _select_editor_window_hwnd
+
+        candidates = [
+            {
+                "hwnd": 10,
+                "pid": 574,
+                "title": "Test574 - Unreal Editor",
+                "class_name": "UnrealWindow",
+                "visible": True,
+                "area": 2_000_000,
+                "pid_rank": 1,
+                "project_rank": 1,
+            },
+            {
+                "hwnd": 20,
+                "pid": 222,
+                "title": "RXGame - Unreal Editor",
+                "class_name": "UnrealWindow",
+                "visible": True,
+                "area": 800_000,
+                "pid_rank": 1,
+                "project_rank": 0,
+            },
+        ]
+
+        assert _select_editor_window_hwnd(candidates) == 20
+
+    def test_window_project_rank_matches_project_pid_or_title(self):
+        from cli_anything.unreal.utils.ue_http_api import _window_project_rank
+
+        project = r"F:\RXGame_2\RXGame.uproject"
+
+        assert _window_project_rank(
+            pid=222,
+            title="Other - Unreal Editor",
+            project_path=project,
+            project_pids={222},
+        ) == 0
+        assert _window_project_rank(
+            pid=333,
+            title="RXGame - Unreal Editor",
+            project_path=project,
+            project_pids=set(),
+        ) == 0
+        assert _window_project_rank(
+            pid=574,
+            title="Test574 - Unreal Editor",
+            project_path=project,
+            project_pids=set(),
+        ) == 1
+
+    def test_require_editor_stamps_project_path_for_window_selection(self):
+        from cli_anything.unreal.commands import AppState, require_editor
+
+        created = []
+
+        class FakeAPI:
+            def __init__(self, port):
+                self.port = port
+                self.project_path = None
+                created.append(self)
+
+            def is_alive(self):
+                return True
+
+        state = AppState()
+        state.session.port = 30011
+        state.session.project_path = r"F:\RXGame_2\RXGame.uproject"
+
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", FakeAPI), \
+             patch("cli_anything.unreal.commands._guard_editor_project", return_value=None):
+            api = require_editor(state)
+
+        assert api is created[0]
+        assert api.port == 30011
+        assert api.project_path == r"F:\RXGame_2\RXGame.uproject"
+
     def test_select_editor_window_accepts_visible_titleless_unreal_window(self):
         from cli_anything.unreal.utils.ue_http_api import _select_editor_window_hwnd
 

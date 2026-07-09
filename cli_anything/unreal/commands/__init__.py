@@ -251,6 +251,7 @@ def require_editor(state: AppState):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     api = UEEditorAPI(port=state.session.port)
+    api.project_path = state.session.project_path
     if not api.is_alive():
         raise AppError(
             "EDITOR_UNREACHABLE",

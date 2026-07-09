@@ -66,13 +66,15 @@ def _select_editor_window_hwnd(candidates: list[dict]) -> int | None:
     if not eligible:
         return None
 
-    def _score(candidate: dict) -> tuple[int, int, int, int, int]:
+    def _score(candidate: dict) -> tuple[int, int, int, int, int, int]:
         class_name = str(candidate.get("class_name") or "")
         title = str(candidate.get("title") or "")
         pid_rank = int(candidate.get("pid_rank") or 0)
+        project_rank = int(candidate.get("project_rank") or 0)
         area = int(candidate.get("area") or 0)
         return (
             -pid_rank,
+            -project_rank,
             1 if "unreal editor" in title.lower() else 0,
             1 if class_name == "UnrealWindow" else 0,
             area,
@@ -81,6 +83,41 @@ def _select_editor_window_hwnd(candidates: list[dict]) -> int | None:
 
     hwnd = max(eligible, key=_score).get("hwnd")
     return int(hwnd) if hwnd else None
+
+
+def _normalize_project_path(path: str | None) -> str:
+    if not path:
+        return ""
+    try:
+        return str(Path(path).resolve()).replace("\\", "/").lower()
+    except Exception:
+        return str(path).replace("\\", "/").lower()
+
+
+def _project_name_from_path(path: str | None) -> str:
+    if not path:
+        return ""
+    try:
+        return Path(path).stem.lower()
+    except Exception:
+        return ""
+
+
+def _window_project_rank(
+    *,
+    pid: int,
+    title: str,
+    project_path: str | None,
+    project_pids: set[int],
+) -> int:
+    if not project_path:
+        return 0
+    if pid in project_pids:
+        return 0
+    project_name = _project_name_from_path(project_path)
+    if project_name and project_name in str(title or "").lower():
+        return 0
+    return 1
 
 
 class UEEditorAPI:
@@ -104,6 +141,7 @@ class UEEditorAPI:
         self.base_url = f"http://{host}:{port}"
         self._cached_editor_hwnd: int | None = None
         self._cached_listening_pid: int | None = None
+        self.project_path: str | None = None
 
         if requests is None:
             raise ImportError(
@@ -552,6 +590,19 @@ except Exception as _e:
             if not ue_pids:
                 return None
 
+            project_pids: set[int] = set()
+            project_path = self.project_path
+            if project_path:
+                expected_project = _normalize_project_path(project_path)
+                try:
+                    from cli_anything.unreal.utils.ue_backend import find_running_editors
+
+                    for editor in find_running_editors():
+                        if _normalize_project_path(editor.get("project")) == expected_project:
+                            project_pids.add(int(editor.get("pid", 0)))
+                except Exception:
+                    project_pids = set()
+
             target_pids = set(ue_pids)
             candidates: list[dict] = []
             WNDENUMPROC = ctypes.WINFUNCTYPE(
@@ -579,6 +630,12 @@ except Exception as _e:
                         "pid": int(pid.value),
                         "pid_rank": (
                             0 if listening_pid == pid.value else (1 if listening_pid else 0)
+                        ),
+                        "project_rank": _window_project_rank(
+                            pid=int(pid.value),
+                            title=title_buf.value,
+                            project_path=project_path,
+                            project_pids=project_pids,
                         ),
                         "title": title_buf.value,
                         "class_name": class_buf.value,
