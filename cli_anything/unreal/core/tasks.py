@@ -262,6 +262,28 @@ def _clean_bridge_build_outputs(project_dir: str) -> None:
             shutil.rmtree(path, ignore_errors=True)
 
 
+def _looks_like_transport_disconnect(result: dict) -> bool:
+    text = " ".join(str(result.get(key, "")) for key in ("error", "message", "traceback")).lower()
+    markers = (
+        "connectionreseterror",
+        "connection aborted",
+        "remote disconnected",
+        "connection refused",
+        "forcibly closed",
+        "winerror 10054",
+        "10054",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _map_recovery_timeout_seconds(timeout_value) -> float:
+    try:
+        launch_timeout = float(timeout_value)
+    except (TypeError, ValueError):
+        launch_timeout = 30.0
+    return min(90.0, max(15.0, launch_timeout / 2.0))
+
+
 def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict:
     import subprocess as sp
 
@@ -496,14 +518,43 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
                 if map_recovery.get("active_world"):
                     wait_result["active_world"] = map_recovery["active_world"]
             else:
-                wait_result["status"] = "map_mismatch"
-                wait_result["error"] = (
-                    "Editor launched, but active level does not match --map, "
-                    "and automatic open-level recovery failed."
-                )
-                wait_result["next_command"] = (
-                    f'ue-cli --project "{state.session.project_path}" editor open-level {requested_map}'
-                )
+                if _looks_like_transport_disconnect(map_recovery):
+                    recovery_timeout = _map_recovery_timeout_seconds(payload.get("timeout"))
+                    try:
+                        map_recovery_wait = _wait_for_api(proc, state.session.port, recovery_timeout, log_file, state)
+                    except Exception as exc:
+                        map_recovery_wait = {"status": "failed", "error": str(exc)}
+                    wait_result["map_recovery_wait"] = map_recovery_wait
+                    if map_recovery_wait.get("status") == "online":
+                        api = UEEditorAPI(port=state.session.port)
+                        try:
+                            post_disconnect_verification = _verify_current_level(
+                                api,
+                                requested_map,
+                                verify_timeout=verify_timeout,
+                            )
+                        except Exception as exc:
+                            post_disconnect_verification = {"status": "failed", "error": str(exc)}
+                        wait_result["map_recovery_post_disconnect_verification"] = post_disconnect_verification
+                        if post_disconnect_verification.get("status") == "ok":
+                            wait_result["map_recovered_after_connection_reset"] = True
+                            if post_disconnect_verification.get("active_world"):
+                                wait_result["active_world"] = post_disconnect_verification["active_world"]
+                        else:
+                            wait_result["status"] = "map_mismatch"
+                    else:
+                        wait_result["status"] = "map_mismatch"
+                else:
+                    wait_result["status"] = "map_mismatch"
+
+                if wait_result.get("status") == "map_mismatch":
+                    wait_result["error"] = (
+                        "Editor launched, but active level does not match --map, "
+                        "and automatic open-level recovery failed."
+                    )
+                    wait_result["next_command"] = (
+                        f'ue-cli --project "{state.session.project_path}" editor open-level {requested_map}'
+                    )
 
     task = load_task(task["task_id"]) or task
     task["log_file"] = str(log_file)

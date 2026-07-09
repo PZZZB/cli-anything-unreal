@@ -1658,6 +1658,83 @@ def test_run_editor_launch_task_recovers_requested_map_with_open_level(tmp_path,
     assert result["result"]["map_recovery"]["active_world"]["package"] == requested_map
 
 
+def test_run_editor_launch_task_recovers_map_after_open_level_connection_reset(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+    requested_map = "/Game/Maps/Oregon_Main"
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+        "map_path": requested_map,
+        "timeout": 180,
+    })
+
+    wrong_map = {
+        "status": "failed",
+        "error": "Active editor world did not match requested level.",
+        "expected_package": requested_map,
+        "active_world": {"package": "/Game/Maps/TestMap_3C"},
+    }
+    expected_map = {
+        "status": "ok",
+        "expected_package": requested_map,
+        "active_world": {"package": requested_map},
+    }
+    reset_recovery = {
+        "status": "failed",
+        "error": "('Connection aborted.', ConnectionResetError(10054, 'remote host closed', None, 10054, None))",
+    }
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/Win64/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=[
+             {"status": "online", "port": 30010},
+             {"status": "online", "port": 30010, "recovered_after": "open_level_connection_reset"},
+         ]) as mock_wait_for_api, \
+         patch("cli_anything.unreal.core.scene._verify_current_level", side_effect=[
+             wrong_map,
+             expected_map,
+         ]) as mock_verify, \
+         patch("cli_anything.unreal.core.scene.open_level", return_value=reset_recovery) as mock_open_level:
+        result = _run_editor_launch_task(task, estimated_total_seconds=180)
+
+    mock_compile.assert_not_called()
+    assert mock_wait_for_api.call_count == 2
+    assert mock_verify.call_count == 2
+    mock_open_level.assert_called_once()
+    assert result["status"] == "completed"
+    assert result["result"]["status"] == "online"
+    assert result["result"]["map_recovered_after_connection_reset"] is True
+    assert result["result"]["map_recovery_post_disconnect_verification"]["active_world"]["package"] == requested_map
+
+
 def test_run_editor_launch_task_fails_when_requested_map_is_not_active(tmp_path, monkeypatch):
     from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
 
