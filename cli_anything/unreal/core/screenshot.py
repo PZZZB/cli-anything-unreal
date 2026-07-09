@@ -22,6 +22,24 @@ from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 # Default screenshot delay to allow viewport to render
 _DEFAULT_RENDER_DELAY = 1.0
 
+
+def _filename_as_png(filename: str) -> str:
+    name = Path(str(filename or "screenshot")).name or "screenshot"
+    path = Path(name)
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        return name
+    if suffix in {".jpg", ".jpeg"}:
+        return path.with_suffix(".png").name
+    if suffix:
+        return name
+    return f"{name}.png"
+
+
+def _output_path_is_directory(output_path: str, requested_path: Path) -> bool:
+    return requested_path.is_dir() or str(output_path).endswith(("/", "\\"))
+
+
 def _build_ensure_viewport_realtime_py() -> str:
     """Editor Python: clear Remote-Desktop realtime lock + subsystem override.
 
@@ -170,7 +188,9 @@ def _capture_viewport_png_raw(
 
     if output_path:
         requested_path = Path(output_path).expanduser()
-        if requested_path.suffix.lower() in {".jpg", ".jpeg"}:
+        if _output_path_is_directory(output_path, requested_path):
+            save_path = requested_path / _filename_as_png(filename)
+        elif requested_path.suffix.lower() in {".jpg", ".jpeg"}:
             save_path = requested_path.with_suffix(".png")
         elif not requested_path.suffix:
             save_path = requested_path.with_suffix(".png")

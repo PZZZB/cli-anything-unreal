@@ -1679,6 +1679,48 @@ result = {'status': 'live_editor_ok'}
         assert first["ok"] is True
         assert second["sticky_present"] is False
 
+    def test_run_python_code_clears_user_namespace_after_execution(self):
+        """Wrapper must not leave user objects referenced in UE Python globals."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        import sys
+        import types
+
+        log_entries = []
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: log_entries.append({"Type": "Info", "Output": msg})
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        persistent_globals = {}
+
+        def _fake_exec_python_ex(code, *, timeout=None):
+            exec(compile(code, "<exec_python_ex>", "exec"), persistent_globals, persistent_globals)
+            return {
+                "ReturnValue": True,
+                "CommandResult": "None",
+                "LogOutput": list(log_entries),
+            }
+
+        mock_api = MagicMock()
+        mock_api.exec_python_ex.side_effect = _fake_exec_python_ex
+        try:
+            result = run_python_code(
+                mock_api,
+                "held_world_like_object = object()\nresult = {'ok': True}",
+                timeout=5,
+                save=False,
+            )
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+        assert result["ok"] is True
+        assert "_cli_user_ns" not in persistent_globals
+        assert "_cli_user_result" not in persistent_globals
+        assert "held_world_like_object" not in persistent_globals
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Test scene.py (mocked API)

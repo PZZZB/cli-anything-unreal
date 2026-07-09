@@ -13,16 +13,17 @@ def screenshot_group():
 
 @screenshot_group.command("capture")
 @click.option("--path", "output_path", default=None,
-              help="Full output file path with extension (e.g., F:/shots/result.png)")
+              help="Output file path, or an existing directory combined with --filename.")
 @click.option("--filename", default="screenshot",
-              help="Output filename prefix, no extension (legacy, use --path instead)")
+              help="Output filename or stem when --path is a directory, or legacy project screenshot name.")
 @click.option("--no-compress", is_flag=True, help="Return raw PNG instead of compressed JPG")
 @handle_error
 @click.pass_obj
 def screenshot_static(state: AppState, output_path, filename, no_compress):
     """Take a single static screenshot. Returns compressed JPG by default.
 
-    Use --path for a full file path (e.g., F:/Test574/round7_result.png).
+    Use --path for a full file path (e.g., F:/Test574/round7_result.png),
+    or an existing directory together with --filename.
     Use --filename for a name prefix only (legacy mode).
     """
     from cli_anything.unreal.core.screenshot import take_screenshot

@@ -98,6 +98,38 @@ else:
         _cli_result["status"] = "ok"
 
 _cli_unreal.log("{marker}" + _cli_json.dumps(_cli_result, default=str))
+try:
+    {user_ns_name}.clear()
+except Exception:
+    pass
+try:
+    del {user_ns_name}
+except Exception:
+    pass
+try:
+    del _cli_user_result
+except Exception:
+    pass
+try:
+    if isinstance(_cli_result, dict):
+        _cli_result.clear()
+except Exception:
+    pass
+try:
+    del _cli_result
+except Exception:
+    pass
+for _cli_name in (
+    "_cli_error",
+    "_cli_traceback",
+    "_cli_captured_stdout",
+    "_cli_string_io",
+    "_cli_old_stdout",
+):
+    try:
+        del globals()[_cli_name]
+    except Exception:
+        pass
 '''
 
 _SAVE_BLOCK = """\

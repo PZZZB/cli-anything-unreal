@@ -284,6 +284,46 @@ def _map_recovery_timeout_seconds(timeout_value) -> float:
     return min(90.0, max(15.0, launch_timeout / 2.0))
 
 
+def _map_recovery_crash_diagnostics(log_file: Path, project_dir: str | None) -> dict:
+    diagnostics: dict = {}
+    try:
+        if log_file.exists():
+            with log_file.open("rb") as fh:
+                fh.seek(max(0, log_file.stat().st_size - 256 * 1024))
+                tail = fh.read().decode("utf-8", errors="replace")
+        else:
+            tail = ""
+    except Exception:
+        tail = ""
+
+    hints: list[str] = []
+    if "World Memory Leaks" in tail:
+        diagnostics["likely_cause"] = "python_world_reference_leak_during_level_transition"
+        hints.append("World Memory Leaks")
+    if "FPyReferenceCollector" in tail:
+        diagnostics.setdefault("likely_cause", "python_world_reference_leak_during_level_transition")
+        hints.append("FPyReferenceCollector retained Python object references")
+    if "LevelEditorSubsystem.LoadLevel" in tail:
+        hints.append("Crash occurred during LevelEditorSubsystem.LoadLevel")
+    if hints:
+        diagnostics["log_hints"] = hints
+
+    if project_dir:
+        crash_root = Path(project_dir) / "Saved" / "Crashes"
+        try:
+            recent = sorted(
+                [path for path in crash_root.iterdir() if path.is_dir()],
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )[:3]
+        except Exception:
+            recent = []
+        if recent:
+            diagnostics["recent_crash_dirs"] = [str(path) for path in recent]
+
+    return diagnostics
+
+
 def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict:
     import subprocess as sp
 
@@ -542,6 +582,13 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
                                 wait_result["active_world"] = post_disconnect_verification["active_world"]
                         else:
                             wait_result["status"] = "map_mismatch"
+                    elif map_recovery_wait.get("status") == "crashed":
+                        wait_result["status"] = "map_recovery_crashed"
+                        wait_result["failure_kind"] = "editor_crash_during_map_recovery"
+                        wait_result["error"] = (
+                            "Editor crashed while opening the requested --map during automatic recovery."
+                        )
+                        wait_result.update(_map_recovery_crash_diagnostics(log_file, state.session.project_dir))
                     else:
                         wait_result["status"] = "map_mismatch"
                 else:
@@ -576,6 +623,13 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         task["error"] = {
             "code": "EDITOR_LAUNCH_MAP_MISMATCH",
             "message": wait_result.get("error", "Editor launch map verification failed"),
+            "details": wait_result,
+        }
+    elif wait_status == "map_recovery_crashed":
+        task["status"] = "failed"
+        task["error"] = {
+            "code": "EDITOR_CRASHED_DURING_MAP_RECOVERY",
+            "message": wait_result.get("error", "Editor crashed during launch map recovery."),
             "details": wait_result,
         }
     else:

@@ -1735,6 +1735,89 @@ def test_run_editor_launch_task_recovers_map_after_open_level_connection_reset(t
     assert result["result"]["map_recovery_post_disconnect_verification"]["active_world"]["package"] == requested_map
 
 
+def test_run_editor_launch_task_reports_crash_during_map_recovery(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+    requested_map = "/Game/Maps/Oregon_Main"
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+        "map_path": requested_map,
+        "timeout": 180,
+    })
+    log_file = project_dir / "Saved" / "Logs" / "TestProj.log"
+    log_file.parent.mkdir(parents=True)
+    log_file.write_text(
+        "World Memory Leaks\n"
+        "FPyReferenceCollector::AddReferencedObjects\n"
+        "/Script/LevelEditor.LevelEditorSubsystem.LoadLevel\n",
+        encoding="utf-8",
+    )
+
+    wrong_map = {
+        "status": "failed",
+        "error": "Active editor world did not match requested level.",
+        "expected_package": requested_map,
+        "active_world": {"package": "/Game/Maps/TestMap_3C"},
+    }
+    reset_recovery = {
+        "status": "failed",
+        "error": "('Connection aborted.', ConnectionResetError(10054, 'remote host closed', None, 10054, None))",
+    }
+    recovery_crash = {
+        "status": "crashed",
+        "returncode": 3,
+        "log_file": str(log_file),
+        "error": "Editor process exited with code 3 before API came online.",
+    }
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/Win64/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=[
+             {"status": "online", "port": 30010},
+             recovery_crash,
+         ]), \
+         patch("cli_anything.unreal.core.scene._verify_current_level", return_value=wrong_map), \
+         patch("cli_anything.unreal.core.scene.open_level", return_value=reset_recovery):
+        result = _run_editor_launch_task(task, estimated_total_seconds=180)
+
+    mock_compile.assert_not_called()
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "EDITOR_CRASHED_DURING_MAP_RECOVERY"
+    assert result["result"]["status"] == "map_recovery_crashed"
+    assert result["result"]["failure_kind"] == "editor_crash_during_map_recovery"
+    assert result["result"]["map_recovery_wait"]["returncode"] == 3
+    assert result["result"]["likely_cause"] == "python_world_reference_leak_during_level_transition"
+    assert "World Memory Leaks" in result["result"]["log_hints"]
+
+
 def test_run_editor_launch_task_fails_when_requested_map_is_not_active(tmp_path, monkeypatch):
     from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
 

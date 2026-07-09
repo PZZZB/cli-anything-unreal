@@ -221,6 +221,41 @@ class TestScreenshot:
         assert result["path_raw"] == str(target)
         assert target.read_bytes() == b"png"
 
+    def test_capture_png_raw_uses_filename_when_output_path_is_directory(self, tmp_path):
+        from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw
+
+        api = MagicMock()
+        api.bring_to_foreground.return_value = True
+        api.find_editor_window_hwnd.return_value = 123
+        api.exec_python.return_value = {"status": "ok"}
+        api.exec_console.return_value = {"status": "ok"}
+        api.exec_python_ex.return_value = {"LogOutput": []}
+        target_dir = tmp_path / "WindowsEditor"
+        target_dir.mkdir()
+        expected = target_dir / "SDOC_Visualize_A_Max50.png"
+
+        def fake_capture(_hwnd, output_path, crop_rect=None):
+            Path(output_path).write_bytes(b"png")
+            return True
+
+        with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
+             patch("cli_anything.unreal.core.screenshot.time.sleep"), \
+             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png", side_effect=fake_capture):
+            result = _capture_viewport_png_raw(
+                api,
+                "SDOC_Visualize_A_Max50.png",
+                str(tmp_path / "Project"),
+                wait_timeout=15.0,
+                res_x=1920,
+                res_y=1080,
+                delay=0,
+                output_path=str(target_dir),
+            )
+
+        assert result["status"] == "ok"
+        assert result["path_raw"] == str(expected)
+        assert expected.read_bytes() == b"png"
+
     def test_compress_for_agent_no_pillow(self, tmp_path):
         """Test graceful handling when Pillow is not available."""
         from cli_anything.unreal.core.screenshot import compress_for_agent
