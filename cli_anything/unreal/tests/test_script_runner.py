@@ -1,5 +1,6 @@
 """Tests for test_script_runner.py — Uses synthetic data only, no UE editor required."""
 
+import io
 import json
 import os
 import subprocess
@@ -275,6 +276,7 @@ class TestScriptRunner:
 
         fake_unreal = types.ModuleType("unreal")
         fake_unreal.log = lambda msg: None
+        fake_unreal.EditorLevelLibrary = object()
         fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
 
         old_unreal = sys.modules.get("unreal")
@@ -315,6 +317,7 @@ class TestScriptRunner:
 
         fake_unreal = types.ModuleType("unreal")
         fake_unreal.log = lambda msg: None
+        fake_unreal.Actor = object()
         fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
 
         old_unreal = sys.modules.get("unreal")
@@ -324,6 +327,53 @@ class TestScriptRunner:
             result = api_discover(mock_api, "Actor", timeout=5)
             assert result["full_path"] == "unreal.Actor"
             assert result["target_name"] == "Actor"
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+    def test_api_discover_does_not_claim_unexposed_python_full_path(self):
+        """Reflected UE classes are not always exported by the Python module."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        import sys
+        import types
+
+        mock_api = MagicMock()
+        bridge_data = {
+            "EditorPerformanceSettings": {
+                "class": "EditorPerformanceSettings",
+                "properties": [
+                    {
+                        "name": "bThrottleCPUWhenNotForeground",
+                        "type": "uint8",
+                        "owner": "EditorPerformanceSettings",
+                        "read": False,
+                        "write": True,
+                    }
+                ],
+                "functions": [],
+            }
+        }
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(
+                mock_api,
+                "EditorPerformanceSettings",
+                detail="bThrottleCPUWhenNotForeground",
+                timeout=5,
+            )
+
+            assert result["target_name"] == "EditorPerformanceSettings"
+            assert result["python_exposed"] is False
+            assert "full_path" not in result
         finally:
             if old_unreal is not None:
                 sys.modules["unreal"] = old_unreal
@@ -1128,6 +1178,47 @@ class TestScriptRunner:
             assert data["result"]["actors"] == 42
             mock_run.assert_called_once()
             assert mock_run.call_args.args[1] == code
+
+    def test_editor_run_script_decodes_powershell_51_utf8_bom_stdin(self):
+        """PowerShell 5.1 native pipelines prefix UTF-8 stdin with a BOM."""
+        from cli_anything.unreal.commands.editor import _read_stdin_python_code
+
+        raw = b"\xef\xbb\xbfimport unreal\nresult = {'ok': True}\r\n"
+        stream = io.TextIOWrapper(io.BytesIO(raw), encoding="gbk")
+
+        assert _read_stdin_python_code(stream) == (
+            "import unreal\nresult = {'ok': True}\r\n"
+        )
+
+    @pytest.mark.parametrize(
+        ("raw", "stream_encoding", "expected"),
+        [
+            (
+                b"\xff\xfe" + "result = {'ok': True}\n".encode("utf-16-le"),
+                "gbk",
+                "result = {'ok': True}\n",
+            ),
+            (
+                b"\xfe\xff" + "result = {'ok': True}\n".encode("utf-16-be"),
+                "gbk",
+                "result = {'ok': True}\n",
+            ),
+            (
+                "result = {'label': '\u6d4b\u8bd5'}\n".encode("gbk"),
+                "gbk",
+                "result = {'label': '\u6d4b\u8bd5'}\n",
+            ),
+        ],
+        ids=("utf16-le-bom", "utf16-be-bom", "console-encoding"),
+    )
+    def test_editor_run_script_decodes_other_windows_stdin_encodings(
+        self, raw, stream_encoding, expected
+    ):
+        from cli_anything.unreal.commands.editor import _read_stdin_python_code
+
+        stream = io.TextIOWrapper(io.BytesIO(raw), encoding=stream_encoding)
+
+        assert _read_stdin_python_code(stream) == expected
 
     def test_editor_run_script_error_is_top_level_error(self):
         """User script exceptions should fail the CLI command."""

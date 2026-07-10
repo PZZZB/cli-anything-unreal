@@ -493,11 +493,20 @@ _parts = {target!r}.split(".")
 if _parts[0] != "unreal":
     _parts = ["unreal"] + _parts
 _class_name = _parts[-1]
+_python_target = _cli_unreal
+for _part in _parts[1:]:
+    _python_target = getattr(_python_target, _part, None)
+    if _python_target is None:
+        break
 
 result = _cli_discover_class(_class_name, _query={query!r}, _detail={detail!r}, _full_path=".".join(_parts))
-if "error" not in result and "full_path" not in result:
+if "error" not in result:
     result["target_name"] = _class_name
-    result["full_path"] = ".".join(_parts)
+    result["python_exposed"] = _python_target is not None
+    if _python_target is not None:
+        result["full_path"] = ".".join(_parts)
+    else:
+        result.pop("full_path", None)
 '''
 
 _API_DISCOVER_INSTANCE_CALL = '''\

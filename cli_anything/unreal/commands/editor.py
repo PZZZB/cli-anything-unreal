@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import codecs
 import json
 import re
 import socket
@@ -21,6 +22,27 @@ DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 110
 DEFAULT_EDITOR_LAUNCH_WORKER_TIMEOUT_SECONDS = 300
 REMOTE_UNREACHABLE_GRACE_SECONDS = 60
 REMOTE_UNREACHABLE_CACHE_TTL_SECONDS = 7200
+
+
+def _read_stdin_python_code(stream=None) -> str:
+    """Read piped Python without letting the Windows console code page eat a BOM."""
+    stream = sys.stdin if stream is None else stream
+    raw_stream = getattr(stream, "buffer", None)
+    if raw_stream is None:
+        return stream.read().removeprefix("\ufeff")
+
+    raw = raw_stream.read()
+    if raw.startswith(codecs.BOM_UTF8):
+        return raw.decode("utf-8-sig")
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        encoding = getattr(stream, "encoding", None)
+        if not encoding:
+            raise
+        return raw.decode(encoding)
 
 
 def _load_command_project(state: AppState, project_path: str | None) -> None:
@@ -1907,7 +1929,7 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
 
     stdin_code = None
     if script_path == "-":
-        stdin_code = sys.stdin.read()
+        stdin_code = _read_stdin_python_code()
         if stdin_code == "":
             raise AppError(
                 "MISSING_STDIN_CODE",
