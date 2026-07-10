@@ -659,6 +659,194 @@ def _extract_uproject_from_cmdline(cmdline: str) -> str:
     return direct.group(1) if direct else ""
 
 
+def _set_job_kill_on_close(job_handle, enabled: bool) -> bool:
+    """Enable or disable kill-on-close for a Windows Job Object."""
+    if sys.platform != "win32" or not job_handle:
+        return False
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class _ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimitInformation),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+
+        info = _ExtendedLimitInformation()
+        if enabled:
+            info.BasicLimitInformation.LimitFlags = 0x00002000
+        return bool(
+            kernel32.SetInformationJobObject(
+                job_handle,
+                9,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            )
+        )
+    except Exception:
+        return False
+
+
+def _attach_kill_on_close_job(proc):
+    """Attach a build root to a kill-on-close Windows Job Object."""
+    if sys.platform != "win32":
+        return None
+
+    job_handle = None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job_handle = kernel32.CreateJobObjectW(None, None)
+        process_handle = getattr(proc, "_handle", None)
+        if (
+            not job_handle
+            or not process_handle
+            or not _set_job_kill_on_close(job_handle, True)
+            or not kernel32.AssignProcessToJobObject(job_handle, process_handle)
+        ):
+            if job_handle:
+                kernel32.CloseHandle(job_handle)
+            return None
+        return job_handle
+    except Exception:
+        if job_handle:
+            try:
+                ctypes.WinDLL("kernel32").CloseHandle(job_handle)
+            except Exception:
+                pass
+        return None
+
+
+def _resume_suspended_process(pid: int) -> bool:
+    """Resume the primary thread of a newly suspended Windows process."""
+    if sys.platform != "win32":
+        return False
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _ThreadEntry32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Thread32First.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_ThreadEntry32),
+        ]
+        kernel32.Thread32First.restype = wintypes.BOOL
+        kernel32.Thread32Next.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_ThreadEntry32),
+        ]
+        kernel32.Thread32Next.restype = wintypes.BOOL
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)
+        if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+            return False
+        try:
+            entry = _ThreadEntry32()
+            entry.dwSize = ctypes.sizeof(entry)
+            has_entry = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while has_entry:
+                if entry.th32OwnerProcessID == pid:
+                    thread = kernel32.OpenThread(0x0002, False, entry.th32ThreadID)
+                    if thread:
+                        try:
+                            return kernel32.ResumeThread(thread) != 0xFFFFFFFF
+                        finally:
+                            kernel32.CloseHandle(thread)
+                entry.dwSize = ctypes.sizeof(entry)
+                has_entry = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+            return False
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        return False
+
+
+def _release_kill_on_close_job(job_handle, *, preserve_processes: bool) -> bool:
+    """Close a build Job Object, disarming it after successful builds."""
+    if sys.platform != "win32" or not job_handle:
+        return False
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        disarmed = not preserve_processes or _set_job_kill_on_close(job_handle, False)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        closed = bool(kernel32.CloseHandle(job_handle))
+        return disarmed and closed
+    except Exception:
+        return False
+
+
 def _run_subprocess(
     cmd: list[str],
     log_file: str,
@@ -711,6 +899,8 @@ def _run_subprocess(
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     started = time.monotonic()
+    proc = None
+    job_handle = None
 
     try:
         log_fh = open(log_path, "wb")
@@ -724,14 +914,45 @@ def _run_subprocess(
 
     try:
         try:
+            creationflags = 0
+            if use_shell:
+                # Suspend before first instruction so no child can escape the
+                # Job Object between CreateProcess and assignment.
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000004
             proc = subprocess.Popen(
                 cmd,
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
                 cwd=cwd,
                 shell=use_shell,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if use_shell else 0,
+                creationflags=creationflags,
             )
+            if use_shell:
+                job_handle = _attach_kill_on_close_job(proc)
+                if job_handle is None:
+                    proc.kill()
+                    proc.wait()
+                    return {
+                        "returncode": -1,
+                        "log_file": str(log_path),
+                        "duration_seconds": round(time.monotonic() - started, 2),
+                        "error": "Failed to attach build process to Windows Job Object",
+                    }
+                if not _resume_suspended_process(proc.pid):
+                    released = _release_kill_on_close_job(
+                        job_handle,
+                        preserve_processes=False,
+                    )
+                    job_handle = None
+                    if not released:
+                        proc.kill()
+                    proc.wait()
+                    return {
+                        "returncode": -1,
+                        "log_file": str(log_path),
+                        "duration_seconds": round(time.monotonic() - started, 2),
+                        "error": "Failed to resume build process after Windows Job Object assignment",
+                    }
             if on_start is not None:
                 on_start(proc)
         except FileNotFoundError as e:
@@ -787,12 +1008,31 @@ def _run_subprocess(
                     # drift doesn't accumulate if a poll is slow.
                     next_beat += heartbeat_seconds
 
+        if proc.returncode == 0 and job_handle is not None:
+            released = _release_kill_on_close_job(
+                job_handle,
+                preserve_processes=True,
+            )
+            job_handle = None
+            if not released:
+                return {
+                    "returncode": -1,
+                    "log_file": str(log_path),
+                    "duration_seconds": round(time.monotonic() - started, 2),
+                    "error": "Failed to release build Job Object after successful command",
+                }
+
         return {
             "returncode": proc.returncode,
             "log_file": str(log_path),
             "duration_seconds": round(time.monotonic() - started, 2),
         }
     finally:
+        if job_handle is not None:
+            _release_kill_on_close_job(
+                job_handle,
+                preserve_processes=False,
+            )
         try:
             log_fh.close()
         except Exception:

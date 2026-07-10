@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -481,7 +482,10 @@ class TestBuildStopAndDetect:
         log_path = tmp_path / "t.log"
         with patch("subprocess.Popen", return_value=mock_proc), \
              patch("cli_anything.unreal.utils.ue_backend._SAFETY_TIMEOUT", 0), \
-             patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True) as mock_kill:
+             patch("cli_anything.unreal.utils.ue_backend._kill_process_tree", return_value=True) as mock_kill, \
+             patch("cli_anything.unreal.utils.ue_backend._attach_kill_on_close_job", return_value=123), \
+             patch("cli_anything.unreal.utils.ue_backend._resume_suspended_process", return_value=True, create=True), \
+             patch("cli_anything.unreal.utils.ue_backend._release_kill_on_close_job", return_value=True):
             # Disable heartbeats so the poll loop doesn't spin waiting for
             # a beat boundary.
             result = _run_subprocess(
@@ -494,6 +498,86 @@ class TestBuildStopAndDetect:
             # Verify _kill_process_tree was called with the PID
             mock_kill.assert_called_once_with(9999)
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object behavior")
+    @pytest.mark.parametrize(
+        ("returncode", "child_should_run"),
+        [(7, False), (0, True)],
+    )
+    def test_run_subprocess_job_controls_descendants(
+        self,
+        tmp_path,
+        returncode,
+        child_should_run,
+    ):
+        """Failed builds kill descendants; successful builds preserve them."""
+        from cli_anything.unreal.utils.ue_backend import (
+            _kill_process_tree,
+            _run_subprocess,
+        )
+
+        child_pid_path = tmp_path / "child.pid"
+        parent_script = tmp_path / "spawn_child_then_exit.py"
+        parent_script.write_text(
+            "import pathlib, subprocess, sys\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(60)'])\n"
+            f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
+            f"raise SystemExit({returncode})\n",
+            encoding="utf-8",
+        )
+
+        result = _run_subprocess(
+            [sys.executable, str(parent_script)],
+            log_file=str(tmp_path / "failed-build.log"),
+            heartbeat_seconds=0,
+        )
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+        def child_is_running():
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            ]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.WaitForSingleObject.argtypes = [
+                wintypes.HANDLE,
+                wintypes.DWORD,
+            ]
+            kernel32.WaitForSingleObject.restype = wintypes.DWORD
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+            handle = kernel32.OpenProcess(0x00100000, False, child_pid)
+            if not handle:
+                error = ctypes.get_last_error()
+                if error == 87:
+                    return False
+                raise ctypes.WinError(error)
+            try:
+                wait_result = kernel32.WaitForSingleObject(handle, 0)
+                if wait_result == 258:
+                    return True
+                if wait_result == 0:
+                    return False
+                raise ctypes.WinError(ctypes.get_last_error())
+            finally:
+                kernel32.CloseHandle(handle)
+
+        try:
+            if not child_should_run:
+                deadline = time.time() + 3
+                while child_is_running() and time.time() < deadline:
+                    time.sleep(0.1)
+            assert result["returncode"] == returncode
+            assert child_is_running() is child_should_run
+        finally:
+            if child_is_running():
+                _kill_process_tree(child_pid)
+
     def test_run_subprocess_success(self, tmp_path):
         """_run_subprocess returns result dict on success."""
         from cli_anything.unreal.utils.ue_backend import _run_subprocess
@@ -504,7 +588,10 @@ class TestBuildStopAndDetect:
         mock_proc.returncode = 0
 
         log_path = tmp_path / "t.log"
-        with patch("subprocess.Popen", return_value=mock_proc):
+        with patch("subprocess.Popen", return_value=mock_proc), \
+             patch("cli_anything.unreal.utils.ue_backend._attach_kill_on_close_job", return_value=123), \
+             patch("cli_anything.unreal.utils.ue_backend._resume_suspended_process", return_value=True, create=True), \
+             patch("cli_anything.unreal.utils.ue_backend._release_kill_on_close_job", return_value=True):
             result = _run_subprocess(["echo", "hello"], log_file=str(log_path))
             assert result["returncode"] == 0
             assert result["log_file"] == str(log_path)
@@ -512,6 +599,101 @@ class TestBuildStopAndDetect:
             # Output must not leak back
             assert "stdout" not in result
             assert "stderr" not in result
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object behavior")
+    def test_run_subprocess_success_disarms_kill_job(self, tmp_path):
+        """Successful builds preserve descendants before releasing the Job Object."""
+        from cli_anything.unreal.utils.ue_backend import _run_subprocess
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 1234
+        mock_proc.wait.return_value = None
+        mock_proc.returncode = 0
+
+        with patch("subprocess.Popen", return_value=mock_proc) as popen, \
+             patch(
+                 "cli_anything.unreal.utils.ue_backend._attach_kill_on_close_job",
+                 return_value=123,
+             ), patch(
+                 "cli_anything.unreal.utils.ue_backend._resume_suspended_process",
+                 return_value=True,
+                 create=True,
+             ) as resume_process, patch(
+                 "cli_anything.unreal.utils.ue_backend._release_kill_on_close_job",
+                 return_value=True,
+                 create=True,
+             ) as release_job:
+            _run_subprocess(
+                ["echo", "hello"],
+                log_file=str(tmp_path / "success-job.log"),
+            )
+
+        creationflags = popen.call_args.kwargs["creationflags"]
+        assert creationflags & 0x00000004
+        resume_process.assert_called_once_with(1234)
+        release_job.assert_called_once_with(123, preserve_processes=True)
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object behavior")
+    def test_run_subprocess_fails_closed_when_job_attach_fails(self, tmp_path):
+        from cli_anything.unreal.utils.ue_backend import _run_subprocess
+
+        mock_proc = MagicMock(pid=1234, returncode=0)
+        mock_proc.wait.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc), \
+             patch("cli_anything.unreal.utils.ue_backend._attach_kill_on_close_job", return_value=None):
+            result = _run_subprocess(
+                ["echo", "hello"],
+                log_file=str(tmp_path / "attach-failed.log"),
+            )
+
+        assert result["returncode"] == -1
+        assert "Job Object" in result["error"]
+        mock_proc.kill.assert_called_once()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object behavior")
+    def test_run_subprocess_fails_closed_when_resume_fails(self, tmp_path):
+        from cli_anything.unreal.utils.ue_backend import _run_subprocess
+
+        mock_proc = MagicMock(pid=1234, returncode=None)
+        mock_proc.wait.return_value = None
+        on_start = MagicMock()
+
+        with patch("subprocess.Popen", return_value=mock_proc), \
+             patch("cli_anything.unreal.utils.ue_backend._attach_kill_on_close_job", return_value=123), \
+             patch("cli_anything.unreal.utils.ue_backend._resume_suspended_process", return_value=False), \
+             patch("cli_anything.unreal.utils.ue_backend._release_kill_on_close_job", return_value=True) as release_job:
+            result = _run_subprocess(
+                ["echo", "hello"],
+                log_file=str(tmp_path / "resume-failed.log"),
+                on_start=on_start,
+            )
+
+        assert result["returncode"] == -1
+        assert "resume build process" in result["error"]
+        release_job.assert_called_once_with(123, preserve_processes=False)
+        mock_proc.kill.assert_not_called()
+        mock_proc.wait.assert_called_once()
+        on_start.assert_not_called()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object behavior")
+    def test_run_subprocess_reports_disarm_failure(self, tmp_path):
+        from cli_anything.unreal.utils.ue_backend import _run_subprocess
+
+        mock_proc = MagicMock(pid=1234, returncode=0)
+        mock_proc.wait.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc), \
+             patch("cli_anything.unreal.utils.ue_backend._attach_kill_on_close_job", return_value=123), \
+             patch("cli_anything.unreal.utils.ue_backend._resume_suspended_process", return_value=True, create=True), \
+             patch("cli_anything.unreal.utils.ue_backend._release_kill_on_close_job", return_value=False):
+            result = _run_subprocess(
+                ["echo", "hello"],
+                log_file=str(tmp_path / "disarm-failed.log"),
+            )
+
+        assert result["returncode"] == -1
+        assert "release build Job Object" in result["error"]
 
     def test_run_subprocess_file_not_found(self, tmp_path):
         """_run_subprocess handles FileNotFoundError gracefully."""
@@ -853,4 +1035,3 @@ class TestBuildE2E:
         assert result.exit_code == 0
         data = self._parse_json_output(result.output)
         assert data["result"]["status"] in ("none", "ok", "partial")
-
