@@ -46,6 +46,35 @@ class TestScreenshot:
         assert data["code"] == "EDITOR_PROJECT_NOT_RUNNING"
         assert data["details"]["running_editors"] == [{"pid": 5678, "project": other_project}]
 
+    def test_capture_timeout_is_top_level_error(self, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        timeout_result = {
+            "status": "error",
+            "message": "Window capture timed out after 15.0s",
+            "failure_stage": "capture_backend",
+            "timed_out": True,
+            "timeout_seconds": 15.0,
+        }
+        with patch("cli_anything.unreal.commands.screenshot.require_editor", return_value=MagicMock()), \
+             patch(
+                 "cli_anything.unreal.core.screenshot.take_screenshot",
+                 return_value=timeout_result,
+             ):
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "screenshot", "capture",
+                "--path", str(tmp_path / "hung.png"),
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "SCREENSHOT_CAPTURE_TIMEOUT"
+        assert data["details"]["failure_stage"] == "capture_backend"
+
     def test_capture_does_not_restore_minimized_window_rect(self, tmp_path):
         from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw
 
@@ -57,13 +86,13 @@ class TestScreenshot:
         api.exec_console.return_value = {"status": "ok"}
         api.exec_python_ex.return_value = {"LogOutput": []}
 
-        def fake_capture(_hwnd, output_path, crop_rect=None):
+        def fake_capture(_hwnd, output_path, crop_rect=None, timeout=None):
             Path(output_path).write_bytes(b"png")
-            return True
+            return {"ok": True, "timed_out": False}
 
         with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
              patch("cli_anything.unreal.core.screenshot.time.sleep"), \
-             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png", side_effect=fake_capture):
+             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png_bounded", side_effect=fake_capture):
             result = _capture_viewport_png_raw(
                 api,
                 "minimized_restore_guard",
@@ -90,13 +119,13 @@ class TestScreenshot:
         api.exec_console.return_value = {"status": "ok"}
         api.exec_python_ex.return_value = {"LogOutput": []}
 
-        def fake_capture(_hwnd, output_path, crop_rect=None):
+        def fake_capture(_hwnd, output_path, crop_rect=None, timeout=None):
             Path(output_path).write_bytes(b"png")
-            return True
+            return {"ok": True, "timed_out": False}
 
         with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
              patch("cli_anything.unreal.core.screenshot.time.sleep"), \
-             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png", side_effect=fake_capture):
+             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png_bounded", side_effect=fake_capture):
             result = _capture_viewport_png_raw(
                 api,
                 "normal_restore_guard",
@@ -199,13 +228,13 @@ class TestScreenshot:
         api.exec_python_ex.return_value = {"LogOutput": []}
         target = tmp_path / "requested" / "exact.png"
 
-        def fake_capture(_hwnd, output_path, crop_rect=None):
+        def fake_capture(_hwnd, output_path, crop_rect=None, timeout=None):
             Path(output_path).write_bytes(b"png")
-            return True
+            return {"ok": True, "timed_out": False}
 
         with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
              patch("cli_anything.unreal.core.screenshot.time.sleep"), \
-             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png", side_effect=fake_capture):
+             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png_bounded", side_effect=fake_capture):
             result = _capture_viewport_png_raw(
                 api,
                 "ignored",
@@ -234,13 +263,13 @@ class TestScreenshot:
         target_dir.mkdir()
         expected = target_dir / "SDOC_Visualize_A_Max50.png"
 
-        def fake_capture(_hwnd, output_path, crop_rect=None):
+        def fake_capture(_hwnd, output_path, crop_rect=None, timeout=None):
             Path(output_path).write_bytes(b"png")
-            return True
+            return {"ok": True, "timed_out": False}
 
         with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
              patch("cli_anything.unreal.core.screenshot.time.sleep"), \
-             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png", side_effect=fake_capture):
+             patch("cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png_bounded", side_effect=fake_capture):
             result = _capture_viewport_png_raw(
                 api,
                 "SDOC_Visualize_A_Max50.png",
@@ -255,6 +284,109 @@ class TestScreenshot:
         assert result["status"] == "ok"
         assert result["path_raw"] == str(expected)
         assert expected.read_bytes() == b"png"
+
+    def test_capture_static_bounds_remote_and_gdi_stages(self, tmp_path):
+        from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw
+
+        api = MagicMock()
+        api.bring_to_foreground.return_value = True
+        api.find_editor_window_hwnd.return_value = 123
+        target = tmp_path / "bounded.png"
+
+        def fake_capture(_hwnd, output_path, crop_rect=None, timeout=None):
+            Path(output_path).write_bytes(b"png")
+            return {"ok": True, "timed_out": False}
+
+        with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
+             patch("cli_anything.unreal.core.screenshot.time.sleep"), \
+             patch("cli_anything.unreal.core.screenshot._refresh_editor_viewports", return_value={}) as refresh, \
+             patch("cli_anything.unreal.core.screenshot._get_active_viewport_rect", return_value=None) as bounds, \
+             patch(
+                 "cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png_bounded",
+                 side_effect=fake_capture,
+             ) as capture:
+            result = _capture_viewport_png_raw(
+                api,
+                "bounded",
+                str(tmp_path),
+                wait_timeout=15.0,
+                res_x=1920,
+                res_y=1080,
+                delay=0,
+                output_path=str(target),
+            )
+
+        assert result["status"] == "ok"
+        refresh.assert_called_once_with(api, timeout=3.0)
+        bounds.assert_called_once_with(api, timeout=3.0)
+        assert capture.call_args.kwargs["timeout"] == 15.0
+
+    def test_capture_reports_backend_timeout_stage(self, tmp_path):
+        from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw
+
+        api = MagicMock()
+        api.bring_to_foreground.return_value = True
+        api.find_editor_window_hwnd.return_value = 123
+
+        with patch("cli_anything.unreal.core.screenshot.sys.platform", "win32"), \
+             patch("cli_anything.unreal.core.screenshot.time.sleep"), \
+             patch("cli_anything.unreal.core.screenshot._refresh_editor_viewports", return_value={}), \
+             patch("cli_anything.unreal.core.screenshot._get_active_viewport_rect", return_value=None), \
+             patch(
+                 "cli_anything.unreal.core.win32_editor_capture.capture_hwnd_to_png_bounded",
+                 return_value={
+                     "ok": False,
+                     "timed_out": True,
+                     "error": "Window capture timed out after 4.0s",
+                 },
+             ):
+            result = _capture_viewport_png_raw(
+                api,
+                "hung",
+                str(tmp_path),
+                wait_timeout=4.0,
+                res_x=1920,
+                res_y=1080,
+                delay=0,
+            )
+
+        assert result["status"] == "error"
+        assert result["failure_stage"] == "capture_backend"
+        assert result["timed_out"] is True
+        assert result["timeout_seconds"] == 4.0
+
+    def test_win32_capture_timeout_terminates_helper(self, tmp_path):
+        from cli_anything.unreal.core.win32_editor_capture import (
+            capture_hwnd_to_png_bounded,
+        )
+
+        with patch(
+            "cli_anything.unreal.core.win32_editor_capture.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="capture", timeout=2.0),
+        ):
+            result = capture_hwnd_to_png_bounded(
+                123,
+                tmp_path / "hung.png",
+                timeout=2.0,
+            )
+
+        assert result == {
+            "ok": False,
+            "timed_out": True,
+            "error": "Window capture timed out after 2.0s",
+        }
+
+    def test_win32_capture_helper_reports_actionable_failure(self, capsys):
+        from cli_anything.unreal.core import win32_editor_capture
+
+        with patch("sys.argv", ["capture", "123", "failed.png"]), \
+             patch.object(win32_editor_capture, "capture_hwnd_to_png", return_value=False):
+            returncode = win32_editor_capture._main()
+
+        assert returncode == 1
+        error = capsys.readouterr().err
+        assert "GDI window capture failed" in error
+        assert "Pillow" in error
 
     def test_compress_for_agent_no_pillow(self, tmp_path):
         """Test graceful handling when Pillow is not available."""

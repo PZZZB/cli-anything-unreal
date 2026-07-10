@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import ctypes
+import subprocess
 from ctypes import wintypes
 from pathlib import Path
 
@@ -158,3 +159,82 @@ def capture_hwnd_to_png(hwnd: int, output_path: Path, crop_rect: tuple[int, int,
     output_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(output_path, "PNG", optimize=True)
     return True
+
+
+def capture_hwnd_to_png_bounded(
+    hwnd: int,
+    output_path: Path,
+    crop_rect: tuple[int, int, int, int] | None = None,
+    *,
+    timeout: float = 15.0,
+) -> dict:
+    """Run the blocking GDI capture in a helper that can be killed on timeout."""
+    timeout = max(float(timeout), 0.1)
+    command = [
+        sys.executable,
+        "-m",
+        "cli_anything.unreal.core.win32_editor_capture",
+        str(int(hwnd)),
+        str(Path(output_path)),
+    ]
+    if crop_rect is not None:
+        command.extend(["--crop", *(str(int(value)) for value in crop_rect)])
+
+    kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "timeout": timeout,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    try:
+        completed = subprocess.run(command, **kwargs)
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "timed_out": True,
+            "error": f"Window capture timed out after {timeout:.1f}s",
+        }
+    except OSError as exc:
+        return {
+            "ok": False,
+            "timed_out": False,
+            "error": f"Window capture helper failed to start: {exc}",
+        }
+
+    if completed.returncode == 0 and Path(output_path).is_file():
+        return {"ok": True, "timed_out": False}
+
+    detail = (completed.stderr or "").strip()
+    return {
+        "ok": False,
+        "timed_out": False,
+        "error": detail or f"Window capture helper exited with code {completed.returncode}",
+    }
+
+
+def _main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("hwnd", type=int)
+    parser.add_argument("output_path")
+    parser.add_argument("--crop", nargs=4, type=int)
+    args = parser.parse_args()
+    crop_rect = tuple(args.crop) if args.crop is not None else None
+    if capture_hwnd_to_png(args.hwnd, Path(args.output_path), crop_rect):
+        return 0
+    print(
+        "GDI window capture failed. Verify the HWND is valid and install Pillow "
+        "with: pip install Pillow",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

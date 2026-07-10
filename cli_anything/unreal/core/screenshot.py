@@ -177,12 +177,15 @@ def _capture_viewport_png_raw(
         return {
             "status": "error",
             "message": "Editor window capture is only implemented on Windows (CLI host).",
+            "failure_stage": "platform",
             "foreground_ok": False,
             "refresh": {},
         }
 
+    capture_timeout = max(float(wait_timeout), 0.1)
+    remote_timeout = min(capture_timeout, max(float(rc_timeout or 3.0), 0.1))
     foreground_ok = api.bring_to_foreground() if foreground else False
-    refresh_result = _refresh_editor_viewports(api, timeout=rc_timeout or 3.0) if refresh else {}
+    refresh_result = _refresh_editor_viewports(api, timeout=remote_timeout) if refresh else {}
 
     time.sleep(delay)
 
@@ -210,27 +213,42 @@ def _capture_viewport_png_raw(
         return {
             "status": "error",
             "message": "Could not find Unreal Editor window handle (is the editor running?).",
+            "failure_stage": "host_window_resolution",
             "foreground_ok": foreground_ok,
             "refresh": refresh_result,
         }
 
+    viewport_bounds_error = None
     if use_viewport_bounds and viewport_rect is None:
-        viewport_rect = _get_active_viewport_rect(api, timeout=rc_timeout)
+        try:
+            viewport_rect = _get_active_viewport_rect(api, timeout=remote_timeout)
+        except Exception as exc:
+            viewport_bounds_error = str(exc)
 
-    from cli_anything.unreal.core.win32_editor_capture import capture_hwnd_to_png
+    from cli_anything.unreal.core.win32_editor_capture import capture_hwnd_to_png_bounded
 
-    if not capture_hwnd_to_png(hwnd, save_path, crop_rect=viewport_rect):
-        return {
+    capture_result = capture_hwnd_to_png_bounded(
+        hwnd,
+        save_path,
+        crop_rect=viewport_rect,
+        timeout=capture_timeout,
+    )
+    if not capture_result.get("ok"):
+        result = {
             "status": "error",
-            "message": (
-                "GDI capture failed (install Pillow if missing: pip install Pillow)."
-            ),
+            "message": capture_result.get("error", "GDI capture failed."),
+            "failure_stage": "capture_backend",
+            "timed_out": bool(capture_result.get("timed_out")),
+            "timeout_seconds": capture_timeout,
             "foreground_ok": foreground_ok,
             "refresh": refresh_result,
         }
+        if viewport_bounds_error:
+            result["viewport_bounds_error"] = viewport_bounds_error
+        return result
 
     size = save_path.stat().st_size
-    return {
+    result = {
         "status": "ok",
         "path_raw": str(save_path),
         "size_raw": size,
@@ -238,6 +256,9 @@ def _capture_viewport_png_raw(
         "foreground_ok": foreground_ok,
         "refresh": refresh_result,
     }
+    if viewport_bounds_error:
+        result["viewport_bounds_error"] = viewport_bounds_error
+    return result
 
 
 def take_screenshot(
@@ -256,7 +277,7 @@ def take_screenshot(
         api: Connected UEEditorAPI instance.
         filename: Output filename (without extension).
         project_dir: Project directory (for finding saved screenshots).
-        wait_timeout: Unused (capture is synchronous); kept for API compatibility.
+        wait_timeout: Maximum seconds allowed for the blocking GDI capture helper.
         res_x: Unused; capture uses the live editor window size.
         res_y: Unused; capture uses the live editor window size.
         delay: Seconds for viewport to render before capture.

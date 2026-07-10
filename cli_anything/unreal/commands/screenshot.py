@@ -2,13 +2,27 @@
 
 import click
 
-from cli_anything.unreal.commands import AppState, handle_error, output, require_editor
+from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_editor
 
 
 @click.group("screenshot")
 def screenshot_group():
     """Screenshot capture and comparison (requires running editor)."""
     pass
+
+
+def _raise_capture_error(result: dict) -> None:
+    if not isinstance(result, dict) or not (
+        result.get("status") == "error" or result.get("error")
+    ):
+        return
+    timed_out = bool(result.get("timed_out"))
+    raise AppError(
+        "SCREENSHOT_CAPTURE_TIMEOUT" if timed_out else "SCREENSHOT_CAPTURE_FAILED",
+        result.get("message") or result.get("error") or "Screenshot capture failed.",
+        exit_code=3,
+        details=result,
+    )
 
 
 @screenshot_group.command("capture")
@@ -40,6 +54,7 @@ def screenshot_static(state: AppState, output_path, filename, no_compress):
         project_dir=state.session.project_dir,
         output_path=output_path,
     )
+    _raise_capture_error(result)
 
     # Default: same path agents read — JPG from compress_for_agent when not --no-compress
     if result.get("status") == "ok" or result.get("path_raw"):
@@ -74,6 +89,7 @@ def _exec_screenshot_dynamic(state: AppState, frames, interval, no_compress):
         max_atlas_edge=1920,
         jpeg_quality=85,
     )
+    _raise_capture_error(result)
     if result.get("status") == "ok":
         if no_compress:
             result["default_path"] = result.get("atlas_path") or result.get("read_this")
