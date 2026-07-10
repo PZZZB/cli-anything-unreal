@@ -600,6 +600,115 @@ class TestBuildStopAndDetect:
             assert "stdout" not in result
             assert "stderr" not in result
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows console encoding behavior")
+    def test_run_subprocess_uses_hidden_utf8_console(self, tmp_path):
+        """Detached build workers must give MSVC a UTF-8 console code page."""
+        from cli_anything.unreal.utils.ue_backend import _run_subprocess
+
+        mock_proc = MagicMock(pid=1234, returncode=0)
+        mock_proc.wait.return_value = None
+
+        with patch("subprocess.Popen", return_value=mock_proc) as popen, \
+             patch(
+                 "cli_anything.unreal.utils.ue_backend._attach_kill_on_close_job",
+                 return_value=123,
+             ), patch(
+                 "cli_anything.unreal.utils.ue_backend._resume_suspended_process",
+                 return_value=True,
+             ), patch(
+                 "cli_anything.unreal.utils.ue_backend._release_kill_on_close_job",
+                 return_value=True,
+            ):
+            result = _run_subprocess(
+                [r"F:\Custom Engine\Build.bat", "Target", "Win64", "Development"],
+                log_file=str(tmp_path / "utf8-console.log"),
+            )
+
+        assert result["returncode"] == 0
+        launch_command = popen.call_args.args[0]
+        assert isinstance(launch_command, list)
+        assert launch_command[0].lower().endswith("powershell.exe")
+        assert "-EncodedCommand" in launch_command
+        assert popen.call_args.kwargs["shell"] is False
+        assert popen.call_args.kwargs["creationflags"] & subprocess.CREATE_NEW_CONSOLE
+        startupinfo = popen.call_args.kwargs["startupinfo"]
+        assert startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW
+        assert startupinfo.wShowWindow == subprocess.SW_HIDE
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows command argument behavior")
+    def test_run_subprocess_preserves_cmd_metacharacters(self, tmp_path):
+        """Build paths and options must not be reinterpreted by cmd.exe."""
+        from cli_anything.unreal.utils.ue_backend import _run_subprocess
+
+        dump_script = tmp_path / "dump_args.py"
+        dump_script.write_text(
+            "import json, sys\nprint(json.dumps(sys.argv[1:]))\n",
+            encoding="ascii",
+        )
+        batch = tmp_path / "forward_args.bat"
+        batch.write_text(
+            f'@echo off\n"{sys.executable}" "{dump_script}" %*\n',
+            encoding="ascii",
+        )
+        expected = [
+            "a&b",
+            "%PATH%",
+            "space value",
+            "caret^pipe|value",
+            "bang!value",
+            "paren(value)<redir>",
+        ]
+        log_path = tmp_path / "forwarded.log"
+
+        result = _run_subprocess(
+            [str(batch), *expected],
+            log_file=str(log_path),
+            heartbeat_seconds=0,
+        )
+
+        assert result["returncode"] == 0
+        assert json.loads(log_path.read_text(encoding="utf-8").strip()) == expected
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows console encoding behavior")
+    def test_run_subprocess_preserves_localized_linker_output_as_utf8(self, tmp_path):
+        """A CP936 parent must not corrupt localized MSVC-style child output."""
+        import ctypes
+
+        from cli_anything.unreal.utils.ue_backend import _run_subprocess
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        original_code_page = kernel32.GetConsoleOutputCP()
+        if not original_code_page:
+            pytest.skip("Test process has no Windows console")
+
+        script = tmp_path / "localized_linker_output.py"
+        script.write_text(
+            "import ctypes, os\n"
+            "cp = ctypes.windll.kernel32.GetConsoleOutputCP()\n"
+            "encoding = f'cp{cp}' if cp else 'mbcs'\n"
+            "line = '\\u6b63\\u5728\\u521b\\u5efa\\u5e93 Engine.lib "
+            "\\u548c\\u5bf9\\u8c61 Engine.exp\\n'\n"
+            "os.write(1, line.encode(encoding))\n",
+            encoding="ascii",
+        )
+        log_path = tmp_path / "localized-linker.log"
+
+        assert kernel32.SetConsoleOutputCP(936)
+        try:
+            result = _run_subprocess(
+                [sys.executable, str(script)],
+                log_file=str(log_path),
+                heartbeat_seconds=0,
+            )
+        finally:
+            kernel32.SetConsoleOutputCP(original_code_page)
+
+        assert result["returncode"] == 0
+        assert log_path.read_text(encoding="utf-8") == (
+            "\u6b63\u5728\u521b\u5efa\u5e93 Engine.lib \u548c\u5bf9\u8c61 Engine.exp\n"
+        )
+        assert b"\xef\xbf\xbd" not in log_path.read_bytes()
+
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object behavior")
     def test_run_subprocess_success_disarms_kill_job(self, tmp_path):
         """Successful builds preserve descendants before releasing the Job Object."""

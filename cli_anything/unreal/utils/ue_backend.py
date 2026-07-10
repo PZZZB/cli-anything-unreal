@@ -4,6 +4,7 @@ Handles finding UE installations, locating tools, and running subprocess
 commands for build/cook/package operations that don't require a running editor.
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -892,7 +893,78 @@ def _run_subprocess(
         ``returncode == -1`` for launch failures (with an ``"error"`` key),
         ``-2`` for timeouts (with an ``"error"`` key naming the timeout).
     """
-    use_shell = sys.platform == "win32"
+    is_windows = sys.platform == "win32"
+    launch_cmd: list[str] | str = cmd
+    startupinfo = None
+    if is_windows:
+        # Detached task workers have no console, so MSVC falls back to the
+        # system code page while UBT decodes action output as UTF-8. Give the
+        # build its own hidden console and align its code page before UAT runs.
+        encoded_items = [
+            base64.b64encode(str(item).encode("utf-8")).decode("ascii")
+            for item in cmd
+        ]
+        item_expressions = "\n".join(
+            "[Text.Encoding]::UTF8.GetString("
+            f"[Convert]::FromBase64String('{item}'))"
+            for item in encoded_items
+        )
+        safe_assignments = "\r\n".join(
+            f'set "UE_CLI_SAFE_{index}=!UE_CLI_ARG_{index}!"'
+            for index in range(len(cmd))
+        )
+        argument_refs = " ".join(
+            f'"%UE_CLI_SAFE_{index}%"' for index in range(len(cmd))
+        )
+        wrapper_content = (
+            "@echo off\r\n"
+            "setlocal EnableDelayedExpansion\r\n"
+            f"{safe_assignments}\r\n"
+            "setlocal DisableDelayedExpansion\r\n"
+            "chcp 65001 >nul\r\n"
+            f"{argument_refs}\r\n"
+        )
+        encoded_wrapper = base64.b64encode(wrapper_content.encode("ascii")).decode("ascii")
+        script = (
+            "$ProgressPreference = 'SilentlyContinue'\n"
+            "$ErrorActionPreference = 'Stop'\n"
+            "$items = @(\n"
+            f"{item_expressions}\n"
+            ")\n"
+            "if ($items.Count -lt 1) { exit 87 }\n"
+            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
+            "for ($index = 0; $index -lt $items.Count; $index++) {\n"
+            "  [Environment]::SetEnvironmentVariable(\n"
+            "    ('UE_CLI_ARG_' + $index), [string]$items[$index], 'Process')\n"
+            "}\n"
+            "$wrapper = [IO.Path]::Combine("
+            "[IO.Path]::GetTempPath(), ('ue_cli_build_' + $PID + '.cmd'))\n"
+            "$content = [Text.Encoding]::ASCII.GetString("
+            f"[Convert]::FromBase64String('{encoded_wrapper}'))\n"
+            "[IO.File]::WriteAllText($wrapper, $content, [Text.Encoding]::ASCII)\n"
+            "$exitCode = 1\n"
+            "try {\n"
+            "  & $wrapper\n"
+            "  $exitCode = $LASTEXITCODE\n"
+            "} finally {\n"
+            "  if ([IO.File]::Exists($wrapper)) { [IO.File]::Delete($wrapper) }\n"
+            "}\n"
+            "exit $exitCode\n"
+        )
+        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        launch_cmd = [
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded_script,
+        ]
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
 
     # Ensure the log path is writable before spawning anything.
     log_path = Path(log_file)
@@ -915,19 +987,20 @@ def _run_subprocess(
     try:
         try:
             creationflags = 0
-            if use_shell:
+            if is_windows:
                 # Suspend before first instruction so no child can escape the
                 # Job Object between CreateProcess and assignment.
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000004
+                creationflags = subprocess.CREATE_NEW_CONSOLE | 0x00000004
             proc = subprocess.Popen(
-                cmd,
+                launch_cmd,
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
                 cwd=cwd,
-                shell=use_shell,
+                shell=False,
                 creationflags=creationflags,
+                startupinfo=startupinfo,
             )
-            if use_shell:
+            if is_windows:
                 job_handle = _attach_kill_on_close_job(proc)
                 if job_handle is None:
                     proc.kill()
