@@ -228,7 +228,21 @@ for _candidate in _sub.get_all_level_actors():
 if _actor is None:
     result = {{"error": "Actor not found: " + _actor_path}}
 else:
-    _root = _actor.get_root_component()
+    _root = None
+    for _property_name in ("RootComponent", "root_component"):
+        try:
+            _root = _actor.get_editor_property(_property_name)
+        except Exception:
+            continue
+        if _root is not None:
+            break
+    if _root is None:
+        _root_getter = getattr(_actor, "get_root_component", None)
+        if callable(_root_getter):
+            try:
+                _root = _root_getter()
+            except Exception:
+                pass
     _components = []
     for _component in _actor.get_components_by_class(_u.ActorComponent):
         try:

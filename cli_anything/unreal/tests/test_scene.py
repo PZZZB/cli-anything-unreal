@@ -262,6 +262,74 @@ class TestScene:
         assert [c["name"] for c in result["components"]] == ["StaticMeshComponent0"]
         mock_run.assert_called_once()
 
+    def test_get_actor_components_without_get_root_component(self, monkeypatch):
+        import sys
+        from types import ModuleType
+
+        from cli_anything.unreal.core.scene import get_actor_components
+
+        actor_path = "/Game/Map.Map:PersistentLevel.StaticMeshActor_0"
+
+        class FakeClass:
+            def get_name(self):
+                return "StaticMeshComponent"
+
+        class FakeComponent:
+            def get_name(self):
+                return "StaticMeshComponent0"
+
+            def get_class(self):
+                return FakeClass()
+
+            def get_path_name(self):
+                return actor_path + ".StaticMeshComponent0"
+
+        component = FakeComponent()
+
+        class FakeActor:
+            def get_path_name(self):
+                return actor_path
+
+            def get_editor_property(self, name):
+                if name in {"RootComponent", "root_component"}:
+                    return component
+                raise AttributeError(name)
+
+            def get_components_by_class(self, _component_class):
+                return [component]
+
+        class FakeSubsystem:
+            def get_all_level_actors(self):
+                return [FakeActor()]
+
+        fake_unreal = ModuleType("unreal")
+        fake_unreal.EditorActorSubsystem = object()
+        fake_unreal.ActorComponent = object()
+        fake_unreal.get_editor_subsystem = lambda _class: FakeSubsystem()
+        monkeypatch.setitem(sys.modules, "unreal", fake_unreal)
+
+        def execute_script(_api, script, save=False):
+            namespace = {}
+            exec(script, namespace)
+            return namespace["result"]
+
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            side_effect=execute_script,
+        ):
+            result = get_actor_components(self._mock_api(), actor_path)
+
+        assert result["components"] == [
+            {
+                "name": "StaticMeshComponent0",
+                "type": "UStaticMeshComponent*",
+                "class": "StaticMeshComponent",
+                "path": actor_path + ".StaticMeshComponent0",
+                "is_root": True,
+                "description": "",
+            }
+        ]
+
     def test_get_actor_components_error(self):
         from cli_anything.unreal.core.scene import get_actor_components
 
