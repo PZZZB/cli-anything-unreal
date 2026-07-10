@@ -83,6 +83,86 @@ def _get_viewport_camera(api, timeout: int) -> dict:
     return {"loc": result["loc"], "rot": result["rot"]}
 
 
+def _set_viewport_game_view(api, mode: str | None) -> dict:
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    requested_mode = (mode or "get").lower()
+    script = f"""
+import unreal
+_mode = {json.dumps(requested_mode)}
+_subsystem = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+_get = getattr(_subsystem, "editor_get_game_view", None)
+_set = getattr(_subsystem, "editor_set_game_view", None)
+_active_viewport = False
+_viewport_error = None
+try:
+    _bounds = unreal.CliAnythingBridgeLibrary.get_active_viewport_screen_bounds()
+    _active_viewport = int(_bounds.z) > 0 and int(_bounds.w) > 0
+except Exception as _exc:
+    _viewport_error = str(_exc)
+if not _active_viewport:
+    result = {{
+        "error": "No active Level Viewport could be verified.",
+        "mode": _mode,
+        "viewport_error": _viewport_error,
+        "suggestion": "Focus a Level Viewport and ensure the bundled bridge plugin is current.",
+    }}
+elif _get is None or (_mode != "get" and _set is None):
+    result = {{
+        "error": "Level Viewport game-view state is not exposed by this UE Python API.",
+        "mode": _mode,
+        "tried": [
+            "LevelEditorSubsystem.editor_get_game_view",
+            "LevelEditorSubsystem.editor_set_game_view",
+        ],
+    }}
+else:
+    _before = bool(_get())
+    _desired = _before
+    if _mode == "toggle":
+        _desired = not _before
+    elif _mode == "on":
+        _desired = True
+    elif _mode == "off":
+        _desired = False
+    if _mode != "get" and _desired != _before:
+        _set(_desired)
+    _after = bool(_get())
+    result = {{
+        "status": "ok",
+        "mode": _mode,
+        "before": _before,
+        "after": _after,
+        "changed": _after != _before,
+    }}
+    if _after != _desired:
+        result["error"] = "Level Viewport game-view state did not reach the requested value."
+"""
+    result = run_python_code(api, script, save=False)
+    if result.get("error"):
+        raise AppError(
+            "VIEWPORT_GAME_VIEW_FAILED",
+            f"Could not update Level Viewport game view: {result['error']}",
+            exit_code=3,
+            details=result,
+        )
+    required = {"before", "after", "changed"}
+    if not required.issubset(result):
+        raise AppError(
+            "VIEWPORT_GAME_VIEW_FAILED",
+            "Could not read Level Viewport game-view state.",
+            exit_code=3,
+            details=result,
+        )
+    return {
+        "status": result.get("status", "ok"),
+        "mode": result.get("mode", requested_mode),
+        "before": result["before"],
+        "after": result["after"],
+        "changed": result["changed"],
+    }
+
+
 def _camera_changed(before: dict, after: dict, tolerance: float = 1e-3) -> bool:
     for key in ("loc", "rot"):
         for a, b in zip(before.get(key, []), after.get(key, [])):
@@ -627,6 +707,20 @@ def viewport_camera(state: AppState, timeout):
     """Read the active Level Viewport camera."""
     api = require_editor(state)
     output(_get_viewport_camera(api, timeout), state)
+
+
+@viewport_group.command("game-view")
+@click.argument(
+    "mode",
+    required=False,
+    type=click.Choice(["on", "off", "toggle"], case_sensitive=False),
+)
+@handle_error
+@click.pass_obj
+def viewport_game_view(state: AppState, mode):
+    """Read or change the active Level Viewport game-view state."""
+    api = require_editor(state)
+    output(_set_viewport_game_view(api, mode), state)
 
 
 @viewport_group.group("bookmark")

@@ -647,6 +647,62 @@ class TestCLI:
         assert "getattr(unreal.EditorLevelLibrary" in _VIEWPORT_CAMERA_SCRIPT
         assert "LevelEditorSubsystem" in _VIEWPORT_CAMERA_SCRIPT
 
+    @pytest.mark.parametrize(
+        ("mode", "expected_mode"),
+        [(None, None), ("toggle", "toggle"), ("on", "on"), ("off", "off")],
+    )
+    def test_viewport_game_view_cli(self, temp_project, mode, expected_mode):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        response = {
+            "status": "ok",
+            "mode": mode or "get",
+            "before": False,
+            "after": mode in {"toggle", "on"},
+            "changed": mode in {"toggle", "on"},
+        }
+        args = [
+            "--output", "json", "--project", temp_project["uproject"],
+            "editor", "viewport", "game-view",
+        ]
+        if mode:
+            args.append(mode)
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor", return_value=MagicMock()), \
+             patch(
+                 "cli_anything.unreal.commands.editor._set_viewport_game_view",
+                 return_value=response,
+             ) as game_view:
+            result = runner.invoke(cli, args)
+
+        assert result.exit_code == 0
+        assert json.loads(result.output)["result"] == response
+        assert game_view.call_args.args[1] == expected_mode
+
+    def test_viewport_game_view_script_reads_sets_and_verifies(self):
+        from cli_anything.unreal.commands.editor import _set_viewport_game_view
+
+        api = MagicMock()
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value={
+                "mode": "toggle",
+                "before": False,
+                "after": True,
+                "changed": True,
+            },
+        ) as run_script:
+            result = _set_viewport_game_view(api, "toggle")
+
+        assert result["after"] is True
+        script = run_script.call_args.args[1]
+        assert "editor_get_game_view" in script
+        assert "editor_set_game_view" in script
+        assert "get_active_viewport_screen_bounds" in script
+        assert run_script.call_args.kwargs["save"] is False
+
     def test_viewport_bookmark_jump_unchanged_errors(self, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli

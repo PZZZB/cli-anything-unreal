@@ -167,6 +167,20 @@ ue-cli --output json --project "F:/path/to/Project.uproject" editor viewport boo
 
 Success returns index, window, before/after camera. `BOOKMARK_JUMP_UNCHANGED` means likely focus fail, missing bookmark, changed shortcut, or wrong window.
 
+## Viewport Game View
+
+`editor exec ToggleGameView` can report command execution without changing the Level Viewport. Use the dedicated state API instead:
+
+```bash
+# Query current state
+ue-cli --output json --project "F:/path/to/Project.uproject" editor viewport game-view
+
+# Set or toggle, with verified before/after state
+ue-cli --output json --project "F:/path/to/Project.uproject" editor viewport game-view on
+ue-cli --output json --project "F:/path/to/Project.uproject" editor viewport game-view off
+ue-cli --output json --project "F:/path/to/Project.uproject" editor viewport game-view toggle
+```
+
 ## RenderDoc Frame Capture
 
 Capture GPU frame for offline shader/draw-call analysis.
