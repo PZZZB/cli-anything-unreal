@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from cli_anything.unreal.utils.ue_backend import (
@@ -11,11 +12,23 @@ from cli_anything.unreal.utils.ue_backend import (
     find_uat,
     get_engine_version,
     kill_build_processes,
+    run_build,
     run_uat,
 )
 
 
 _UNSAFE_PACKAGE_VALUE_CHARS = frozenset('"&|<>\0\r\n')
+_GAME_TARGET_PATTERN = re.compile(
+    r"\bType\s*=\s*TargetType\s*\.\s*Game\s*;"
+)
+
+_TARGET_LEXICAL_NOISE_PATTERN = re.compile(
+    r"//[^\r\n]*|/\*.*?\*/|"
+    r'@"(?:""|[^"])*"|'
+    r'"(?:\\.|[^"\\\r\n])*"|'
+    r"'(?:\\.|[^'\\\r\n])*'",
+    re.DOTALL,
+)
 
 
 def validate_package_uat_value(
@@ -35,6 +48,55 @@ def validate_package_uat_value(
             "NUL/CR/LF are not allowed"
         )
     return value
+
+
+def _sanitize_target_source(source: str) -> str:
+    def preserve_newlines(value: str) -> str:
+        return "".join(char if char in "\r\n" else " " for char in value)
+
+    source = _TARGET_LEXICAL_NOISE_PATTERN.sub(
+        lambda match: preserve_newlines(match.group(0)),
+        source,
+    )
+    conditional_depth = 0
+    sanitized_lines = []
+    for line in source.splitlines(keepends=True):
+        directive = re.match(r"^\s*#\s*(if|endif)\b", line)
+        if directive:
+            if directive.group(1) == "if":
+                conditional_depth += 1
+            elif conditional_depth:
+                conditional_depth -= 1
+            sanitized_lines.append(preserve_newlines(line))
+        elif conditional_depth:
+            sanitized_lines.append(preserve_newlines(line))
+        else:
+            sanitized_lines.append(line)
+    return "".join(sanitized_lines)
+
+
+def _resolve_game_target(uproject_path: str) -> tuple[str | None, str | None]:
+    project_path = Path(uproject_path)
+    source_dir = project_path.parent / "Source"
+    game_targets = []
+    if source_dir.is_dir():
+        for target_file in sorted(source_dir.rglob("*.Target.cs")):
+            try:
+                source = target_file.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                return None, f"Could not read target file {target_file}: {exc}"
+            if _GAME_TARGET_PATTERN.search(_sanitize_target_source(source)):
+                game_targets.append(target_file.name.removesuffix(".Target.cs"))
+
+    game_targets = sorted(set(game_targets))
+    if len(game_targets) > 1:
+        return None, (
+            "Multiple Game targets found; cannot choose one for compile: "
+            + ", ".join(game_targets)
+        )
+    if game_targets:
+        return game_targets[0], None
+    return project_path.stem, None
 
 
 def _check_already_building(uproject_path: str) -> dict | None:
@@ -80,6 +142,23 @@ def compile_project(
     engine_root = engine_root or find_engine_root(uproject_path)
     if not engine_root:
         return {"status": "error", "error": "Could not find engine root"}
+
+    if platform.lower() != "win64":
+        target, target_error = _resolve_game_target(uproject_path)
+        if target_error:
+            return {"status": "error", "error": target_error}
+        result = run_build(
+            engine_root,
+            target,
+            platform,
+            config,
+            extra_args=[f"-Project={uproject_path}", "-WaitMutex"],
+            log_file=log_file,
+            log_label="compile",
+            project_dir=str(Path(uproject_path).parent),
+            on_start=on_start,
+        )
+        return _normalize_result(result, "Compile")
 
     args = [
         f"-project={uproject_path}",

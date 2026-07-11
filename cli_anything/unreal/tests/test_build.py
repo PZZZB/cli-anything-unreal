@@ -101,6 +101,172 @@ class TestBuildSuccessPaths:
             assert result["returncode"] == 1
             assert "log_file" in result["error"]
 
+    def test_compile_android_uses_build_bat_game_target(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        build_result = {
+            "returncode": 0,
+            "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
+            "duration_seconds": 12.3,
+        }
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value=build_result,
+            create=True,
+        ) as mock_run_build, patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value=build_result,
+        ) as mock_run_uat:
+            result = compile_project(
+                temp_project["uproject"],
+                platform="Android",
+                engine_root=self._mock_engine_root(),
+            )
+
+        project_dir = str(Path(temp_project["uproject"]).parent)
+        mock_run_build.assert_called_once_with(
+            self._mock_engine_root(),
+            "TestProject",
+            "Android",
+            "Development",
+            extra_args=[
+                f'-Project={temp_project["uproject"]}',
+                "-WaitMutex",
+            ],
+            log_file=None,
+            log_label="compile",
+            project_dir=project_dir,
+            on_start=None,
+        )
+        mock_run_uat.assert_not_called()
+        assert result["status"] == "ok"
+
+    def test_compile_android_uses_unique_custom_game_target(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["uproject"]).parent
+        (project_dir / "Source" / "CustomMobile.Target.cs").write_text(
+            "public class CustomMobileTarget : TargetRules {\n"
+            "    public CustomMobileTarget(TargetInfo Target) : base(Target) {\n"
+            "        Type = TargetType.Game;\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        build_result = {
+            "returncode": 0,
+            "log_file": "compile.log",
+            "duration_seconds": 1.0,
+        }
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value=build_result,
+            create=True,
+        ) as mock_run_build, patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value=build_result,
+        ) as mock_run_uat:
+            result = compile_project(
+                temp_project["uproject"],
+                platform="Android",
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "ok"
+        assert mock_run_build.call_args.args[1] == "CustomMobile"
+        mock_run_uat.assert_not_called()
+
+    def test_compile_android_ignores_inactive_and_lexical_fake_game_targets(
+        self, temp_project
+    ):
+        from cli_anything.unreal.core.build import compile_project
+
+        source_dir = Path(temp_project["uproject"]).parent / "Source"
+        (source_dir / "FakeEditor.Target.cs").write_text(
+            "// Type = TargetType.Game;\n"
+            'const string Normal = "Type = TargetType.Game;";\n'
+            'const string Verbatim = @"Type = TargetType.Game;";\n'
+            "const char Fake = 'Type = TargetType.Game;';\n"
+            "/* Type = TargetType.Game; */\n"
+            "#if false\n"
+            "Type = TargetType.Game;\n"
+            "#if NESTED\n"
+            "Type = TargetType.Game;\n"
+            "#endif\n"
+            "#endif\n",
+            encoding="utf-8",
+        )
+        (source_dir / "RealMobile.Target.cs").write_text(
+            "public class RealMobileTarget : TargetRules {\n"
+            "    Type = TargetType.Game;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        build_result = {
+            "returncode": 0,
+            "log_file": "compile.log",
+            "duration_seconds": 1.0,
+        }
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value=build_result,
+        ) as mock_run_build, patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value=build_result,
+        ) as mock_run_uat:
+            result = compile_project(
+                temp_project["uproject"],
+                platform="Android",
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "ok"
+        assert mock_run_build.call_args.args[1] == "RealMobile"
+        mock_run_uat.assert_not_called()
+
+    def test_compile_android_rejects_multiple_game_targets(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        source_dir = Path(temp_project["uproject"]).parent / "Source"
+        for name in ("ClientGame", "CustomMobile"):
+            (source_dir / f"{name}.Target.cs").write_text(
+                f"public class {name}Target : TargetRules {{\n"
+                "    Type = TargetType.Game;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            create=True,
+        ) as mock_run_build, patch(
+            "cli_anything.unreal.core.build.run_uat",
+        ) as mock_run_uat:
+            result = compile_project(
+                temp_project["uproject"],
+                platform="Android",
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "error"
+        assert "multiple game targets" in result["error"].lower()
+        assert "ClientGame" in result["error"]
+        assert "CustomMobile" in result["error"]
+        mock_run_build.assert_not_called()
+        mock_run_uat.assert_not_called()
+
     def test_cook_success(self, temp_project):
         from cli_anything.unreal.core.build import cook_content
 
