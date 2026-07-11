@@ -283,7 +283,7 @@ def _execute(
 # Shared reflection logic used by both class-name and instance templates.
 # Injected as a function definition at the top of the generated script.
 _DISCOVER_FUNC = '''\
-import json as _cli_json, re as _cli_re, unreal as _cli_unreal
+import inspect as _cli_inspect, json as _cli_json, re as _cli_re, unreal as _cli_unreal
 
 def _cli_prop_name(_prop):
     try:
@@ -351,6 +351,87 @@ def _cli_format_discovery(_data, _kind, _name, _query=None, _detail=None, _full_
     if _kind == "struct" and _data.get("struct_path"):
         _out["struct_path"] = _data.get("struct_path")
     return _out
+
+def _cli_python_symbol(_target, _target_name, _name):
+    try:
+        _value = _cli_inspect.getattr_static(_target, _name)
+    except Exception:
+        return None
+    _is_callable = callable(_value)
+    try:
+        _tooltip = str(getattr(_value, "__doc__", "") or "")
+    except Exception:
+        _tooltip = ""
+    if len(_tooltip) > 1000:
+        _tooltip = _tooltip[:1000] + "..."
+    return {
+        "kind": "function" if _is_callable else "property",
+        "name": _name,
+        "detail": {
+            "name": _name,
+            "owner": _target_name,
+            "source": "python_binding",
+            "python_only": True,
+            "tooltip": _tooltip,
+        },
+    }
+
+
+def _cli_add_python_symbols(_out, _target, _target_name, _query=None, _detail=None):
+    if _target is None or (not _query and not _detail):
+        return _out
+
+    if _detail:
+        _missing = list(_out.get("not_found", []))
+        _python_only = []
+        for _name in _missing:
+            _item = _cli_python_symbol(_target, _target_name, _name)
+            if _item is None:
+                continue
+            _out.setdefault("items", []).append(_item)
+            _python_only.append(_name)
+        if _python_only:
+            _out["python_only"] = _python_only
+            _remaining = [n for n in _missing if n not in _python_only]
+            if _remaining:
+                _out["not_found"] = _remaining
+            else:
+                _out.pop("not_found", None)
+        return _out
+
+    try:
+        _pat = _cli_re.compile(_query, _cli_re.IGNORECASE)
+    except _cli_re.error:
+        return _out
+
+    _existing = set(_out.get("functions", [])) | set(_out.get("properties", []))
+    _python_funcs = []
+    _python_props = []
+    try:
+        _python_names = dir(_target)
+    except Exception:
+        return _out
+    for _name in _python_names:
+        if _name.startswith("_") or _name in _existing or not _pat.search(_name):
+            continue
+        _item = _cli_python_symbol(_target, _target_name, _name)
+        if _item is None:
+            continue
+        if _item["kind"] == "function":
+            _python_funcs.append(_name)
+        else:
+            _python_props.append(_name)
+
+    if _python_funcs:
+        _out.setdefault("functions", []).extend(_python_funcs)
+        _out["function_count"] = len(_out["functions"])
+        _out["python_only_functions"] = _python_funcs
+    if _python_props:
+        _out.setdefault("properties", []).extend(_python_props)
+        _out["property_count"] = len(_out["properties"])
+        _out["python_only_properties"] = _python_props
+    return _out
+
 
 def _cli_discover_struct(_struct_name, _query=None, _detail=None, _full_path=None):
     _wrapper = getattr(_cli_unreal, _struct_name, None)
@@ -501,6 +582,10 @@ for _part in _parts[1:]:
 
 result = _cli_discover_class(_class_name, _query={query!r}, _detail={detail!r}, _full_path=".".join(_parts))
 if "error" not in result:
+    result = _cli_add_python_symbols(
+        result, _python_target, _class_name,
+        _query={query!r}, _detail={detail!r},
+    )
     result["target_name"] = _class_name
     result["python_exposed"] = _python_target is not None
     if _python_target is not None:
@@ -514,6 +599,10 @@ _API_DISCOVER_INSTANCE_CALL = '''\
 
 if _cli_resolve_ok:
     _discover_result = _cli_discover_class(_resolved_class, _query={query!r}, _detail={detail!r})
+    _discover_result = _cli_add_python_symbols(
+        _discover_result, _resolved_python_target, _resolved_class,
+        _query={query!r}, _detail={detail!r},
+    )
     _discover_result.update(_instance_context)
     result = _discover_result
 '''
@@ -531,6 +620,7 @@ if _target is None:
     result = {{"error": "Actor not found: " + {actor_path!r}}}
 else:
     _resolved_class = _target.__class__.__name__
+    _resolved_python_target = _target.__class__
     _instance_context = {{
         "actor": _target.get_path_name(),
         "actor_name": _target.get_name(),
@@ -618,6 +708,7 @@ except Exception:
 
 if _cli_obj is not None and not _cli_is_package_object(_cli_obj):
     _resolved_class = _cli_obj.__class__.__name__
+    _resolved_python_target = _cli_obj.__class__
     _instance_context = _cli_object_context(_cli_obj, _cli_asset_path)
     _cli_resolve_ok = True
 elif ":" in _cli_asset_path:
@@ -662,6 +753,7 @@ else:
         }}
     else:
         _resolved_class = _asset.__class__.__name__
+        _resolved_python_target = _asset.__class__
         _instance_context = _cli_asset_context(_asset, _cli_asset_path)
         _cli_resolve_ok = True
 '''
@@ -696,6 +788,7 @@ else:
             result = {{"error": "Component not found: " + _cli_comp_name + " on " + _cli_actor_path}}
         else:
             _resolved_class = _cli_comp.__class__.__name__
+            _resolved_python_target = _cli_comp.__class__
             _instance_context = {{
                 "component": _cli_comp.get_path_name(),
                 "component_name": _cli_comp.get_name(),

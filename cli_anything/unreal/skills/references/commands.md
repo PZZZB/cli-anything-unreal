@@ -73,7 +73,7 @@ ue-cli api-discover DirectionalLight   # not top-level, needs 'editor' prefix
        "params": [{"name": "FromExpression", "type": "UMaterialExpression*"}, ...]}}]}
    ```
 
-**Data source**: C++ reflection via `CliAnythingBridgeLibrary.get_class_info()`, same `TFieldIterator` system as UE Details panel.
+**Data sources**: C++ reflection via `CliAnythingBridgeLibrary.get_class_info()` is primary. Targeted `-q`/`-d` queries also merge matching live Python wrapper symbols omitted by reflection; these results are marked `python_only` with `source: python_binding`.
 
 ## project - Project Management
 

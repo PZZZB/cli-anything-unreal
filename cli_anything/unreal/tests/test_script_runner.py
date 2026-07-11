@@ -648,6 +648,221 @@ class TestScriptRunner:
             else:
                 sys.modules.pop("unreal", None)
 
+    def test_api_discover_detail_includes_python_only_wrapper_methods(self):
+        """Exact detail lookup should find Python bindings omitted by reflection."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        import sys
+        import types
+
+        class FakeEditorLevelLibrary:
+            @staticmethod
+            def get_level_viewport_camera_info():
+                """Return the active viewport camera."""
+
+            @staticmethod
+            def set_level_viewport_camera_info(location, rotation):
+                """Set the active viewport camera."""
+
+        mock_api = MagicMock()
+        bridge_data = {
+            "EditorLevelLibrary": {
+                "class": "EditorLevelLibrary",
+                "properties": [],
+                "functions": [],
+            }
+        }
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.EditorLevelLibrary = FakeEditorLevelLibrary
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(
+                mock_api,
+                "EditorLevelLibrary",
+                detail=(
+                    "set_level_viewport_camera_info,"
+                    "get_level_viewport_camera_info"
+                ),
+                timeout=5,
+            )
+
+            assert "not_found" not in result
+            assert [item["name"] for item in result["items"]] == [
+                "set_level_viewport_camera_info",
+                "get_level_viewport_camera_info",
+            ]
+            assert all(item["kind"] == "function" for item in result["items"])
+            assert all(
+                item["detail"]["source"] == "python_binding"
+                and item["detail"]["python_only"] is True
+                for item in result["items"]
+            )
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+    def test_api_discover_query_includes_python_only_wrapper_methods(self):
+        """Filtered overview should include matching live Python-only symbols."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        import sys
+        import types
+
+        class FakeEditorLevelLibrary:
+            @staticmethod
+            def get_level_viewport_camera_info():
+                pass
+
+            @staticmethod
+            def unrelated_python_method():
+                pass
+
+        mock_api = MagicMock()
+        bridge_data = {
+            "EditorLevelLibrary": {
+                "class": "EditorLevelLibrary",
+                "properties": [],
+                "functions": [],
+            }
+        }
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.EditorLevelLibrary = FakeEditorLevelLibrary
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(
+                mock_api,
+                "EditorLevelLibrary",
+                query="viewport_camera",
+                timeout=5,
+            )
+
+            assert result["functions"] == ["get_level_viewport_camera_info"]
+            assert result["python_only_functions"] == [
+                "get_level_viewport_camera_info"
+            ]
+            assert "unrelated_python_method" not in result["functions"]
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+    def test_api_discover_python_fallback_is_fail_open_when_dir_raises(self):
+        """Python wrapper discovery must not replace valid reflection results."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        import sys
+        import types
+
+        class RaisingDirMeta(type):
+            def __dir__(cls):
+                raise RuntimeError("dir unavailable")
+
+        class FakeLibrary(metaclass=RaisingDirMeta):
+            pass
+
+        mock_api = MagicMock()
+        bridge_data = {
+            "FakeLibrary": {
+                "class": "FakeLibrary",
+                "properties": [],
+                "functions": [
+                    {
+                        "name": "reflected_method",
+                        "owner": "FakeLibrary",
+                        "tooltip": "",
+                        "return_type": "void",
+                        "params": [],
+                    }
+                ],
+            }
+        }
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.FakeLibrary = FakeLibrary
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(
+                mock_api,
+                "FakeLibrary",
+                query="method",
+                timeout=5,
+            )
+
+            assert result["functions"] == ["reflected_method"]
+            assert "error" not in result
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+    def test_api_discover_does_not_execute_python_descriptors(self):
+        """Python-only symbol inspection must not invoke descriptor code."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        import sys
+        import types
+
+        descriptor_reads = []
+
+        class SideEffectDescriptor:
+            def __get__(self, instance, owner):
+                descriptor_reads.append(owner)
+                raise RuntimeError("descriptor executed")
+
+        class FakeLibrary:
+            dangerous_setting = SideEffectDescriptor()
+
+        mock_api = MagicMock()
+        bridge_data = {
+            "FakeLibrary": {
+                "class": "FakeLibrary",
+                "properties": [],
+                "functions": [],
+            }
+        }
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.FakeLibrary = FakeLibrary
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            result = api_discover(
+                mock_api,
+                "FakeLibrary",
+                query="dangerous",
+                timeout=5,
+            )
+
+            assert descriptor_reads == []
+            assert result["properties"] == ["dangerous_setting"]
+            assert result["python_only_properties"] == ["dangerous_setting"]
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
     def test_api_discover_struct_custom_input(self):
         """api_discover should inspect UE Python struct wrappers such as CustomInput."""
         from cli_anything.unreal.core.script_runner import api_discover
@@ -843,6 +1058,49 @@ class TestScriptRunner:
                 sys.modules.pop("unreal", None)
 
         return mock_api, fake_unreal, cleanup
+
+    def test_api_discover_instance_includes_python_only_methods(self):
+        """Instance targets should use the same Python fallback as class targets."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        class PointLight:
+            @staticmethod
+            def python_only_method():
+                pass
+
+            def get_path_name(self):
+                return "/Game/Maps/L.L:PersistentLevel.Light_0"
+
+            def get_name(self):
+                return "Light_0"
+
+            def get_actor_label(self):
+                return "Light_0"
+
+        bridge_data = {
+            "PointLight": {
+                "class": "PointLight",
+                "properties": [],
+                "functions": [],
+            }
+        }
+        actor = PointLight()
+        mock_api, _, cleanup = self._setup_instance_discover(
+            bridge_data,
+            actors=[actor],
+        )
+        try:
+            result = api_discover(
+                mock_api,
+                actor.get_path_name(),
+                query="python_only",
+                timeout=5,
+            )
+
+            assert result["functions"] == ["python_only_method"]
+            assert result["python_only_functions"] == ["python_only_method"]
+        finally:
+            cleanup()
 
     def test_inspect_instance_actor(self):
         """api_discover with an actor path should resolve class and return actor context."""
