@@ -129,6 +129,114 @@ class TestBuildSuccessPaths:
             assert "output_dir" in result
             assert result["log_file"].endswith("cli_package.log")
 
+    def test_package_targeted_android_uat_args(self, temp_project):
+        """Targeted package options must reach BuildCookRun as argv."""
+        from cli_anything.unreal.core.build import package_project
+
+        maps = [
+            "/Game/Maps/Oregon_Main",
+            "/Game/Maps/Oregon_Sub",
+        ]
+        extra_args = [
+            "-pak",
+            "-iostore",
+            "-compressed",
+            "-prereqs",
+            "-nodebuginfo",
+            "-unversionedcookedcontent",
+            "-SkipCookingEditorContent",
+            "-ini:Engine:[/Script/Engine.RendererSettings]:r.SDOC.Enable=1",
+        ]
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.find_engine_root",
+            return_value=self._mock_engine_root(),
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={
+                "returncode": 0,
+                "log_file": r"F:\Test\Saved\Logs\cli_package.log",
+                "duration_seconds": 60.0,
+                "command": ["RunUAT.bat", "BuildCookRun", "-package"],
+            },
+        ) as mock_run:
+            result = package_project(
+                temp_project["uproject"],
+                platform="Android",
+                output_dir="D:/Out",
+                maps=maps,
+                cook_flavor="ASTC",
+                uat_args=extra_args,
+            )
+
+        uat_args = mock_run.call_args.args[2]
+        assert "-platform=Android" in uat_args
+        assert "-map=/Game/Maps/Oregon_Main+/Game/Maps/Oregon_Sub" in uat_args
+        assert "-cookflavor=ASTC" in uat_args
+        for arg in extra_args:
+            assert arg in uat_args
+        assert result["uat_command"] == [
+            "RunUAT.bat",
+            "BuildCookRun",
+            "-package",
+        ]
+
+    def test_package_preserves_legacy_positional_parameters(self, temp_project):
+        """New package controls must not shift existing positional arguments."""
+        from cli_anything.unreal.core.build import package_project
+
+        on_start = MagicMock()
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={
+                "returncode": 0,
+                "log_file": "package.log",
+                "duration_seconds": 1.0,
+                "command": ["RunUAT.bat", "BuildCookRun"],
+            },
+        ) as mock_run:
+            result = package_project(
+                temp_project["uproject"],
+                "Android",
+                "Development",
+                "D:/Out",
+                "F:/Engine",
+                "D:/package.log",
+                on_start,
+            )
+
+        assert result["status"] == "ok"
+        assert mock_run.call_args.args[0] == "F:/Engine"
+        assert mock_run.call_args.kwargs["log_file"] == "D:/package.log"
+        assert mock_run.call_args.kwargs["on_start"] is on_start
+
+    def test_package_rejects_unsafe_uat_args_in_core(self, temp_project):
+        """Direct core callers must not bypass argv safety validation."""
+        from cli_anything.unreal.core.build import package_project
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.find_engine_root",
+            return_value=self._mock_engine_root(),
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+        ) as mock_run:
+            result = package_project(
+                temp_project["uproject"],
+                uat_args=['-x=" & echo PWNED & rem "'],
+            )
+
+        assert result["status"] == "error"
+        assert "unsafe" in result["error"].lower()
+        mock_run.assert_not_called()
+
     def test_package_default_output_dir(self, temp_project):
         from cli_anything.unreal.core.build import package_project
 
@@ -865,6 +973,48 @@ class TestBuildStopAndDetect:
         assert saved["status"] == "completed"
         assert saved["cancel_result"]["remaining"] == [45001]
 
+    def test_run_build_task_forwards_targeted_package_options(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """Async package workers must preserve targeted UAT options."""
+        from cli_anything.unreal.core.tasks import (
+            _run_build_task,
+            create_task,
+            save_task,
+        )
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task(
+            "build.package",
+            {
+                "project_path": temp_project["uproject"],
+                "platform": "Android",
+                "build_config": "Development",
+                "output_dir": "D:/Out",
+                "maps": ["/Game/Maps/Oregon_Main"],
+                "cook_flavor": "ASTC",
+                "uat_args": ["-pak", "-iostore"],
+            },
+        )
+        task["status"] = "running"
+        save_task(task)
+
+        with patch(
+            "cli_anything.unreal.core.build.package_project",
+            return_value={"status": "ok", "log_file": "package.log"},
+        ) as mock_package:
+            result = _run_build_task(
+                task,
+                "package_project",
+                estimated_total_seconds=1200,
+            )
+
+        assert result["status"] == "completed"
+        kwargs = mock_package.call_args.kwargs
+        assert kwargs["maps"] == ["/Game/Maps/Oregon_Main"]
+        assert kwargs["cook_flavor"] == "ASTC"
+        assert kwargs["uat_args"] == ["-pak", "-iostore"]
+
     def test_run_build_task_does_not_overwrite_cancelled_status(
         self, temp_project, tmp_path, monkeypatch
     ):
@@ -1032,6 +1182,36 @@ class TestBuildStopAndDetect:
                 _kill_process_tree(worker.pid)
             if child_pid is not None:
                 _kill_process_tree(child_pid)
+
+    def test_run_uat_returns_resolved_command(self, tmp_path):
+        """UAT results should expose the exact argv used for reproduction."""
+        from cli_anything.unreal.utils.ue_backend import run_uat
+
+        resolved = [
+            r"F:\Engine\Build\BatchFiles\RunUAT.bat",
+            "BuildCookRun",
+            "-pak",
+        ]
+        with patch(
+            "cli_anything.unreal.utils.ue_backend.find_uat",
+            return_value=resolved[0],
+        ), patch(
+            "cli_anything.unreal.utils.ue_backend._run_subprocess",
+            return_value={
+                "returncode": 0,
+                "log_file": str(tmp_path / "uat.log"),
+                "duration_seconds": 1.0,
+            },
+        ) as mock_run:
+            result = run_uat(
+                r"F:\Engine",
+                "BuildCookRun",
+                ["-pak"],
+                log_file=str(tmp_path / "uat.log"),
+            )
+
+        assert result["command"] == resolved
+        assert mock_run.call_args.args[0] == resolved
 
     def test_run_uat_no_timeout_param(self):
         """run_uat() no longer accepts timeout parameter."""
@@ -1317,6 +1497,32 @@ class TestBuildStopAndDetect:
             # Output must not leak back
             assert "stdout" not in result
             assert "stderr" not in result
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows argv safety")
+    def test_run_subprocess_rejects_literal_quote_argv(self, tmp_path):
+        """The batch wrapper must reject quote-based command injection."""
+        from cli_anything.unreal.utils.ue_backend import _run_subprocess
+
+        mock_proc = MagicMock(pid=1234, returncode=0)
+        mock_proc.wait.return_value = None
+        with patch("subprocess.Popen", return_value=mock_proc) as popen, patch(
+            "cli_anything.unreal.utils.ue_backend._attach_kill_on_close_job",
+            return_value=123,
+        ), patch(
+            "cli_anything.unreal.utils.ue_backend._resume_suspended_process",
+            return_value=True,
+        ), patch(
+            "cli_anything.unreal.utils.ue_backend._release_kill_on_close_job",
+            return_value=True,
+        ):
+            result = _run_subprocess(
+                ["RunUAT.bat", '-x=" & echo PWNED & rem "'],
+                log_file=str(tmp_path / "unsafe.log"),
+            )
+
+        assert result["returncode"] == -1
+        assert "unsafe" in result["error"].lower()
+        popen.assert_not_called()
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows console encoding behavior")
     def test_run_subprocess_uses_hidden_utf8_console(self, tmp_path):
@@ -1682,6 +1888,97 @@ class TestBuildCLI:
         assert "--timeout" in result.output
         assert "--log-tail-lines" not in result.output
 
+    def test_build_package_targeted_options_reach_task_payload(
+        self, temp_project
+    ):
+        """Package CLI should preserve reproducibility options for the worker."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        captured = {}
+
+        def fake_submit(command, payload):
+            captured["command"] = command
+            captured["payload"] = payload
+            return {"task_id": "t-targeted-package"}
+
+        with patch(
+            "cli_anything.unreal.commands.build.submit_task",
+            side_effect=fake_submit,
+        ):
+            result = CliRunner().invoke(cli, [
+                "--output", "json",
+                "--project", temp_project["uproject"],
+                "build", "package",
+                "--platform", "Android",
+                "--map", "/Game/Maps/Oregon_Main",
+                "--map", "/Game/Maps/Oregon_Sub",
+                "--cook-flavor", "ASTC",
+                "--uat-arg=-pak",
+                "--uat-arg=-iostore",
+                "--uat-arg=-ini:Engine:[Section]:Key=Value",
+                "--no-wait",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert captured["command"] == "build.package"
+        assert captured["payload"]["maps"] == (
+            "/Game/Maps/Oregon_Main",
+            "/Game/Maps/Oregon_Sub",
+        )
+        assert captured["payload"]["cook_flavor"] == "ASTC"
+        assert captured["payload"]["uat_args"] == (
+            "-pak",
+            "-iostore",
+            "-ini:Engine:[Section]:Key=Value",
+        )
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("--uat-arg", '-x=" & echo PWNED & rem "'),
+            ("--map", '/Game/Maps/Oregon" & echo PWNED & rem "'),
+            ("--cook-flavor", 'ASTC" & echo PWNED & rem "'),
+        ],
+        ids=["uat_arg", "map", "cook_flavor"],
+    )
+    def test_build_package_rejects_unsafe_freeform_values(
+        self, temp_project, option, value
+    ):
+        """All free-form package values must reject command-shell injection."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        with patch(
+            "cli_anything.unreal.commands.build.submit_task",
+            return_value={"task_id": "must-not-submit"},
+        ) as submit:
+            result = CliRunner().invoke(cli, [
+                "--project", temp_project["uproject"],
+                "build", "package",
+                option, value,
+                "--no-wait",
+            ])
+
+        assert result.exit_code == 2
+        assert "unsafe" in result.output.lower()
+        submit.assert_not_called()
+
+    def test_build_package_rejects_non_option_uat_arg(self, temp_project):
+        """Additional UAT argv must be explicit option-style values."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = CliRunner().invoke(cli, [
+            "--project", temp_project["uproject"],
+            "build", "package",
+            "--uat-arg", "pak",
+            "--no-wait",
+        ])
+
+        assert result.exit_code == 2
+        assert "must start with '-'" in result.output
+
     def test_build_package_has_no_wait_and_timeout(self, temp_project):
         """build package now has --no-wait and --timeout options."""
         from click.testing import CliRunner
@@ -1693,6 +1990,9 @@ class TestBuildCLI:
         assert "--project" in result.output
         assert "--no-wait" in result.output
         assert "--timeout" in result.output
+        assert "--map" in result.output
+        assert "--cook-flavor" in result.output
+        assert "--uat-arg" in result.output
         assert "--log-tail-lines" not in result.output
 
     def test_build_stop_cli(self, temp_project):

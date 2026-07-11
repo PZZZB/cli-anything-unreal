@@ -823,7 +823,10 @@ def _kill_matching_project_editors(
     if not project_path:
         return None
 
-    from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
+    from cli_anything.unreal.utils.ue_backend import (
+        _kill_process_tree_result,
+        _windows_process_exists,
+    )
 
     _, matches = _find_matching_project_editors(project_path)
     if not matches:
@@ -837,6 +840,37 @@ def _kill_matching_project_editors(
         except (TypeError, ValueError):
             pid = 0
         entry = {"pid": pid, "project": proc.get("project", "")}
+        if pid:
+            _, current_matches = _find_matching_project_editors(project_path)
+            current_pids = set()
+            for current in current_matches:
+                try:
+                    current_pids.add(int(current.get("pid", 0)))
+                except (TypeError, ValueError):
+                    continue
+            if pid not in current_pids:
+                process_exists = _windows_process_exists(pid)
+                if process_exists is False:
+                    entry.update({"already_exited": True, "skipped": True})
+                    closed.append(entry)
+                    continue
+
+                if process_exists is True:
+                    error = "Process is still running, but its project identity no longer matches."
+                else:
+                    error = "Unable to verify whether the process still exists or matches the project."
+                entry["kill_result"] = {
+                    "ok": False,
+                    "error": error,
+                    "process_exists_after_rescan": process_exists,
+                    "retry_suggested": True,
+                    "suggestion": (
+                        "Retry editor close after refreshing editor status; do not kill this PID "
+                        "until it is confirmed to belong to the target project."
+                    ),
+                }
+                failed.append(entry)
+                continue
         kill_result = _kill_process_tree_result(pid) if pid else {
             "ok": False,
             "error": "Missing process id.",

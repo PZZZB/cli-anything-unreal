@@ -732,6 +732,79 @@ def test_editor_close_kills_matching_zombie_project_process(mini_project):
     assert data["result"]["closed_processes"] == [{"pid": 1234, "project": mini_project}]
 
 
+def test_kill_matching_project_editors_skips_reused_pid(mini_project):
+    from cli_anything.unreal.commands.editor import _kill_matching_project_editors
+
+    original = {"pid": 1234, "project": mini_project}
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    reused = {"pid": 1234, "project": other_project}
+
+    with patch(
+        "cli_anything.unreal.commands.editor._find_matching_project_editors",
+        side_effect=[
+            ([original], [original]),
+            ([reused], []),
+        ],
+    ) as find_matches, patch(
+        "cli_anything.unreal.utils.ue_backend._windows_process_exists",
+        return_value=False,
+    ) as process_exists, patch(
+        "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+    ) as kill_process:
+        result = _kill_matching_project_editors(
+            mini_project,
+            30010,
+            success_message="closed",
+            failure_message="failed",
+        )
+
+    assert result["status"] == "closed"
+    assert result["closed_processes"] == [{
+        "pid": 1234,
+        "project": mini_project,
+        "already_exited": True,
+        "skipped": True,
+    }]
+    assert find_matches.call_count == 2
+    process_exists.assert_called_once_with(1234)
+    kill_process.assert_not_called()
+
+
+def test_kill_matching_project_editors_fails_when_unmatched_pid_still_exists(mini_project):
+    from cli_anything.unreal.commands.editor import _kill_matching_project_editors
+
+    original = {"pid": 1234, "project": mini_project}
+
+    with patch(
+        "cli_anything.unreal.commands.editor._find_matching_project_editors",
+        side_effect=[
+            ([original], [original]),
+            ([], []),
+        ],
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend._windows_process_exists",
+        return_value=True,
+    ) as process_exists, patch(
+        "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+    ) as kill_process:
+        result = _kill_matching_project_editors(
+            mini_project,
+            30010,
+            success_message="closed",
+            failure_message="failed",
+        )
+
+    assert result["status"] == "failed"
+    assert "closed_processes" not in result
+    failed = result["failed_processes"][0]
+    assert failed["pid"] == 1234
+    assert failed["kill_result"]["process_exists_after_rescan"] is True
+    assert failed["kill_result"]["retry_suggested"] is True
+    assert "still running" in failed["kill_result"]["error"].lower()
+    process_exists.assert_called_once_with(1234)
+    kill_process.assert_not_called()
+
+
 def test_editor_close_kills_matching_project_process_after_graceful_timeout(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

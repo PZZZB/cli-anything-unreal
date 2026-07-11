@@ -646,6 +646,9 @@ def _run_build_task(task: dict, func_name: str, *, estimated_total_seconds: int)
         kwargs["platform"] = payload.get("platform", "Win64")
         kwargs["config"] = payload.get("build_config", "Development")
         kwargs["output_dir"] = payload.get("output_dir")
+        kwargs["maps"] = payload.get("maps")
+        kwargs["cook_flavor"] = payload.get("cook_flavor")
+        kwargs["uat_args"] = payload.get("uat_args")
 
     try:
         result = getattr(build_core, func_name)(**kwargs)

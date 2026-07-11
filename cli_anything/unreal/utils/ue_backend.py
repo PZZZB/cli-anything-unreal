@@ -363,13 +363,15 @@ def run_uat(
     cmd = [uat, command] + (args or [])
     if log_file is None:
         log_file = _allocate_log_path(project_dir, log_label)
-    return _run_subprocess(
+    result = _run_subprocess(
         cmd,
         log_file=log_file,
         heartbeat_seconds=heartbeat_seconds,
         heartbeat_label=log_label,
         on_start=on_start,
     )
+    result["command"] = cmd
+    return result
 
 
 def run_build(
@@ -462,13 +464,62 @@ def _decode_process_output(data) -> str:
     return str(data)
 
 
+def _windows_process_exists(pid: int) -> bool | None:
+    """Return whether PID currently identifies a live Windows process."""
+    if sys.platform != "win32":
+        return None
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        synchronize = 0x00100000
+        wait_object_0 = 0x00000000
+        wait_timeout = 0x00000102
+        error_invalid_parameter = 87
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        wait_for_single_object = kernel32.WaitForSingleObject
+        wait_for_single_object.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        wait_for_single_object.restype = wintypes.DWORD
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        handle = open_process(synchronize, False, int(pid))
+        if not handle:
+            if ctypes.get_last_error() == error_invalid_parameter:
+                return False
+            return None
+
+        try:
+            wait_result = wait_for_single_object(handle, 0)
+            if wait_result == wait_timeout:
+                return True
+            if wait_result == wait_object_0:
+                return False
+            return None
+        finally:
+            close_handle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
 def _classify_kill_result(result: dict) -> dict:
     text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
     access_denied = any(token in text for token in ("access is denied", "拒绝访问", "存取被拒"))
     already_exited = any(token in text for token in ("not found", "not running", "没有找到", "找不到", "未找到"))
+    process_exists = result.get("process_exists_after_taskkill")
+    if process_exists is not None:
+        already_exited = not process_exists
 
     result["access_denied"] = access_denied
     result["already_exited"] = already_exited
+    if process_exists is True:
+        result["ok"] = False
     if already_exited:
         result["ok"] = True
         result["method"] = result.get("method", "taskkill") + "_already_exited"
@@ -479,6 +530,12 @@ def _classify_kill_result(result: dict) -> dict:
         result["suggestion"] = (
             "Taskkill was denied. Run ue-cli from an elevated administrator shell, "
             "or close the UnrealEditor.exe process manually from Task Manager."
+        )
+    elif process_exists is True:
+        result["retry_suggested"] = True
+        result["suggestion"] = (
+            f"Taskkill completed, but PID {result.get('pid')} is still running. "
+            "Retry editor close; if it remains, inspect permissions or close the process manually."
         )
     elif not result.get("ok"):
         result["retry_suggested"] = True
@@ -548,6 +605,7 @@ def _kill_process_tree_result(pid: int) -> dict:
             "stdout": _decode_process_output(proc.stdout).strip(),
             "stderr": _decode_process_output(proc.stderr).strip(),
         }
+        result["process_exists_after_taskkill"] = _windows_process_exists(pid)
         return _classify_kill_result(result)
     except subprocess.TimeoutExpired as exc:
         return {
@@ -894,6 +952,17 @@ def _run_subprocess(
         ``-2`` for timeouts (with an ``"error"`` key naming the timeout).
     """
     is_windows = sys.platform == "win32"
+    if is_windows:
+        for item in cmd:
+            value = str(item)
+            if '"' in value or any(char in value for char in ("\0", "\r", "\n")):
+                return {
+                    "returncode": -1,
+                    "log_file": str(log_file),
+                    "duration_seconds": 0.0,
+                    "error": "Unsafe Windows argv: literal quotes and NUL/CR/LF are not allowed.",
+                }
+
     launch_cmd: list[str] | str = cmd
     startupinfo = None
     if is_windows:

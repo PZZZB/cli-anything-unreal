@@ -542,7 +542,8 @@ def test_kill_process_tree_result_reports_access_denied():
     )
 
     with patch.object(ue_backend.sys, "platform", "win32"), \
-         patch("cli_anything.unreal.utils.ue_backend.subprocess.run", return_value=proc):
+         patch("cli_anything.unreal.utils.ue_backend.subprocess.run", return_value=proc), \
+         patch("cli_anything.unreal.utils.ue_backend._windows_process_exists", return_value=True):
         result = _kill_process_tree_result(49272)
 
     assert result["ok"] is False
@@ -552,6 +553,75 @@ def test_kill_process_tree_result_reports_access_denied():
     assert result["access_denied"] is True
     assert result["retry_suggested"] is False
     assert "Access is denied" in result["stderr"]
+    assert "administrator" in result["suggestion"].lower()
+
+
+def test_kill_process_tree_result_treats_missing_pid_after_taskkill_as_success():
+    from cli_anything.unreal.utils import ue_backend
+    from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
+
+    proc = subprocess.CompletedProcess(
+        ["taskkill", "/F", "/T", "/PID", "91916"],
+        255,
+        stdout=b"",
+        stderr=b"ERROR: There is no running instance of the task.",
+    )
+
+    with patch.object(ue_backend.sys, "platform", "win32"), \
+         patch("cli_anything.unreal.utils.ue_backend.subprocess.run", return_value=proc), \
+         patch("cli_anything.unreal.utils.ue_backend._windows_process_exists", return_value=False):
+        result = _kill_process_tree_result(91916)
+
+    assert result["ok"] is True
+    assert result["already_exited"] is True
+    assert result["pid"] == 91916
+    assert result["returncode"] == 255
+    assert result["method"] == "taskkill_already_exited"
+    assert result["process_exists_after_taskkill"] is False
+
+
+def test_kill_process_tree_result_fails_when_pid_survives_successful_taskkill():
+    from cli_anything.unreal.utils import ue_backend
+    from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
+
+    proc = subprocess.CompletedProcess(
+        ["taskkill", "/F", "/T", "/PID", "91916"],
+        0,
+        stdout=b"SUCCESS",
+        stderr=b"",
+    )
+
+    with patch.object(ue_backend.sys, "platform", "win32"), \
+         patch("cli_anything.unreal.utils.ue_backend.subprocess.run", return_value=proc), \
+         patch("cli_anything.unreal.utils.ue_backend._windows_process_exists", return_value=True):
+        result = _kill_process_tree_result(91916)
+
+    assert result["ok"] is False
+    assert result["already_exited"] is False
+    assert result["process_exists_after_taskkill"] is True
+    assert result["retry_suggested"] is True
+    assert "still running" in result["suggestion"].lower()
+
+
+def test_kill_process_tree_result_clears_ok_before_access_denied_branch():
+    from cli_anything.unreal.utils import ue_backend
+    from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
+
+    proc = subprocess.CompletedProcess(
+        ["taskkill", "/F", "/T", "/PID", "91916"],
+        0,
+        stdout=b"",
+        stderr=b"ERROR: Access is denied.",
+    )
+
+    with patch.object(ue_backend.sys, "platform", "win32"), \
+         patch("cli_anything.unreal.utils.ue_backend.subprocess.run", return_value=proc), \
+         patch("cli_anything.unreal.utils.ue_backend._windows_process_exists", return_value=True):
+        result = _kill_process_tree_result(91916)
+
+    assert result["ok"] is False
+    assert result["access_denied"] is True
+    assert result["process_exists_after_taskkill"] is True
     assert "administrator" in result["suggestion"].lower()
 
 

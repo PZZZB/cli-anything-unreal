@@ -112,11 +112,22 @@ On Windows, `build compile --platform Win64` refuses to start while an UnrealEdi
 |---------|-------------|
 | `build compile [--project PATH] [--config C] [--platform P] [--no-wait] [--timeout N]` | Compile C++ |
 | `build cook [--project PATH] [--platform P] [--no-wait] [--timeout N]` | Cook content |
-| `build package [--project PATH] [--platform P] [--config C] [--output-dir DIR] [--no-wait] [--timeout N]` | Full package pipeline |
+| `build package [--project PATH] [--platform P] [--config C] [--output-dir DIR] [--map MAP]... [--cook-flavor F] [--uat-arg=-ARG]... [--no-wait] [--timeout N]` | Reproducible BuildCookRun package pipeline; final result includes `uat_command` |
 | `build stop [--project PATH]` | Cancel project-owned async build tasks, then kill any remaining MSBuild/UBT tree |
 | `build is-building [--project PATH]` | Check compile/build running |
 | `build status [--project PATH] [TASK_ID]` | Check artifacts/logs or async progress |
 | `build cancel TASK_ID` | Cancel async build |
+
+Targeted Android example (repeat `--uat-arg=...` for long-tail BuildCookRun switches and per-run ini overrides):
+
+```powershell
+ue-cli --project F:\Game\Game.uproject build package --platform Android --config Development `
+  --map /Game/Maps/Oregon_Main --cook-flavor ASTC `
+  --uat-arg=-pak --uat-arg=-iostore --uat-arg=-compressed --uat-arg=-prereqs `
+  --uat-arg=-nodebuginfo --uat-arg=-unversionedcookedcontent `
+  --uat-arg=-SkipCookingEditorContent `
+  --uat-arg="-ini:Engine:[Section]:Key=Value"
+```
 
 ## scene - Scene/Level Queries
 

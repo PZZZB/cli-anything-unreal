@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+from cli_anything.unreal.core.build import validate_package_uat_value
 from cli_anything.unreal.commands import AppError, AppState, _same_project_path, handle_error, output, require_project
 from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, load_task, submit_task, task_progress
 from cli_anything.unreal.utils.ue_backend import _allocate_log_path, find_running_editors
@@ -40,6 +41,25 @@ def _load_command_project(state: AppState, project_path: str | None) -> None:
 
 def _project_option(func):
     return click.option("--project", "project_path", type=click.Path(), help="Path to .uproject file")(func)
+
+
+def _validate_package_value(ctx, param, value):
+    values = value if isinstance(value, tuple) else (() if value is None else (value,))
+    labels = {
+        "maps": "map",
+        "cook_flavor": "cook flavor",
+        "uat_args": "UAT argument",
+    }
+    try:
+        for item in values:
+            validate_package_uat_value(
+                item,
+                label=labels.get(param.name, param.name),
+                require_option=param.name == "uat_args",
+            )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
+    return value
 
 
 def _editor_compile_lock_risk(state: AppState, platform: str) -> dict | None:
@@ -213,14 +233,43 @@ def build_cook(state: AppState, project_path, platform, no_wait, timeout):
 @click.option("--platform", default="Win64")
 @click.option("--config", "build_config", default="Development", type=click.Choice(["Development", "Shipping", "DebugGame", "Test"]))
 @click.option("--output-dir", type=click.Path(), help="Archive output directory")
+@click.option("--map", "maps", multiple=True, callback=_validate_package_value, help="Cook only this map; repeat for multiple maps")
+@click.option("--cook-flavor", callback=_validate_package_value, help="UAT cook flavor, for example ASTC")
+@click.option(
+    "--uat-arg",
+    "uat_args",
+    multiple=True,
+    callback=_validate_package_value,
+    help="Additional UAT argv; repeat as --uat-arg=-pak",
+)
 @click.option("--no-wait", is_flag=True, default=False)
 @click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
-def build_package(state: AppState, project_path, platform, build_config, output_dir, no_wait, timeout):
+def build_package(
+    state: AppState,
+    project_path,
+    platform,
+    build_config,
+    output_dir,
+    maps,
+    cook_flavor,
+    uat_args,
+    no_wait,
+    timeout,
+):
     _load_command_project(state, project_path)
     require_project(state)
-    payload = _build_payload(state, "package", platform=platform, build_config=build_config, output_dir=output_dir)
+    payload = _build_payload(
+        state,
+        "package",
+        platform=platform,
+        build_config=build_config,
+        output_dir=output_dir,
+        maps=maps,
+        cook_flavor=cook_flavor,
+        uat_args=uat_args,
+    )
     result = _run_task("build.package", payload, timeout=timeout, no_wait=no_wait, timeout_code="BUILD_WAIT_TIMEOUT")
     output(result, state)
 

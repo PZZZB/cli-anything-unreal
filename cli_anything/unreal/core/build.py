@@ -15,6 +15,28 @@ from cli_anything.unreal.utils.ue_backend import (
 )
 
 
+_UNSAFE_PACKAGE_VALUE_CHARS = frozenset('"&|<>\0\r\n')
+
+
+def validate_package_uat_value(
+    value: str,
+    *,
+    label: str,
+    require_option: bool = False,
+) -> str:
+    """Validate a package option before it reaches the Windows UAT wrapper."""
+    if require_option and not value.startswith("-"):
+        raise ValueError(
+            f"{label} must start with '-' (for example --uat-arg=-pak)"
+        )
+    if any(char in _UNSAFE_PACKAGE_VALUE_CHARS for char in value):
+        raise ValueError(
+            f"Unsafe {label}: literal quotes, shell control characters, and "
+            "NUL/CR/LF are not allowed"
+        )
+    return value
+
+
 def _check_already_building(uproject_path: str) -> dict | None:
     processes = find_running_build_processes(uproject_path)
     if not processes:
@@ -33,6 +55,8 @@ def _normalize_result(result: dict, action: str) -> dict:
         "duration_seconds": result.get("duration_seconds", 0.0),
         "log_file": result.get("log_file", ""),
     }
+    if result.get("command"):
+        out["uat_command"] = result["command"]
     if result["returncode"] != 0:
         out["error"] = result.get(
             "error",
@@ -120,7 +144,32 @@ def package_project(
     engine_root: str | None = None,
     log_file: str | None = None,
     on_start=None,
+    *,
+    maps: list[str] | tuple[str, ...] | None = None,
+    cook_flavor: str | None = None,
+    uat_args: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
+    try:
+        maps = [
+            validate_package_uat_value(value, label="map")
+            for value in (maps or ())
+        ]
+        if cook_flavor is not None:
+            cook_flavor = validate_package_uat_value(
+                cook_flavor,
+                label="cook flavor",
+            )
+        uat_args = [
+            validate_package_uat_value(
+                value,
+                label="UAT argument",
+                require_option=True,
+            )
+            for value in (uat_args or ())
+        ]
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
     already = _check_already_building(uproject_path)
     if already:
         return already
@@ -144,6 +193,12 @@ def package_project(
         "-noP4",
         "-utf8output",
     ]
+    if maps:
+        args.append("-map=" + "+".join(maps))
+    if cook_flavor:
+        args.append(f"-cookflavor={cook_flavor}")
+    if uat_args:
+        args.extend(uat_args)
     result = run_uat(
         engine_root,
         "BuildCookRun",
