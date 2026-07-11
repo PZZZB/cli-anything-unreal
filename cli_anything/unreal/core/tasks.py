@@ -9,10 +9,12 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 
 FINAL_TASK_STATUSES = {"completed", "failed", "timeout", "cancelled"}
+BUILD_TASK_COMMANDS = {"build.compile", "build.cook", "build.package"}
 
 
 def _task_root() -> Path:
@@ -29,11 +31,126 @@ def _task_path(task_id: str) -> Path:
     return _task_root() / f"{task_id}.json"
 
 
+
+def _cancel_path(task_id: str) -> Path:
+    return _task_root() / f"{task_id}.cancel"
+
+
+def _lock_path(task_id: str) -> Path:
+    return _task_root() / f"{task_id}.lock"
+
+
+@contextmanager
+def _task_lock(task_id: str):
+    """Serialize task read-modify-write updates across CLI/worker processes."""
+    lock_path = _lock_path(task_id)
+    with lock_path.open("a+b") as lock_file:
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            if sys.platform == "win32":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _normalize_project_path(path: str) -> str:
+    return str(Path(path).resolve()).replace("/", "\\").casefold()
+
+
+def _request_task_cancel(task_id: str) -> None:
+    _cancel_path(task_id).touch(exist_ok=True)
+
+
+def _task_cancel_requested(task_id: str) -> bool:
+    return _cancel_path(task_id).exists()
+
+
+def _query_process_info(pid: int) -> dict:
+    """Read current PID identity before acting on persisted task metadata."""
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return {"query_ok": True, "found": False, "pid": pid}
+        except Exception as exc:
+            return {"query_ok": False, "found": False, "pid": pid, "error": str(exc)}
+        return {"query_ok": True, "found": True, "pid": pid}
+
+    ps_cmd = (
+        f'$p = Get-CimInstance Win32_Process -Filter "ProcessId = {pid}"; '
+        'if ($null -ne $p) { '
+        '$p | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate '
+        '| ConvertTo-Json -Compress }'
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as exc:
+        return {"query_ok": False, "found": False, "pid": pid, "error": str(exc)}
+    if result.returncode != 0:
+        return {
+            "query_ok": False,
+            "found": False,
+            "pid": pid,
+            "error": (result.stderr or result.stdout or "process query failed").strip(),
+        }
+    if not result.stdout.strip():
+        return {"query_ok": True, "found": False, "pid": pid}
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return {"query_ok": False, "found": False, "pid": pid, "error": str(exc)}
+    return {
+        "query_ok": True,
+        "found": True,
+        "pid": int(data.get("ProcessId") or pid),
+        "parent_pid": int(data.get("ParentProcessId") or 0),
+        "name": str(data.get("Name") or ""),
+        "cmdline": str(data.get("CommandLine") or ""),
+        "creation_date": str(data.get("CreationDate") or ""),
+    }
+
+
+def _same_process_identity(before: dict, after: dict) -> bool:
+    if before.get("pid") != after.get("pid"):
+        return False
+    before_created = before.get("creation_date")
+    after_created = after.get("creation_date")
+    if before_created and after_created:
+        return before_created == after_created
+    return all(
+        before.get(key) == after.get(key)
+        for key in ("parent_pid", "name", "cmdline")
+    )
+
 def new_task_id() -> str:
     return f"t-{uuid.uuid4().hex[:12]}"
 
 
 def create_task(command: str, payload: dict) -> dict:
+    payload = dict(payload)
+    project_path = payload.get("project_path")
+    if project_path:
+        payload["project_path"] = str(Path(project_path).resolve())
+
     now = time.time()
     task = {
         "task_id": new_task_id(),
@@ -54,11 +171,111 @@ def load_task(task_id: str) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def save_task(task: dict) -> dict:
+def _write_task_unlocked(task: dict) -> dict:
     task["updated_at"] = time.time()
     path = _task_path(task["task_id"])
-    path.write_text(json.dumps(task, indent=2, ensure_ascii=False), encoding="utf-8")
+    temp_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temp_path.write_text(
+            json.dumps(task, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
     return task
+
+
+def save_task(task: dict) -> dict:
+    with _task_lock(task["task_id"]):
+        return _write_task_unlocked(task)
+
+
+def update_task_fields(
+    task_id: str,
+    updates: dict | None = None,
+    *,
+    remove: tuple[str, ...] = (),
+    **fields,
+) -> dict | None:
+    """Atomically merge task fields without dropping another process's metadata."""
+    with _task_lock(task_id):
+        task = load_task(task_id)
+        if task is None:
+            return None
+        if updates:
+            task.update(updates)
+        task.update(fields)
+        for key in remove:
+            task.pop(key, None)
+        return _write_task_unlocked(task)
+
+
+def _finalize_build_task(
+    task_id: str,
+    result: dict | None = None,
+    *,
+    exception: bool = False,
+) -> dict | None:
+    """Commit a build result against the latest cancellation state."""
+    with _task_lock(task_id):
+        task = load_task(task_id)
+        if task is None:
+            return None
+
+        cancel_wins = (
+            task.get("status") == "cancelled"
+            or (
+                (_task_cancel_requested(task_id) or task.get("cancel_requested"))
+                and task.get("cancelled") is not False
+                and task.get("status") not in FINAL_TASK_STATUSES
+            )
+        )
+        if cancel_wins:
+            task.update(status="cancelled", cancelled=True)
+            task.pop("error", None)
+            return _write_task_unlocked(task)
+        if exception:
+            return None
+
+        result = result or {}
+        status = "completed" if result.get("status") == "ok" else "failed"
+        task.update({
+            "log_file": result.get("log_file", task.get("log_file")),
+            "result": result,
+            "status": status,
+        })
+        if status == "failed":
+            task["error"] = {
+                "code": "TASK_EXECUTION_FAILED",
+                "message": result.get("error", "Task execution failed"),
+            }
+        else:
+            task.pop("error", None)
+        return _write_task_unlocked(task)
+
+
+def reconcile_task_cancellation(task_id: str, killed_pids: list[int]) -> dict | None:
+    """Reconcile a task after a later process scan kills prior survivors."""
+    killed_set = set(killed_pids)
+    with _task_lock(task_id):
+        task = load_task(task_id)
+        if task is None:
+            return None
+        cancel_result = dict(task.get("cancel_result", {}))
+        killed = list(dict.fromkeys(cancel_result.get("killed", []) + killed_pids))
+        remaining = [
+            pid for pid in cancel_result.get("remaining", [])
+            if pid not in killed_set
+        ]
+        cancel_result.update(killed=killed, remaining=remaining)
+        task["cancel_result"] = cancel_result
+        if not remaining and task.get("status") not in FINAL_TASK_STATUSES:
+            task.update(status="cancelled", cancelled=True)
+            task.pop("error", None)
+        return _write_task_unlocked(task)
 
 
 def task_data_path(name: str) -> Path:
@@ -76,6 +293,21 @@ def iter_tasks() -> list[dict]:
             continue
     tasks.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
     return tasks
+
+
+def active_build_tasks(project_path: str) -> list[dict]:
+    """Return non-final build tasks owned by one project."""
+    target = _normalize_project_path(project_path)
+    return [
+        task
+        for task in iter_tasks()
+        if task.get("command") in BUILD_TASK_COMMANDS
+        and task.get("status") not in FINAL_TASK_STATUSES
+        and _normalize_project_path(
+            str(task.get("payload", {}).get("project_path", ""))
+        )
+        == target
+    ]
 
 
 def task_progress(task: dict) -> dict:
@@ -97,6 +329,8 @@ def task_progress(task: dict) -> dict:
         result["result"] = task["result"]
     if "error" in task:
         result["error"] = task["error"]
+    if "cancel_result" in task:
+        result["cancel_result"] = task["cancel_result"]
     return result
 
 
@@ -131,10 +365,7 @@ def spawn_worker(task_id: str) -> int:
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(cmd, **kwargs)
-    task = load_task(task_id)
-    if task is not None:
-        task["worker_pid"] = proc.pid
-        save_task(task)
+    update_task_fields(task_id, worker_pid=proc.pid)
     return proc.pid
 
 
@@ -167,12 +398,175 @@ def cancel_task(task_id: str) -> dict | None:
 
     command = task.get("command")
     payload = task.get("payload", {})
-    if command in {"build.compile", "build.cook", "build.package"}:
-        from cli_anything.unreal.core.build import stop_build
+    _request_task_cancel(task_id)
+    task = update_task_fields(task_id, cancel_requested=True) or task
+
+    if command in BUILD_TASK_COMMANDS:
+        from cli_anything.unreal.utils.ue_backend import (
+            _kill_process_tree_result,
+            kill_build_processes,
+        )
+
+        kill_results = []
+        worker_pid = int(task["worker_pid"]) if task.get("worker_pid") else None
+        build_pid = int(task["pid"]) if task.get("pid") else None
+
+        if sys.platform == "win32":
+            worker_info = _query_process_info(worker_pid) if worker_pid else None
+            build_info = _query_process_info(build_pid) if build_pid else None
+            worker_owned = bool(
+                worker_info
+                and worker_info.get("query_ok")
+                and worker_info.get("found")
+                and "_task-worker" in worker_info.get("cmdline", "")
+                and task_id in worker_info.get("cmdline", "")
+            )
+            build_owned = bool(
+                worker_owned
+                and build_info
+                and build_info.get("query_ok")
+                and build_info.get("found")
+                and build_info.get("parent_pid") == worker_pid
+            )
+            process_specs = (
+                ("worker", worker_pid, worker_info, worker_owned),
+                ("build", build_pid, build_info, build_owned),
+            )
+        else:
+            process_specs = (
+                ("worker", worker_pid, None, True),
+                ("build", build_pid, None, True),
+            )
+
+        seen_pids = set()
+        worker_still_owned = worker_owned if sys.platform == "win32" else True
+        for role, pid, process_info, owned in process_specs:
+            if not pid or pid in seen_pids:
+                continue
+            seen_pids.add(pid)
+            if (
+                sys.platform == "win32"
+                and process_info is not None
+                and owned
+            ):
+                if role == "build":
+                    owned = worker_still_owned
+                current_info = _query_process_info(pid)
+                if (
+                    current_info.get("query_ok")
+                    and current_info.get("found")
+                    and (
+                        not _same_process_identity(process_info, current_info)
+                        or (
+                            role == "build"
+                            and current_info.get("parent_pid") != worker_pid
+                        )
+                    )
+                ):
+                    owned = False
+                process_info = current_info
+            if role == "worker" and sys.platform == "win32":
+                worker_still_owned = bool(
+                    owned
+                    and process_info
+                    and process_info.get("query_ok")
+                    and process_info.get("found")
+                )
+            if process_info is not None and not process_info.get("query_ok"):
+                kill_result = {
+                    "ok": False,
+                    "pid": pid,
+                    "error": process_info.get("error", "process identity query failed"),
+                    "identity_query_failed": True,
+                }
+            elif process_info is not None and not process_info.get("found"):
+                kill_result = {
+                    "ok": True,
+                    "pid": pid,
+                    "already_exited": True,
+                    "skipped": True,
+                }
+            elif not owned:
+                kill_result = {
+                    "ok": True,
+                    "pid": pid,
+                    "ownership_mismatch": True,
+                    "skipped": True,
+                    "process": process_info,
+                }
+            else:
+                try:
+                    kill_result = _kill_process_tree_result(pid)
+                except Exception as exc:
+                    kill_result = {"ok": False, "pid": pid, "error": str(exc)}
+            if process_info is not None:
+                kill_result.setdefault("process", process_info)
+            kill_result["role"] = role
+            kill_results.append(kill_result)
 
         project_path = payload.get("project_path")
-        if project_path:
-            task["stop_result"] = stop_build(project_path)
+        stop_result = (
+            kill_build_processes(project_path)
+            if project_path
+            else {"status": "none", "killed": [], "remaining": []}
+        )
+        scan_killed = set(stop_result.get("killed", []))
+        killed = [
+            result["pid"]
+            for result in kill_results
+            if result.get("ok")
+            and not result.get("already_exited")
+            and not result.get("skipped")
+        ]
+        killed.extend(stop_result.get("killed", []))
+        remaining = []
+        for result in kill_results:
+            if result.get("ok") or result["pid"] in scan_killed:
+                continue
+            if sys.platform == "win32":
+                final_info = _query_process_info(result["pid"])
+                result["final_process"] = final_info
+                if final_info.get("query_ok"):
+                    if not final_info.get("found"):
+                        continue
+                    original_info = result.get("process")
+                    if (
+                        original_info is not None
+                        and original_info.get("query_ok")
+                        and original_info.get("found")
+                        and not _same_process_identity(original_info, final_info)
+                    ):
+                        continue
+            remaining.append(result["pid"])
+        remaining.extend(stop_result.get("remaining", []))
+        killed = list(dict.fromkeys(killed))
+        remaining = list(dict.fromkeys(remaining))
+
+        updates = {
+            "stop_result": stop_result,
+            "cancel_result": {
+                "killed": killed,
+                "remaining": remaining,
+                "processes": kill_results,
+            },
+        }
+        if remaining:
+            updates.update({
+                "status": "running",
+                "cancelled": False,
+                "error": {
+                    "code": "TASK_CANCEL_FAILED",
+                    "message": "Build task cancellation left processes running.",
+                },
+            })
+            return update_task_fields(task_id, updates) or task
+
+        updates.update({"status": "cancelled", "cancelled": True})
+        return update_task_fields(
+            task_id,
+            updates,
+            remove=("error",),
+        ) or task
 
     pid = task.get("pid") or task.get("worker_pid")
     if pid:
@@ -183,9 +577,12 @@ def cancel_task(task_id: str) -> dict | None:
         except Exception:
             pass
 
-    task["status"] = "cancelled"
-    task["cancelled"] = True
-    return save_task(task)
+    return update_task_fields(
+        task_id,
+        status="cancelled",
+        cancelled=True,
+        remove=("error",),
+    ) or task
 
 
 def run_task_worker(task_id: str) -> dict:
@@ -195,9 +592,19 @@ def run_task_worker(task_id: str) -> dict:
     if task.get("status") in FINAL_TASK_STATUSES:
         return task
 
-    task["status"] = "running"
-    task["started_at"] = time.time()
-    save_task(task)
+    if _task_cancel_requested(task_id):
+        return update_task_fields(
+            task_id,
+            status="cancelled",
+            cancelled=True,
+            remove=("error",),
+        ) or task
+
+    task = update_task_fields(
+        task_id,
+        status="running",
+        started_at=time.time(),
+    ) or task
 
     command = task.get("command")
     if command == "build.compile":
@@ -217,11 +624,12 @@ def _run_build_task(task: dict, func_name: str, *, estimated_total_seconds: int)
     payload = task["payload"]
 
     def _on_start(proc):
-        task_live = load_task(task["task_id"]) or task
-        task_live["status"] = "running"
-        task_live["pid"] = proc.pid
-        task_live["estimated_total_seconds"] = estimated_total_seconds
-        save_task(task_live)
+        update_task_fields(
+            task["task_id"],
+            status="running",
+            pid=proc.pid,
+            estimated_total_seconds=estimated_total_seconds,
+        )
 
     kwargs = {
         "uproject_path": payload["project_path"],
@@ -239,17 +647,15 @@ def _run_build_task(task: dict, func_name: str, *, estimated_total_seconds: int)
         kwargs["config"] = payload.get("build_config", "Development")
         kwargs["output_dir"] = payload.get("output_dir")
 
-    result = getattr(build_core, func_name)(**kwargs)
-    task = load_task(task["task_id"]) or task
-    task["log_file"] = result.get("log_file", task.get("log_file"))
-    task["result"] = result
-    task["status"] = "completed" if result.get("status") == "ok" else "failed"
-    if task["status"] == "failed":
-        task["error"] = {
-            "code": "TASK_EXECUTION_FAILED",
-            "message": result.get("error", "Task execution failed"),
-        }
-    return save_task(task)
+    try:
+        result = getattr(build_core, func_name)(**kwargs)
+    except Exception:
+        finalized = _finalize_build_task(task["task_id"], exception=True)
+        if finalized is None:
+            raise
+        return finalized
+
+    return _finalize_build_task(task["task_id"], result) or task
 
 
 def _clean_bridge_build_outputs(project_dir: str) -> None:

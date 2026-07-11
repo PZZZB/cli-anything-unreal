@@ -225,12 +225,70 @@ def generate_project_files(uproject_path: str, engine_root: str | None = None) -
 
 
 def stop_build(uproject_path: str) -> dict:
+    from cli_anything.unreal.core.tasks import (
+        FINAL_TASK_STATUSES,
+        active_build_tasks,
+        cancel_task,
+        reconcile_task_cancellation,
+    )
+
+    task_results = []
+    for task in active_build_tasks(uproject_path):
+        cancelled = cancel_task(task["task_id"])
+        if cancelled is None:
+            continue
+        cancel_result = cancelled.get("cancel_result", {})
+        task_results.append({
+            "task_id": cancelled["task_id"],
+            "status": cancelled.get("status"),
+            "pid": cancelled.get("pid"),
+            "worker_pid": cancelled.get("worker_pid"),
+            "killed": cancel_result.get("killed", []),
+            "remaining": cancel_result.get("remaining", []),
+        })
+
     result = kill_build_processes(uproject_path)
-    return {
-        "status": result["status"],
-        "killed": result["killed"],
-        "remaining": result["remaining"],
+    final_scan_killed = result.get("killed", [])
+    for task in task_results:
+        reconciled = reconcile_task_cancellation(task["task_id"], final_scan_killed)
+        if reconciled is None:
+            continue
+        cancel_result = reconciled.get("cancel_result", {})
+        task.update({
+            "status": reconciled.get("status"),
+            "killed": cancel_result.get("killed", []),
+            "remaining": cancel_result.get("remaining", []),
+        })
+
+    killed = list(result.get("killed", []))
+    remaining = list(result.get("remaining", []))
+    for task in task_results:
+        killed.extend(task["killed"])
+        remaining.extend(task["remaining"])
+    killed = list(dict.fromkeys(killed))
+    killed_set = set(killed)
+    remaining = [
+        pid for pid in dict.fromkeys(remaining)
+        if pid not in killed_set
+    ]
+
+    if remaining or any(
+        task["status"] not in FINAL_TASK_STATUSES for task in task_results
+    ):
+        status = "partial"
+    elif task_results or killed:
+        status = "ok"
+    else:
+        status = result["status"]
+
+    response = {
+        "status": status,
+        "killed": killed,
+        "remaining": remaining,
     }
+    if task_results:
+        response["tasks"] = task_results
+    return response
 
 
 def is_building(uproject_path: str) -> dict:
