@@ -998,6 +998,34 @@ def test_editor_close_timeout_without_matching_process_returns_error(mini_projec
     assert result.output.count("Editor did not close within 30s.") == 1
 
 
+def test_wait_for_project_editor_exit_handles_post_timeout_exit_race(mini_project):
+    from cli_anything.unreal.commands.editor import _wait_for_project_editor_exit
+
+    match = {"pid": 41888, "project": mini_project}
+    with patch(
+        "cli_anything.unreal.commands.editor.time.time",
+        side_effect=[0.0, 0.0, 2.0],
+    ), patch(
+        "cli_anything.unreal.commands.editor.time.sleep",
+    ), patch(
+        "cli_anything.unreal.commands.editor._find_matching_project_editors",
+        side_effect=[([match], [match]), ([], [])],
+    ), patch(
+        "cli_anything.unreal.commands.editor._kill_matching_project_editors",
+        return_value=None,
+    ):
+        result = _wait_for_project_editor_exit(
+            mini_project,
+            30011,
+            timeout=1.0,
+        )
+
+    assert result == {
+        "status": "closed",
+        "method": "process_exit_after_timeout_race",
+    }
+
+
 def test_editor_close_does_not_quit_other_project_on_same_port(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
@@ -2211,6 +2239,110 @@ def test_wait_for_api_timeout_keeps_startup_log_window_for_diagnostics(tmp_path)
     assert result["status"] == "timeout"
     assert result["likely_cause"] == "http_server_restarted_by_project_plugin"
     assert any("FalconTunnel" in hint for hint in result["log_hints"])
+
+
+def test_wait_for_api_crash_reports_progress_and_bounded_log_tail(tmp_path):
+    from cli_anything.unreal.commands.editor import _wait_for_api
+
+    log_file = tmp_path / "RXGame.log"
+    log_file.write_text("previous launch\n", encoding="utf-8")
+    proc = MagicMock()
+    proc.returncode = 1
+
+    def exit_after_writing_log():
+        with log_file.open("a", encoding="utf-8") as handle:
+            for index in range(10):
+                handle.write(f"startup line {index} " + ("x" * 600) + "\n")
+        return 1
+
+    proc.poll.side_effect = exit_after_writing_log
+    state = MagicMock()
+    state.json_output = True
+    state.session.project_path = r"F:\RXGame_2\RXGame.uproject"
+    progress = []
+
+    with patch(
+        "cli_anything.unreal.commands.editor.time.time",
+        side_effect=[100.0, 101.0, 102.0],
+    ):
+        result = _wait_for_api(
+            proc,
+            30011,
+            120,
+            log_file,
+            state,
+            on_progress=progress.append,
+        )
+
+    assert result["status"] == "crashed"
+    assert result["failure_kind"] == "editor_process_exited"
+    assert result["startup_phase"] == "waiting_for_remote_control"
+    assert result["port"] == 30011
+    assert result["process_alive"] is False
+    assert result["returncode"] == 1
+    assert len(result["log_tail"]) == 8
+    assert all(len(line) <= 503 for line in result["log_tail"])
+    assert "previous launch" not in result["log_tail"]
+    assert result["next_command"] == (
+        'ue-cli --project "F:\\RXGame_2\\RXGame.uproject" editor launch'
+    )
+    assert progress[0]["process_alive"] is False
+
+
+def test_run_editor_launch_task_persists_wait_progress(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text(
+        '{"FileVersion": 3, "EngineAssociation": "5.7"}',
+        encoding="utf-8",
+    )
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+    proc = MagicMock()
+    proc.pid = 4242
+
+    def report_progress(_proc, port, _timeout, log_file, _state, on_progress=None):
+        assert on_progress is not None
+        on_progress({
+            "startup_phase": "waiting_for_remote_control",
+            "elapsed_seconds": 15,
+            "port": port,
+            "process_alive": True,
+            "log_file": str(log_file),
+        })
+        return {"status": "online"}
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=report_progress):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    assert result["status"] == "completed"
+    assert result["result"]["startup_phase"] == "waiting_for_remote_control"
+    assert result["result"]["elapsed_seconds"] == 15
+    assert result["result"]["process_alive"] is True
 
 
 def test_summarize_startup_precheck_includes_bridge_plugin_issues():

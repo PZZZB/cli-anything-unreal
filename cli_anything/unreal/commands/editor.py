@@ -1062,12 +1062,10 @@ def _wait_for_project_editor_exit(project_path: str | None, port: int, *, timeou
         return None
 
     deadline = time.time() + timeout
-    last_matches: list[dict] = []
     while time.time() < deadline:
         _, matches = _find_matching_project_editors(project_path)
         if not matches:
             return {"status": "closed", "method": "process_exit"}
-        last_matches = matches
         time.sleep(1)
 
     kill_result = _kill_matching_project_editors(
@@ -1079,13 +1077,21 @@ def _wait_for_project_editor_exit(project_path: str | None, port: int, *, timeou
     if kill_result:
         return kill_result
 
+    # The process can exit between the timeout loop and the kill scan.
+    _, final_matches = _find_matching_project_editors(project_path)
+    if not final_matches:
+        return {
+            "status": "closed",
+            "method": "process_exit_after_timeout_race",
+        }
+
     return {
         "status": "timeout",
         "port": port,
         "message": "Timed out waiting for matching UnrealEditor process to exit before compile.",
         "running_processes": [
             {"pid": proc.get("pid"), "project": proc.get("project", "")}
-            for proc in last_matches
+            for proc in final_matches
         ],
     }
 
@@ -1203,6 +1209,36 @@ def _read_log_tail(log_file: Path, max_bytes: int = 128 * 1024) -> str:
         return ""
 
 
+def _bounded_log_tail_lines(
+    log_file: Path,
+    *,
+    since_offset: int | None = None,
+    limit: int = 8,
+    max_line_chars: int = 500,
+) -> list[str]:
+    """Return a small startup-log tail suitable for structured error output."""
+    if not log_file.exists():
+        return []
+    try:
+        size = log_file.stat().st_size
+        offset = int(since_offset or 0)
+        if offset < 0 or offset > size:
+            offset = 0
+        with log_file.open("rb") as handle:
+            handle.seek(max(offset, size - 128 * 1024, 0))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return [
+        line if len(line) <= max_line_chars else line[:max_line_chars] + "..."
+        for line in lines[-limit:]
+    ]
+
+
+
+
 def _remote_control_health_from_lines(lines: list[str], *, limit: int = 8) -> dict:
     falcon_lines = [line for line in lines if re.search(r"FalconTunnel|connect failed", line, re.IGNORECASE)]
     http_restart_lines = [
@@ -1309,7 +1345,7 @@ def _diagnose_api_unreachable(log_file: Path, port: int, *, since_offset: int | 
     return result
 
 
-def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
+def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -> dict:
     from cli_anything.unreal.utils.ue_backend import _emit_heartbeat
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
@@ -1325,6 +1361,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
 
     api = UEEditorAPI(port=poll_port)
     start_time = time.time()
+    progress_start = time.monotonic()
     deadline = start_time + timeout if timeout is not None else float("inf")
     poll_interval = 5.0
     heartbeat_interval = 60.0
@@ -1334,18 +1371,53 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
     log_offset = startup_log_offset
 
     while time.time() < deadline:
-        if proc.poll() is not None:
-            return {
+        returncode = proc.poll()
+        elapsed_seconds = int(time.monotonic() - progress_start)
+        progress = {
+            "startup_phase": "waiting_for_remote_control",
+            "elapsed_seconds": elapsed_seconds,
+            "port": poll_port,
+            "process_alive": returncode is None,
+            "log_file": str(log_file),
+        }
+        if on_progress is not None:
+            try:
+                on_progress(progress)
+            except Exception:
+                pass
+
+        if returncode is not None:
+            crash_result = {
                 "status": "crashed",
-                "returncode": proc.returncode,
+                "failure_kind": "editor_process_exited",
+                "startup_phase": "waiting_for_remote_control",
+                "returncode": returncode,
+                "port": poll_port,
+                "process_alive": False,
+                "elapsed_seconds": elapsed_seconds,
                 "log_file": str(log_file),
-                "error": f"Editor process exited with code {proc.returncode} before API came online.",
+                "error": f"Editor process exited with code {returncode} before API came online.",
+                "suggestion": "Inspect log_tail and log_file for the startup failure, then retry editor launch after resolving it.",
             }
+            log_tail = _bounded_log_tail_lines(
+                log_file,
+                since_offset=startup_log_offset,
+            )
+            if log_tail:
+                crash_result["log_tail"] = log_tail
+            project_path = getattr(state.session, "project_path", None)
+            if project_path:
+                crash_result["next_command"] = (
+                    f'ue-cli --project "{project_path}" editor launch'
+                )
+            return crash_result
 
         if api.is_alive():
             return {
                 "status": "online",
+                "startup_phase": "ready",
                 "port": poll_port,
+                "process_alive": True,
                 "startup_time_seconds": int(time.time() - start_time),
             }
 
@@ -1366,6 +1438,9 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state) -> dict:
             next_beat += heartbeat_interval
         time.sleep(poll_interval)
 
+    result["startup_phase"] = "waiting_for_remote_control"
+    result["port"] = poll_port
+    result["process_alive"] = proc.poll() is None
     result["status"] = "timeout"
     result["log_file"] = str(log_file)
     if timeout is not None:

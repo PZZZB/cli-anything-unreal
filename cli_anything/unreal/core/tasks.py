@@ -903,7 +903,25 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     save_task(task)
 
     log_file = Path(state.session.project_dir) / "Saved" / "Logs" / f"{state.session.project_name}.log"
-    wait_result = _wait_for_api(proc, state.session.port, payload.get("timeout"), log_file, state)
+
+    def _record_launch_progress(progress: dict) -> None:
+        latest = load_task(task["task_id"]) or task
+        latest_result = dict(latest.get("result", {}))
+        latest_result.update(progress)
+        update_task_fields(
+            task["task_id"],
+            log_file=str(log_file),
+            result=latest_result,
+        )
+
+    wait_result = _wait_for_api(
+        proc,
+        state.session.port,
+        payload.get("timeout"),
+        log_file,
+        state,
+        on_progress=_record_launch_progress,
+    )
 
     # Auto-compile and retry if plugin failed to load
     if wait_result.get("status") == "error_dialog" and "failed to load" in wait_result.get("error", ""):
@@ -941,7 +959,14 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         task["result"]["recompiled"] = True
         save_task(task)
 
-        wait_result = _wait_for_api(proc, state.session.port, payload.get("timeout"), log_file, state)
+        wait_result = _wait_for_api(
+            proc,
+            state.session.port,
+            payload.get("timeout"),
+            log_file,
+            state,
+            on_progress=_record_launch_progress,
+        )
 
     requested_map = payload.get("map_path")
     if wait_result.get("status") == "online" and requested_map:
@@ -970,7 +995,14 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
                 if _looks_like_transport_disconnect(map_recovery):
                     recovery_timeout = _map_recovery_timeout_seconds(payload.get("timeout"))
                     try:
-                        map_recovery_wait = _wait_for_api(proc, state.session.port, recovery_timeout, log_file, state)
+                        map_recovery_wait = _wait_for_api(
+                            proc,
+                            state.session.port,
+                            recovery_timeout,
+                            log_file,
+                            state,
+                            on_progress=_record_launch_progress,
+                        )
                     except Exception as exc:
                         map_recovery_wait = {"status": "failed", "error": str(exc)}
                     wait_result["map_recovery_wait"] = map_recovery_wait

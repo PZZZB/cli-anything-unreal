@@ -101,6 +101,56 @@ class TestBuildSuccessPaths:
             assert result["returncode"] == 1
             assert "log_file" in result["error"]
 
+    def test_compile_failure_reports_bk_dist_evidence(self, tmp_path):
+        from cli_anything.unreal.core.build import _normalize_result
+
+        actions_file = tmp_path / "bk_actions_tRXFhsLpTb.json"
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_text(
+            "\n".join([
+                "Using Parallel executor to run 87 action(s)",
+                f"bk-ubt-tool.exe --actions_json_file {actions_file}",
+                "UBTTool: Building 87 actions with 288 jobs...exit code:2,error:<nil>",
+                f"failed to run actions with json file: {actions_file}",
+                "failed to compile with bk tools",
+                "Result: Failed (OtherCompilationError)",
+            ]),
+            encoding="utf-8",
+        )
+
+        result = _normalize_result(
+            {"returncode": 6, "log_file": str(log_file)},
+            "Compile",
+        )
+
+        assert result["status"] == "error"
+        assert result["failure_kind"] == "distributed_executor_failed_without_diagnostic"
+        assert result["executor"] == "bk_dist"
+        assert result["action_count"] == 87
+        assert result["executor_exit_code"] == 2
+        assert result["actions_json_file"] == str(actions_file)
+        assert "without emitting a compiler diagnostic" in result["diagnostic"]
+
+    def test_compile_failure_returns_real_compiler_diagnostics(self, tmp_path):
+        from cli_anything.unreal.core.build import _normalize_result
+
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_text(
+            "Source.cpp(42): error C2065: 'Missing': undeclared identifier\n"
+            "LINK : fatal error LNK1104: cannot open file 'Locked.dll'\n",
+            encoding="utf-8",
+        )
+
+        result = _normalize_result(
+            {"returncode": 6, "log_file": str(log_file)},
+            "Compile",
+        )
+
+        assert result["failure_kind"] == "compiler_diagnostics"
+        assert len(result["diagnostics"]) == 2
+        assert "error C2065" in result["diagnostics"][0]
+        assert "fatal error LNK1104" in result["diagnostics"][1]
+
     def test_compile_android_uses_build_bat_game_target(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
 

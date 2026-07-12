@@ -110,6 +110,65 @@ def _check_already_building(uproject_path: str) -> dict | None:
     }
 
 
+def _build_failure_diagnostics(log_file: str | None) -> dict:
+    """Extract bounded, factual diagnostics from a failed UAT/UBT log."""
+    if not log_file:
+        return {}
+    path = Path(log_file)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - 2 * 1024 * 1024))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return {}
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    compiler_diagnostics = []
+    for line in lines:
+        if re.search(
+            r"\bfatal error\b|\berror (?:C|LNK)\d+\b|:\s*error:",
+            line,
+            re.IGNORECASE,
+        ):
+            compiler_diagnostics.append(line)
+    compiler_diagnostics = list(dict.fromkeys(compiler_diagnostics))[-20:]
+    if compiler_diagnostics:
+        return {
+            "failure_kind": "compiler_diagnostics",
+            "diagnostics": compiler_diagnostics,
+        }
+
+    if not re.search(r"failed to compile with bk tools|bk-ubt-tool", text, re.IGNORECASE):
+        return {}
+
+    result = {
+        "failure_kind": "distributed_executor_failed_without_diagnostic",
+        "executor": "bk_dist",
+        "diagnostic": (
+            "bk_dist failed without emitting a compiler diagnostic; inspect the "
+            "actions JSON or rerun through the project's normal build path for the failing action."
+        ),
+    }
+    action_matches = re.findall(
+        r"(?:Parallel executor to run|Building)\s+(\d+)\s+action",
+        text,
+        re.IGNORECASE,
+    )
+    if action_matches:
+        result["action_count"] = int(action_matches[-1])
+    exit_matches = re.findall(r"exit code:\s*(-?\d+)", text, re.IGNORECASE)
+    if exit_matches:
+        result["executor_exit_code"] = int(exit_matches[-1])
+    actions_matches = re.findall(
+        r"(?:--actions_json_file\s+|failed to run actions with json file:\s*)([^\s\"']+|\"[^\"]+\"|'[^']+')",
+        text,
+        re.IGNORECASE,
+    )
+    if actions_matches:
+        result["actions_json_file"] = actions_matches[-1].strip("\"'")
+    return result
+
+
 def _normalize_result(result: dict, action: str) -> dict:
     out = {
         "status": "ok" if result["returncode"] == 0 else "error",
@@ -124,6 +183,7 @@ def _normalize_result(result: dict, action: str) -> dict:
             "error",
             f"{action} failed (exit {result['returncode']}). See log_file for details.",
         )
+        out.update(_build_failure_diagnostics(result.get("log_file")))
     return out
 
 
