@@ -1903,6 +1903,25 @@ result = {'status': 'live_editor_ok'}
         assert data["result"]["log_text"] == "LogRHI: Render target pool dump line"
         assert data["result"]["log_file"] == str(log_file)
 
+    def test_editor_exec_log_resolver_uses_uproject_name_not_directory_name(
+        self, tmp_path
+    ):
+        from cli_anything.unreal.commands.editor import _resolve_editor_log_file
+
+        project_dir = tmp_path / "RXGame_2"
+        log_dir = project_dir / "Saved" / "Logs"
+        log_dir.mkdir(parents=True)
+        active_log = log_dir / "RXGame.log"
+        wrong_log = log_dir / "RXGame_2.log"
+        active_log.write_text("active editor log\n", encoding="utf-8")
+        wrong_log.write_text("directory-named stale log\n", encoding="utf-8")
+
+        state = MagicMock()
+        state.session.project_dir = str(project_dir)
+        state.session.project_path = str(project_dir / "RXGame.uproject")
+
+        assert _resolve_editor_log_file(state) == active_log
+
     def test_editor_exec_log_wait_captures_async_automation_completion(self, tmp_path):
         import re
         import threading

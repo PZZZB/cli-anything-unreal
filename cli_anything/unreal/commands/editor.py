@@ -1715,6 +1715,7 @@ finally:
 
 def _resolve_editor_log_file(state: AppState) -> Path | None:
     """Find the active editor log file for the current project/port."""
+    project_path = getattr(state.session, "project_path", None)
     project_dir = state.session.project_dir
     if not project_dir:
         try:
@@ -1726,6 +1727,7 @@ def _resolve_editor_log_file(state: AppState) -> Path | None:
                 if pid and int(editor.get("pid", 0)) == int(pid):
                     project = editor.get("project")
                     if project:
+                        project_path = str(project)
                         project_dir = str(Path(project).parent)
                         break
         except Exception:
@@ -1738,9 +1740,10 @@ def _resolve_editor_log_file(state: AppState) -> Path | None:
     if not log_dir.is_dir():
         return None
 
-    project_log = log_dir / f"{Path(project_dir).name}.log"
-    if project_log.exists():
-        return project_log
+    if project_path:
+        project_log = log_dir / f"{Path(project_path).stem}.log"
+        if project_log.exists():
+            return project_log
 
     logs = sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
     return logs[0] if logs else None
