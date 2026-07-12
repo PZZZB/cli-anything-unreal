@@ -1752,6 +1752,7 @@ def _read_log_delta(
     wait_seconds: float = 1.0,
     begin_marker: str | None = None,
     end_marker: str | None = None,
+    completion_markers: tuple[str, ...] = (),
 ) -> str:
     if not log_file:
         return ""
@@ -1762,6 +1763,10 @@ def _read_log_delta(
     data = b""
     last_size: int | None = None
     stable_since: float | None = None
+    completion_bytes = tuple(
+        marker.encode("utf-8").lower()
+        for marker in completion_markers
+    )
     while True:
         try:
             size = log_file.stat().st_size
@@ -1775,14 +1780,19 @@ def _read_log_delta(
 
         now = time.time()
         if data:
-            if size == last_size:
-                if stable_since is None:
-                    stable_since = now
-                if (now - stable_since) >= 0.2 or now >= deadline:
+            if completion_bytes:
+                lowered_data = data.lower()
+                if any(marker in lowered_data for marker in completion_bytes):
                     break
             else:
-                last_size = size
-                stable_since = now
+                if size == last_size:
+                    if stable_since is None:
+                        stable_since = now
+                    if (now - stable_since) >= 0.2 or now >= deadline:
+                        break
+                else:
+                    last_size = size
+                    stable_since = now
 
         if now >= deadline:
             break
@@ -1818,7 +1828,12 @@ def _read_log_delta(
 
 @editor_group.command("exec")
 @click.option("--timeout", default=15, type=int, help="Max seconds to wait for captured log output.")
-@click.option("--log-wait", default=1.0, type=float, help="Seconds to wait for Output Log lines after the command.")
+@click.option(
+    "--log-wait",
+    default=1.0,
+    type=float,
+    help="Max seconds to collect Output Log lines; Automation waits for Queue Empty.",
+)
 @click.argument("command")
 @handle_error
 @click.pass_obj
@@ -1859,8 +1874,18 @@ def editor_exec(state: AppState, timeout, log_wait, command):
                     "Check editor Output Log for results.",
         }
 
+    automation_run = bool(
+        re.match(r"^\s*Automation\s+RunTests(?:\s|$)", command, re.IGNORECASE)
+    )
     file_log_text = ""
-    if log_begin_marker and log_end_marker:
+    if automation_run:
+        file_log_text = _read_log_delta(
+            log_file,
+            log_start,
+            wait_seconds=log_wait,
+            completion_markers=("Automation Test Queue Empty",),
+        )
+    elif log_begin_marker and log_end_marker:
         file_log_text = _read_log_delta(
             log_file,
             log_start,
@@ -1871,9 +1896,46 @@ def editor_exec(state: AppState, timeout, log_wait, command):
     if file_log_text:
         result["log_file"] = str(log_file)
         result["log_file_text"] = file_log_text
+        existing_output = list(result.get("log_output") or [])
+        seen_output = {
+            str(item.get("Output", ""))
+            for item in existing_output
+            if isinstance(item, dict)
+        }
+        result["log_output"] = existing_output + [
+            {
+                "Type": "Info",
+                "Output": line,
+                "Source": "editor_log_file",
+            }
+            for line in file_log_text.splitlines()
+            if line and line not in seen_output
+        ]
         if not result.get("log_text"):
             result["log_text"] = file_log_text
             result["capture_mode"] = "editor_log_file"
+
+    if automation_run:
+        automation_completed = (
+            "automation test queue empty" in file_log_text.lower()
+        )
+        result["automation_completed"] = automation_completed
+        result["log_capture_status"] = (
+            "completed" if automation_completed else "timeout"
+        )
+        result["log_wait_seconds"] = log_wait
+        if not automation_completed:
+            result["suggestion"] = (
+                "Automation did not emit 'Automation Test Queue Empty' within "
+                "--log-wait. Inspect the project log or retry with a longer wait."
+            )
+            if log_file:
+                escaped_log = str(log_file).replace("'", "''")
+                result["log_file"] = str(log_file)
+                result["next_command"] = (
+                    "powershell -NoProfile -Command "
+                    f"\"Get-Content -LiteralPath '{escaped_log}' -Tail 200\""
+                )
 
     output(result, state)
 
