@@ -486,17 +486,37 @@ def stop_build(uproject_path: str) -> dict:
 
 
 def is_building(uproject_path: str) -> dict:
+    from cli_anything.unreal.core.tasks import active_build_tasks
+
     processes = find_running_build_processes(uproject_path, include_cmdline=False)
     kinds: dict[str, int] = {}
     for process in processes:
         name = process.get("name", "")
         kinds[name] = kinds.get(name, 0) + 1
 
+    tasks = []
+    for task in active_build_tasks(uproject_path):
+        evidence = {
+            key: task[key]
+            for key in (
+                "task_id",
+                "command",
+                "status",
+                "worker_pid",
+                "pid",
+                "log_file",
+            )
+            if key in task
+        }
+        tasks.append(evidence)
+
     result = {
-        "building": len(processes) > 0,
+        "building": bool(processes or tasks),
         "count": len(processes),
         "kinds": kinds,
         "processes": processes,
+        "active_task_count": len(tasks),
+        "active_tasks": tasks,
     }
 
     saved_logs = Path(uproject_path).parent / "Saved" / "Logs"

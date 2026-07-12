@@ -570,6 +570,41 @@ class TestBuildStopAndDetect:
             assert result["building"] is True
             assert len(result["processes"]) == 1
 
+    def test_is_building_with_active_task_but_no_detectable_processes(
+        self, temp_project
+    ):
+        """Persistent task ownership must cover dotnet/bk process scan gaps."""
+        from cli_anything.unreal.core.build import is_building
+
+        active_task = {
+            "task_id": "t-active-build",
+            "command": "build.compile",
+            "status": "running",
+            "worker_pid": 98136,
+            "pid": 55856,
+            "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
+        }
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.tasks.active_build_tasks",
+            return_value=[active_task],
+        ):
+            result = is_building(temp_project["uproject"])
+
+        assert result["building"] is True
+        assert result["count"] == 0
+        assert result["active_task_count"] == 1
+        assert result["active_tasks"] == [{
+            "task_id": "t-active-build",
+            "command": "build.compile",
+            "status": "running",
+            "worker_pid": 98136,
+            "pid": 55856,
+            "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
+        }]
+
     def test_compile_rejects_if_already_building(self, temp_project):
         """compile_project returns error when a build is already running."""
         from cli_anything.unreal.core.build import compile_project
