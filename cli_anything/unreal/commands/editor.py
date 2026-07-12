@@ -813,6 +813,42 @@ def _find_matching_project_editors(project_path: str | None) -> tuple[list[dict]
     return running, matches
 
 
+def _project_process_exit_evidence(
+    project_path: str,
+    target_pids: list[int],
+) -> tuple[bool, dict]:
+    from cli_anything.unreal.utils.ue_backend import _windows_process_exists
+
+    pid_evidence = [
+        {
+            "pid": pid,
+            "project_match": False,
+            "exists": _windows_process_exists(pid),
+        }
+        for pid in target_pids
+    ]
+    if target_pids and all(item["exists"] is False for item in pid_evidence):
+        return True, {"matching_pids": [], "pids": pid_evidence}
+
+    _, matches = _find_matching_project_editors(project_path)
+    matching_pids = set()
+    for proc in matches:
+        try:
+            matching_pids.add(int(proc.get("pid", 0)))
+        except (TypeError, ValueError):
+            continue
+
+    for item in pid_evidence:
+        if item["pid"] in matching_pids:
+            item["project_match"] = True
+            item["exists"] = True
+
+    return False, {
+        "matching_pids": sorted(matching_pids),
+        "pids": pid_evidence,
+    }
+
+
 def _kill_matching_project_editors(
     project_path: str | None,
     port: int,
@@ -1456,6 +1492,7 @@ def _close_editor_for_project(api, state: AppState) -> dict:
 
         return {"status": "offline", "port": state.session.port, "message": "No editor running on this port."}
 
+    target_pids = []
     if state.session.project_path and sys.platform == "win32":
         running, matches = _find_matching_project_editors(state.session.project_path)
         if not matches:
@@ -1472,6 +1509,12 @@ def _close_editor_for_project(api, state: AppState) -> dict:
                     ],
                 },
             )
+        for editor in matches:
+            try:
+                target_pids.append(int(editor.get("pid", 0)))
+            except (TypeError, ValueError):
+                continue
+        target_pids = sorted(pid for pid in set(target_pids) if pid)
 
     try:
         api.call_function(
@@ -1485,6 +1528,7 @@ def _close_editor_for_project(api, state: AppState) -> dict:
 
     api.exec_console("QUIT_EDITOR")
     deadline = time.time() + 30
+    last_process_evidence = None
     while time.time() < deadline:
         if not api.is_alive():
             drain_result = _wait_for_project_editor_exit(state.session.project_path, state.session.port, timeout=60)
@@ -1501,6 +1545,20 @@ def _close_editor_for_project(api, state: AppState) -> dict:
                 exit_code=3,
                 details=drain_result,
             )
+        if target_pids:
+            confirmed_exit, process_evidence = _project_process_exit_evidence(
+                state.session.project_path,
+                target_pids,
+            )
+            last_process_evidence = process_evidence
+            if confirmed_exit:
+                return {
+                    "status": "closed",
+                    "port": state.session.port,
+                    "method": "project_process_exit",
+                    "target_pids": target_pids,
+                    "pid_evidence": process_evidence["pids"],
+                }
         time.sleep(2)
 
     kill_result = _kill_matching_project_editors(
@@ -1513,6 +1571,10 @@ def _close_editor_for_project(api, state: AppState) -> dict:
         return kill_result
 
     details = kill_result or {"status": "timeout", "port": state.session.port}
+    details.setdefault("stage", "wait_for_project_process_exit")
+    if target_pids:
+        details["target_pids"] = target_pids
+        details["last_process_evidence"] = last_process_evidence
     raise AppError("EDITOR_CLOSE_TIMEOUT", "Editor did not close within 30s.", exit_code=3, details=details)
 
 

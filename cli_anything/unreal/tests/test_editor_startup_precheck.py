@@ -912,6 +912,52 @@ def test_editor_close_failure_reports_kill_diagnostics(mini_project):
     assert "administrator" in data["details"]["suggestion"].lower()
 
 
+def test_editor_close_returns_when_project_process_exits_but_api_stays_alive(
+    mini_project,
+):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    mock_api = MagicMock()
+    mock_api.is_alive.return_value = True
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+        return_value=mock_api,
+    ), patch(
+        "cli_anything.unreal.commands.editor.time.time",
+        return_value=0,
+    ), patch(
+        "cli_anything.unreal.commands.editor.time.sleep",
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend.find_running_editors",
+        side_effect=[
+            [{"pid": 1234, "project": mini_project}],
+        ],
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend._windows_process_exists",
+        return_value=False,
+    ) as process_exists, patch(
+        "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+    ) as kill_process:
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["result"]["status"] == "closed"
+    assert data["result"]["method"] == "project_process_exit"
+    assert data["result"]["target_pids"] == [1234]
+    assert data["result"]["pid_evidence"] == [
+        {"pid": 1234, "project_match": False, "exists": False},
+    ]
+    process_exists.assert_called_once_with(1234)
+    kill_process.assert_not_called()
+
+
 def test_editor_close_timeout_without_matching_process_returns_error(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
@@ -921,12 +967,14 @@ def test_editor_close_timeout_without_matching_process_returns_error(mini_projec
     mock_api.is_alive.side_effect = [True, True]
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
-         patch("cli_anything.unreal.commands.editor.time.time", side_effect=[0, 0, 31]), \
+         patch("cli_anything.unreal.commands.editor.time.time", side_effect=[0, 0, 0, 31]), \
          patch("cli_anything.unreal.commands.editor.time.sleep"), \
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", side_effect=[
              [{"pid": 1234, "project": mini_project}],
              [],
-         ]):
+             [],
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend._windows_process_exists", return_value=None):
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "close",
@@ -936,6 +984,14 @@ def test_editor_close_timeout_without_matching_process_returns_error(mini_projec
     data = json.loads(result.output)
     assert data["status"] == "error"
     assert data["code"] == "EDITOR_CLOSE_TIMEOUT"
+    assert data["details"]["stage"] == "wait_for_project_process_exit"
+    assert data["details"]["target_pids"] == [1234]
+    assert data["details"]["last_process_evidence"] == {
+        "matching_pids": [],
+        "pids": [
+            {"pid": 1234, "project_match": False, "exists": None},
+        ],
+    }
     assert "Editor did not close within 30s." in data["message"]
     assert result.output.count('"status": "error"') == 1
     assert result.output.count('"code": "EDITOR_CLOSE_TIMEOUT"') == 1
