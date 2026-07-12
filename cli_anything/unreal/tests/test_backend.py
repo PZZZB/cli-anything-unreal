@@ -580,6 +580,36 @@ def test_kill_process_tree_result_treats_missing_pid_after_taskkill_as_success()
     assert result["process_exists_after_taskkill"] is False
 
 
+def test_kill_process_tree_result_prefers_taskkill_missing_pid_over_stale_exists_probe():
+    from cli_anything.unreal.utils import ue_backend
+    from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
+
+    proc = subprocess.CompletedProcess(
+        ["taskkill", "/F", "/T", "/PID", "35788"],
+        255,
+        stdout=b"SUCCESS: The process with PID 60660 has been terminated.",
+        stderr=b"ERROR: The process with PID 35788 could not be terminated. "
+               b"Reason: There is no running instance of the task.",
+    )
+
+    with patch.object(ue_backend.sys, "platform", "win32"), \
+         patch(
+             "cli_anything.unreal.utils.ue_backend.subprocess.run",
+             return_value=proc,
+         ), \
+         patch(
+             "cli_anything.unreal.utils.ue_backend._windows_process_exists",
+             return_value=True,
+         ):
+        result = _kill_process_tree_result(35788)
+
+    assert result["ok"] is True
+    assert result["already_exited"] is True
+    assert result["pid_state_race"] is True
+    assert result["method"] == "taskkill_already_exited"
+    assert result["process_exists_after_taskkill"] is True
+
+
 def test_kill_process_tree_result_fails_when_pid_survives_successful_taskkill():
     from cli_anything.unreal.utils import ue_backend
     from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result

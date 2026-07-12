@@ -512,12 +512,15 @@ def _classify_kill_result(result: dict) -> dict:
     text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
     access_denied = any(token in text for token in ("access is denied", "拒绝访问", "存取被拒"))
     already_exited = any(token in text for token in ("not found", "not running", "没有找到", "找不到", "未找到"))
+    reported_missing = already_exited or "no running instance" in text
     process_exists = result.get("process_exists_after_taskkill")
     if process_exists is not None:
-        already_exited = not process_exists
+        already_exited = reported_missing or not process_exists
 
     result["access_denied"] = access_denied
     result["already_exited"] = already_exited
+    if reported_missing and process_exists is True:
+        result["pid_state_race"] = True
     if process_exists is True:
         result["ok"] = False
     if already_exited:
