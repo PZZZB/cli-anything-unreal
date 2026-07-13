@@ -513,6 +513,7 @@ def _classify_kill_result(result: dict) -> dict:
     access_denied = any(token in text for token in ("access is denied", "拒绝访问", "存取被拒"))
     already_exited = any(token in text for token in ("not found", "not running", "没有找到", "找不到", "未找到"))
     reported_missing = already_exited or "no running instance" in text
+    taskkill_succeeded = result.get("returncode") == 0 and not access_denied
     process_exists = result.get("process_exists_after_taskkill")
     if process_exists is not None:
         already_exited = reported_missing or not process_exists
@@ -521,6 +522,9 @@ def _classify_kill_result(result: dict) -> dict:
     result["already_exited"] = already_exited
     if reported_missing and process_exists is True:
         result["pid_state_race"] = True
+    if taskkill_succeeded and process_exists is True:
+        result["pid_state_race"] = True
+        result["kill_confirmed_by_taskkill"] = True
     if process_exists is True:
         result["ok"] = False
     if already_exited:
@@ -534,6 +538,10 @@ def _classify_kill_result(result: dict) -> dict:
             "Taskkill was denied. Run ue-cli from an elevated administrator shell, "
             "or close the UnrealEditor.exe process manually from Task Manager."
         )
+    elif taskkill_succeeded:
+        result["ok"] = True
+        result["retry_suggested"] = False
+        result["suggestion"] = "Taskkill reported successful process-tree termination."
     elif process_exists is True:
         result["retry_suggested"] = True
         result["suggestion"] = (
@@ -609,6 +617,18 @@ def _kill_process_tree_result(pid: int) -> dict:
             "stderr": _decode_process_output(proc.stderr).strip(),
         }
         result["process_exists_after_taskkill"] = _windows_process_exists(pid)
+        process_exists = result["process_exists_after_taskkill"]
+        confirmation_attempts = 0
+        if proc.returncode == 0 and process_exists is True:
+            for _ in range(5):
+                confirmation_attempts += 1
+                time.sleep(0.2)
+                process_exists = _windows_process_exists(pid)
+                if process_exists is not True:
+                    break
+            result["process_exists_after_taskkill"] = process_exists
+            result["post_taskkill_confirmation_attempts"] = confirmation_attempts
+            result["post_taskkill_confirmation_seconds"] = confirmation_attempts * 0.2
         return _classify_kill_result(result)
     except subprocess.TimeoutExpired as exc:
         return {

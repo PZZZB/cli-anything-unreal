@@ -610,7 +610,7 @@ def test_kill_process_tree_result_prefers_taskkill_missing_pid_over_stale_exists
     assert result["process_exists_after_taskkill"] is True
 
 
-def test_kill_process_tree_result_fails_when_pid_survives_successful_taskkill():
+def test_kill_process_tree_result_accepts_success_after_confirmation_race():
     from cli_anything.unreal.utils import ue_backend
     from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
 
@@ -622,15 +622,25 @@ def test_kill_process_tree_result_fails_when_pid_survives_successful_taskkill():
     )
 
     with patch.object(ue_backend.sys, "platform", "win32"), \
-         patch("cli_anything.unreal.utils.ue_backend.subprocess.run", return_value=proc), \
-         patch("cli_anything.unreal.utils.ue_backend._windows_process_exists", return_value=True):
+         patch(
+             "cli_anything.unreal.utils.ue_backend.subprocess.run",
+             return_value=proc,
+         ), \
+         patch(
+             "cli_anything.unreal.utils.ue_backend._windows_process_exists",
+             return_value=True,
+         ) as process_exists, \
+         patch("cli_anything.unreal.utils.ue_backend.time.sleep") as sleep:
         result = _kill_process_tree_result(91916)
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert result["already_exited"] is False
     assert result["process_exists_after_taskkill"] is True
-    assert result["retry_suggested"] is True
-    assert "still running" in result["suggestion"].lower()
+    assert result["pid_state_race"] is True
+    assert result["kill_confirmed_by_taskkill"] is True
+    assert result["retry_suggested"] is False
+    assert process_exists.call_count == 6
+    assert sleep.call_count == 5
 
 
 def test_kill_process_tree_result_clears_ok_before_access_denied_branch():
