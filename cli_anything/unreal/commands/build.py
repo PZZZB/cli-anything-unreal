@@ -8,7 +8,10 @@ from pathlib import Path
 
 import click
 
-from cli_anything.unreal.core.build import validate_package_uat_value
+from cli_anything.unreal.core.build import (
+    validate_module_name,
+    validate_package_uat_value,
+)
 from cli_anything.unreal.commands import AppError, AppState, _same_project_path, handle_error, output, require_project
 from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, load_task, submit_task, task_progress
 from cli_anything.unreal.utils.ue_backend import _allocate_log_path, find_running_editors
@@ -57,6 +60,16 @@ def _validate_package_value(ctx, param, value):
                 label=labels.get(param.name, param.name),
                 require_option=param.name == "uat_args",
             )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
+    return value
+
+
+def _validate_module_value(ctx, param, value):
+    values = value if isinstance(value, tuple) else (() if value is None else (value,))
+    try:
+        for item in values:
+            validate_module_name(item)
     except ValueError as exc:
         raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
     return value
@@ -200,15 +213,34 @@ def build_group():
 @_project_option
 @click.option("--config", "build_config", default="Development", type=click.Choice(["Development", "Shipping", "DebugGame", "Test"]))
 @click.option("--platform", default="Win64")
+@click.option(
+    "--module",
+    "modules",
+    multiple=True,
+    callback=_validate_module_value,
+    help="Compile only this Editor module through UBT; repeat for multiple modules.",
+)
 @click.option("--no-wait", is_flag=True, default=False)
 @click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
-def build_compile(state: AppState, project_path, build_config, platform, no_wait, timeout):
+def build_compile(state: AppState, project_path, build_config, platform, modules, no_wait, timeout):
     _load_command_project(state, project_path)
     require_project(state)
+    if modules and platform.lower() != "win64":
+        raise AppError(
+            "MODULE_COMPILE_PLATFORM",
+            "Module-targeted compile is supported only for Win64 Editor targets.",
+            exit_code=2,
+        )
     _guard_compile_against_editor_locks(state, platform)
-    payload = _build_payload(state, "compile", build_config=build_config, platform=platform)
+    payload = _build_payload(
+        state,
+        "compile",
+        build_config=build_config,
+        platform=platform,
+        modules=list(modules),
+    )
     result = _run_task("build.compile", payload, timeout=timeout, no_wait=no_wait, timeout_code="BUILD_WAIT_TIMEOUT")
     output(result, state)
 

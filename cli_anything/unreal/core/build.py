@@ -21,6 +21,10 @@ _UNSAFE_PACKAGE_VALUE_CHARS = frozenset('"&|<>\0\r\n')
 _GAME_TARGET_PATTERN = re.compile(
     r"\bType\s*=\s*TargetType\s*\.\s*Game\s*;"
 )
+_EDITOR_TARGET_PATTERN = re.compile(
+    r"\bType\s*=\s*TargetType\s*\.\s*Editor\s*;"
+)
+_MODULE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _TARGET_LEXICAL_NOISE_PATTERN = re.compile(
     r"//[^\r\n]*|/\*.*?\*/|"
@@ -97,6 +101,43 @@ def _resolve_game_target(uproject_path: str) -> tuple[str | None, str | None]:
     if game_targets:
         return game_targets[0], None
     return project_path.stem, None
+
+
+def _resolve_editor_target(uproject_path: str) -> tuple[str | None, str | None]:
+    project_path = Path(uproject_path)
+    source_dir = project_path.parent / "Source"
+    editor_targets = []
+    if source_dir.is_dir():
+        for target_file in sorted(source_dir.rglob("*.Target.cs")):
+            try:
+                source = target_file.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError as exc:
+                return None, f"Could not read target file {target_file}: {exc}"
+            if _EDITOR_TARGET_PATTERN.search(_sanitize_target_source(source)):
+                editor_targets.append(
+                    target_file.name.removesuffix(".Target.cs")
+                )
+
+    editor_targets = sorted(set(editor_targets))
+    if len(editor_targets) > 1:
+        return None, (
+            "Multiple Editor targets found; cannot choose one for module compile: "
+            + ", ".join(editor_targets)
+        )
+    if editor_targets:
+        return editor_targets[0], None
+    return project_path.stem + "Editor", None
+
+
+def validate_module_name(value: str) -> str:
+    if not _MODULE_NAME_PATTERN.fullmatch(value):
+        raise ValueError(
+            f"Invalid module name {value!r}; expected a C++ identifier such as Renderer"
+        )
+    return value
 
 
 def _check_already_building(uproject_path: str) -> dict | None:
@@ -194,7 +235,18 @@ def compile_project(
     engine_root: str | None = None,
     log_file: str | None = None,
     on_start=None,
+    modules: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
+    try:
+        modules = [validate_module_name(value) for value in (modules or ())]
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+    if modules and platform.lower() != "win64":
+        return {
+            "status": "error",
+            "error": "Module-targeted compile is supported only for Win64 Editor targets.",
+        }
+
     already = _check_already_building(uproject_path)
     if already:
         return already
@@ -202,6 +254,27 @@ def compile_project(
     engine_root = engine_root or find_engine_root(uproject_path)
     if not engine_root:
         return {"status": "error", "error": "Could not find engine root"}
+
+    if modules:
+        target, target_error = _resolve_editor_target(uproject_path)
+        if target_error:
+            return {"status": "error", "error": target_error}
+        result = run_build(
+            engine_root,
+            target,
+            platform,
+            config,
+            extra_args=[
+                f"-Project={uproject_path}",
+                *(f"-Module={module}" for module in modules),
+                "-WaitMutex",
+            ],
+            log_file=log_file,
+            log_label="compile",
+            project_dir=str(Path(uproject_path).parent),
+            on_start=on_start,
+        )
+        return _normalize_result(result, "Compile")
 
     if platform.lower() != "win64":
         target, target_error = _resolve_game_target(uproject_path)

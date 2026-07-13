@@ -106,13 +106,14 @@ Build commands do not require editor.
 
 Synchronous `build compile` / `build cook` / `build package` stream the live UAT/UBT log to stderr while waiting, similar to UE `Build.bat`. JSON stdout stays one final payload with `log_file`.
 For non-Win64 platforms, `build compile` calls UE `Build.bat` directly for the project's detected Game target, falling back to the `.uproject` name when no Game `Target.cs` is present.
+For focused Win64 Editor validation, repeat `--module NAME`; ue-cli calls `Build.bat` for the detected Editor target with one constrained `-Module=NAME` per value instead of running the full BuildCookRun target set.
 
 
 On Windows, `build compile --platform Win64` refuses to start while an UnrealEditor process for the same project is running, because editor/plugin DLLs are commonly locked and link fails with `LNK1104`. Run `editor close` first, then compile.
 
 | Command | Description |
 |---------|-------------|
-| `build compile [--project PATH] [--config C] [--platform P] [--no-wait] [--timeout N]` | Compile C++ |
+| `build compile [--project PATH] [--config C] [--platform P] [--module NAME]... [--no-wait] [--timeout N]` | Compile C++; repeated modules select a focused Win64 Editor-module build |
 | `build cook [--project PATH] [--platform P] [--no-wait] [--timeout N]` | Cook content |
 | `build package [--project PATH] [--platform P] [--config C] [--output-dir DIR] [--map MAP]... [--cook-flavor F] [--uat-arg=-ARG]... [--no-wait] [--timeout N]` | Reproducible BuildCookRun package pipeline; final result includes `uat_command` |
 | `build stop [--project PATH]` | Cancel project-owned async build tasks, then kill any remaining MSBuild/UBT tree |

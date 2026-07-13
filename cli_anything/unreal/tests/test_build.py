@@ -101,6 +101,85 @@ class TestBuildSuccessPaths:
             assert result["returncode"] == 1
             assert "log_file" in result["error"]
 
+    def test_compile_win64_modules_uses_build_bat_editor_target(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        build_result = {
+            "returncode": 0,
+            "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
+            "duration_seconds": 3.0,
+        }
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value=build_result,
+        ) as mock_run_build, patch(
+            "cli_anything.unreal.core.build.run_uat",
+        ) as mock_run_uat:
+            result = compile_project(
+                temp_project["uproject"],
+                platform="Win64",
+                engine_root=self._mock_engine_root(),
+                modules=("Renderer", "RHI"),
+            )
+
+        mock_run_build.assert_called_once_with(
+            self._mock_engine_root(),
+            "TestProjectEditor",
+            "Win64",
+            "Development",
+            extra_args=[
+                f'-Project={temp_project["uproject"]}',
+                "-Module=Renderer",
+                "-Module=RHI",
+                "-WaitMutex",
+            ],
+            log_file=None,
+            log_label="compile",
+            project_dir=str(Path(temp_project["uproject"]).parent),
+            on_start=None,
+        )
+        mock_run_uat.assert_not_called()
+        assert result["status"] == "ok"
+
+    @pytest.mark.parametrize("module", ["Renderer -Clean", "../Renderer", ""])
+    def test_compile_modules_rejects_unsafe_names(self, temp_project, module):
+        from cli_anything.unreal.core.build import compile_project
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch("cli_anything.unreal.core.build.run_build") as mock_run:
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+                modules=(module,),
+            )
+
+        assert result["status"] == "error"
+        assert "module" in result["error"].lower()
+        mock_run.assert_not_called()
+
+    def test_compile_modules_rejects_non_win64_platform(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch("cli_anything.unreal.core.build.run_build") as mock_run:
+            result = compile_project(
+                temp_project["uproject"],
+                platform="Android",
+                engine_root=self._mock_engine_root(),
+                modules=("Renderer",),
+            )
+
+        assert result["status"] == "error"
+        assert "win64" in result["error"].lower()
+        mock_run.assert_not_called()
+
     def test_compile_failure_reports_bk_dist_evidence(self, tmp_path):
         from cli_anything.unreal.core.build import _normalize_result
 
@@ -1266,6 +1345,44 @@ class TestBuildStopAndDetect:
         assert kwargs["cook_flavor"] == "ASTC"
         assert kwargs["uat_args"] == ["-pak", "-iostore"]
 
+    def test_run_build_task_forwards_compile_modules(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        from cli_anything.unreal.core.tasks import (
+            _run_build_task,
+            create_task,
+            save_task,
+        )
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task(
+            "build.compile",
+            {
+                "project_path": temp_project["uproject"],
+                "platform": "Win64",
+                "build_config": "Development",
+                "modules": ["Renderer", "RHI"],
+            },
+        )
+        task["status"] = "running"
+        save_task(task)
+
+        with patch(
+            "cli_anything.unreal.core.build.compile_project",
+            return_value={"status": "ok", "log_file": "compile.log"},
+        ) as mock_compile:
+            result = _run_build_task(
+                task,
+                "compile_project",
+                estimated_total_seconds=600,
+            )
+
+        assert result["status"] == "completed"
+        assert mock_compile.call_args.kwargs["modules"] == [
+            "Renderer",
+            "RHI",
+        ]
+
     def test_run_build_task_does_not_overwrite_cancelled_status(
         self, temp_project, tmp_path, monkeypatch
     ):
@@ -2015,6 +2132,7 @@ class TestBuildCLI:
         assert "--project" in result.output
         assert "--no-wait" in result.output
         assert "--timeout" in result.output
+        assert "--module" in result.output
         assert "--log-tail-lines" not in result.output
 
     def test_build_compile_accepts_command_project_option(self, temp_project):
@@ -2047,6 +2165,39 @@ class TestBuildCLI:
         assert captured["payload"]["project_path"] == temp_project["uproject"]
         assert captured["payload"]["platform"] == "Android"
         assert captured["payload"]["build_config"] == "Development"
+
+    def test_build_compile_accepts_repeatable_module_option(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        captured = {}
+
+        def fake_submit_task(command, payload):
+            captured["command"] = command
+            captured["payload"] = payload
+            return {"task_id": "compile-task"}
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.build.find_running_editors",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.commands.build.submit_task",
+            side_effect=fake_submit_task,
+        ):
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "--project", temp_project["uproject"],
+                "build", "compile",
+                "--platform", "Win64",
+                "--module", "Renderer",
+                "--module", "RHI",
+                "--no-wait",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert captured["command"] == "build.compile"
+        assert captured["payload"]["modules"] == ["Renderer", "RHI"]
 
     def test_build_compile_blocks_when_matching_editor_online(self, temp_project):
         from click.testing import CliRunner
