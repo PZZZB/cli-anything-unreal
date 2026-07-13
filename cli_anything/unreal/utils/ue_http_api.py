@@ -18,6 +18,7 @@ import json
 import locale
 import os
 import re
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -190,11 +191,40 @@ class UEEditorAPI:
     # ── Connection ──────────────────────────────────────────────────────
 
     def is_alive(self) -> bool:
-        """Check if the editor Remote Control API is responding."""
+        """Check whether the editor can execute Remote Control requests."""
         try:
             resp = requests.get(
                 self._url("/remote/info"),
                 timeout=3,
+            )
+            if resp.status_code == 200:
+                return True
+        except Exception:
+            pass
+
+        # During map loads or a busy game thread, /remote/info can time out
+        # while object-call requests still work. Avoid a false offline result,
+        # but only probe the functional route when this port has a listener.
+        try:
+            with socket.create_connection(
+                (self.host, self.port),
+                timeout=0.5,
+            ):
+                pass
+        except (OSError, TimeoutError):
+            return False
+
+        probe = {
+            "objectPath": "/Script/Engine.Default__KismetSystemLibrary",
+            "functionName": "GetConsoleVariableStringValue",
+            "parameters": {"VariableName": "t.MaxFPS"},
+            "generateTransaction": False,
+        }
+        try:
+            resp = requests.put(
+                self._url("/remote/object/call"),
+                json=probe,
+                timeout=10,
             )
             return resp.status_code == 200
         except Exception:

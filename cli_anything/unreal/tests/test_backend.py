@@ -878,6 +878,57 @@ class TestHTTPAPI:
         api = UEEditorAPI()
         assert api.is_alive() is True
 
+    @patch("socket.create_connection")
+    @patch("requests.put")
+    @patch("requests.get")
+    def test_is_alive_falls_back_to_read_only_object_call(
+        self,
+        mock_get,
+        mock_put,
+        mock_connect,
+    ):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        mock_get.side_effect = TimeoutError("remote info busy")
+        mock_put.return_value = MagicMock(status_code=200)
+
+        api = UEEditorAPI()
+
+        assert api.is_alive() is True
+        mock_connect.assert_called_once_with(
+            ("localhost", 30010),
+            timeout=0.5,
+        )
+        mock_put.assert_called_once_with(
+            "http://localhost:30010/remote/object/call",
+            json={
+                "objectPath": "/Script/Engine.Default__KismetSystemLibrary",
+                "functionName": "GetConsoleVariableStringValue",
+                "parameters": {"VariableName": "t.MaxFPS"},
+                "generateTransaction": False,
+            },
+            timeout=10,
+        )
+
+    @patch("socket.create_connection")
+    @patch("requests.put")
+    @patch("requests.get")
+    def test_is_alive_skips_object_probe_without_tcp_listener(
+        self,
+        mock_get,
+        mock_put,
+        mock_connect,
+    ):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        mock_get.side_effect = ConnectionError("connection refused")
+        mock_connect.side_effect = OSError("connection refused")
+
+        api = UEEditorAPI()
+
+        assert api.is_alive() is False
+        mock_put.assert_not_called()
+
     @patch("requests.put")
     def test_exec_console(self, mock_put):
         from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
