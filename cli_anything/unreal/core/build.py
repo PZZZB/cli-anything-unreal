@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from cli_anything.unreal.utils.ue_backend import (
+    _build_output_encoding,
     find_engine_root,
     find_generate_project_files,
     find_running_build_processes,
@@ -159,7 +160,7 @@ def _build_failure_diagnostics(log_file: str | None) -> dict:
     try:
         with path.open("rb") as handle:
             handle.seek(max(0, path.stat().st_size - 2 * 1024 * 1024))
-            text = handle.read().decode("utf-8", errors="replace")
+            text = handle.read().decode(_build_output_encoding(), errors="replace")
     except OSError:
         return {}
 
@@ -299,7 +300,6 @@ def compile_project(
         f"-clientconfig={config}",
         "-build",
         "-noP4",
-        "-utf8output",
     ]
     result = run_uat(
         engine_root,
@@ -333,7 +333,6 @@ def cook_content(
         f"-platform={platform}",
         "-cook",
         "-noP4",
-        "-utf8output",
         "-allmaps",
     ]
     result = run_uat(
@@ -403,7 +402,6 @@ def package_project(
         "-archive",
         f"-archivedirectory={output_dir}",
         "-noP4",
-        "-utf8output",
     ]
     if maps:
         args.append("-map=" + "+".join(maps))

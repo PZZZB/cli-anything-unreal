@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import sys
 import time
 from pathlib import Path
@@ -14,7 +15,7 @@ from cli_anything.unreal.core.build import (
 )
 from cli_anything.unreal.commands import AppError, AppState, _same_project_path, handle_error, output, require_project
 from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, load_task, submit_task, task_progress
-from cli_anything.unreal.utils.ue_backend import _allocate_log_path, find_running_editors
+from cli_anything.unreal.utils.ue_backend import _allocate_log_path, _build_output_encoding, find_running_editors
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
@@ -126,7 +127,13 @@ def _guard_compile_against_editor_locks(state: AppState, platform: str) -> None:
     )
 
 
-def _stream_log_delta(log_file: str | None, offset: int = 0) -> int:
+def _stream_log_delta(
+    log_file: str | None,
+    offset: int = 0,
+    *,
+    decoder=None,
+    final: bool = False,
+) -> int:
     if not log_file:
         return offset
     path = Path(log_file)
@@ -136,7 +143,11 @@ def _stream_log_delta(log_file: str | None, offset: int = 0) -> int:
         return offset
     if size < offset:
         offset = 0
+        if decoder is not None:
+            decoder.reset()
     if size <= offset:
+        if final and decoder is not None:
+            sys.stderr.write(decoder.decode(b"", final=True))
         return offset
     try:
         with path.open("rb") as fh:
@@ -145,24 +156,29 @@ def _stream_log_delta(log_file: str | None, offset: int = 0) -> int:
     except OSError:
         return offset
     if data:
-        sys.stderr.write(data.decode("utf-8", errors="replace"))
+        if decoder is None:
+            text = data.decode(_build_output_encoding(), errors="replace")
+        else:
+            text = decoder.decode(data, final=final)
+        sys.stderr.write(text)
         sys.stderr.flush()
     return size
 
 
 def _wait_for_task_with_log_stream(task_id: str, timeout: int | None, log_file: str | None) -> dict | None:
     deadline = None if timeout is None else time.time() + timeout
+    decoder = codecs.getincrementaldecoder(_build_output_encoding())(errors="replace")
     offset = 0
     while True:
-        offset = _stream_log_delta(log_file, offset)
+        offset = _stream_log_delta(log_file, offset, decoder=decoder)
         task = load_task(task_id)
         if task is None:
             return None
         if task.get("status") in FINAL_TASK_STATUSES:
-            _stream_log_delta(log_file, offset)
+            _stream_log_delta(log_file, offset, decoder=decoder, final=True)
             return task
         if deadline is not None and time.time() >= deadline:
-            _stream_log_delta(log_file, offset)
+            _stream_log_delta(log_file, offset, decoder=decoder, final=True)
             return None
         time.sleep(0.5)
 

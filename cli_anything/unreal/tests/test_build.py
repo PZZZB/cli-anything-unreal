@@ -77,7 +77,7 @@ class TestBuildSuccessPaths:
              patch("cli_anything.unreal.core.build.run_uat", return_value={
                  "returncode": 0, "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
                  "duration_seconds": 12.3,
-             }):
+             }) as mock_run:
             result = compile_project(temp_project["uproject"])
             assert result["status"] == "ok"
             assert result["returncode"] == 0
@@ -86,6 +86,7 @@ class TestBuildSuccessPaths:
             # stdout/stderr must not leak back into the result
             assert "stdout" not in result
             assert "stderr" not in result
+            assert "-utf8output" not in mock_run.call_args.args[2]
 
     def test_compile_error_returncode(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
@@ -229,6 +230,26 @@ class TestBuildSuccessPaths:
         assert len(result["diagnostics"]) == 2
         assert "error C2065" in result["diagnostics"][0]
         assert "fatal error LNK1104" in result["diagnostics"][1]
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows compiler encoding behavior")
+    def test_compile_failure_decodes_localized_msvc_diagnostics(self, tmp_path):
+        from cli_anything.unreal.core.build import _normalize_result
+
+        log_file = tmp_path / "cli_compile.log"
+        diagnostic = (
+            "SDOC.cpp(717,4): error C2065: LogRenderer: "
+            "\u672a\u58f0\u660e\u7684\u6807\u8bc6\u7b26"
+        )
+        log_file.write_bytes((diagnostic + "\n").encode("mbcs"))
+
+        result = _normalize_result(
+            {"returncode": 6, "log_file": str(log_file)},
+            "Compile",
+        )
+
+        assert result["failure_kind"] == "compiler_diagnostics"
+        assert result["diagnostics"] == [diagnostic]
+        assert "\ufffd" not in result["diagnostics"][0]
 
     def test_compile_android_uses_build_bat_game_target(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
@@ -404,11 +425,12 @@ class TestBuildSuccessPaths:
              patch("cli_anything.unreal.core.build.run_uat", return_value={
                  "returncode": 0, "log_file": r"F:\Test\Saved\Logs\cli_cook.log",
                  "duration_seconds": 30.0,
-             }):
+             }) as mock_run:
             result = cook_content(temp_project["uproject"])
             assert result["status"] == "ok"
             assert result["returncode"] == 0
             assert result["log_file"].endswith("cli_cook.log")
+            assert "-utf8output" not in mock_run.call_args.args[2]
 
     def test_package_success(self, temp_project):
         from cli_anything.unreal.core.build import package_project
@@ -418,11 +440,12 @@ class TestBuildSuccessPaths:
              patch("cli_anything.unreal.core.build.run_uat", return_value={
                  "returncode": 0, "log_file": r"F:\Test\Saved\Logs\cli_package.log",
                  "duration_seconds": 60.0,
-             }):
+             }) as mock_run:
             result = package_project(temp_project["uproject"])
             assert result["status"] == "ok"
             assert "output_dir" in result
             assert result["log_file"].endswith("cli_package.log")
+            assert "-utf8output" not in mock_run.call_args.args[2]
 
     def test_package_targeted_android_uat_args(self, temp_project):
         """Targeted package options must reach BuildCookRun as argv."""
@@ -1893,8 +1916,8 @@ class TestBuildStopAndDetect:
         popen.assert_not_called()
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows console encoding behavior")
-    def test_run_subprocess_uses_hidden_utf8_console(self, tmp_path):
-        """Detached build workers must give MSVC a UTF-8 console code page."""
+    def test_run_subprocess_uses_hidden_native_console(self, tmp_path):
+        """Detached build workers must align UBT with native tool encoding."""
         from cli_anything.unreal.utils.ue_backend import _run_subprocess
 
         mock_proc = MagicMock(pid=1234, returncode=0)
@@ -1962,7 +1985,7 @@ class TestBuildStopAndDetect:
         assert json.loads(log_path.read_text(encoding="utf-8").strip()) == expected
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows console encoding behavior")
-    def test_run_subprocess_preserves_localized_linker_output_as_utf8(self, tmp_path):
+    def test_run_subprocess_preserves_localized_linker_output(self, tmp_path):
         """A CP936 parent must not corrupt localized MSVC-style child output."""
         import ctypes
 
@@ -1996,8 +2019,46 @@ class TestBuildStopAndDetect:
             kernel32.SetConsoleOutputCP(original_code_page)
 
         assert result["returncode"] == 0
-        assert log_path.read_text(encoding="utf-8") == (
+        assert log_path.read_text(encoding="mbcs") == (
             "\u6b63\u5728\u521b\u5efa\u5e93 Engine.lib \u548c\u5bf9\u8c61 Engine.exp\n"
+        )
+        assert b"\xef\xbf\xbd" not in log_path.read_bytes()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows console encoding behavior")
+    def test_run_subprocess_preserves_cp936_msvc_diagnostics_through_ubt(self, tmp_path):
+        """UBT and ue-cli must preserve localized MSVC bytes in native logs."""
+        from cli_anything.unreal.utils.ue_backend import _run_subprocess
+
+        compiler = tmp_path / "fake_compiler.py"
+        compiler.write_text(
+            "import os\n"
+            "line = 'SDOC.cpp(717,4): error C2065: LogRenderer: "
+            "\\u672a\\u58f0\\u660e\\u7684\\u6807\\u8bc6\\u7b26\\n'\n"
+            "os.write(1, line.encode('cp936'))\n",
+            encoding="ascii",
+        )
+        ubt = tmp_path / "fake_ubt.py"
+        ubt.write_text(
+            "import ctypes, os, subprocess, sys\n"
+            "proc = subprocess.run([sys.executable, sys.argv[1]], stdout=subprocess.PIPE)\n"
+            "cp = ctypes.windll.kernel32.GetConsoleOutputCP()\n"
+            "encoding = f'cp{cp}' if cp else 'mbcs'\n"
+            "text = proc.stdout.decode(encoding, errors='replace')\n"
+            "os.write(1, text.encode(encoding, errors='replace'))\n"
+            "raise SystemExit(proc.returncode)\n",
+            encoding="ascii",
+        )
+        log_path = tmp_path / "localized-msvc.log"
+
+        result = _run_subprocess(
+            [sys.executable, str(ubt), str(compiler)],
+            log_file=str(log_path),
+            heartbeat_seconds=0,
+        )
+
+        assert result["returncode"] == 0
+        assert log_path.read_text(encoding="mbcs") == (
+            "SDOC.cpp(717,4): error C2065: LogRenderer: \u672a\u58f0\u660e\u7684\u6807\u8bc6\u7b26\n"
         )
         assert b"\xef\xbf\xbd" not in log_path.read_bytes()
 
@@ -2276,6 +2337,33 @@ class TestBuildCLI:
 
         assert task["status"] == "completed"
         assert capsys.readouterr().err.replace("\r\n", "\n") == "first\nsecond\nthird\n"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows compiler encoding behavior")
+    def test_build_wait_streams_split_localized_bytes_without_replacement(self, tmp_path, capsys):
+        from cli_anything.unreal.commands.build import _wait_for_task_with_log_stream
+
+        first = "\u7b2c\u4e00\n".encode("mbcs")
+        second = "\u7b2c\u4e8c\n".encode("mbcs")
+        third = "\u7b2c\u4e09\n".encode("mbcs")
+        log_file = tmp_path / "compile.log"
+        log_file.write_bytes(first[:1])
+        calls = {"count": 0}
+
+        def fake_load_task(task_id):
+            calls["count"] += 1
+            with log_file.open("ab") as fh:
+                if calls["count"] == 1:
+                    fh.write(first[1:] + second)
+                else:
+                    fh.write(third)
+            status = "running" if calls["count"] == 1 else "completed"
+            return {"task_id": task_id, "command": "build.compile", "status": status}
+
+        with patch("cli_anything.unreal.commands.build.load_task", side_effect=fake_load_task):
+            task = _wait_for_task_with_log_stream("t-localized", timeout=5, log_file=str(log_file))
+
+        assert task["status"] == "completed"
+        assert capsys.readouterr().err.replace("\r\n", "\n") == "\u7b2c\u4e00\n\u7b2c\u4e8c\n\u7b2c\u4e09\n"
 
     def test_build_cook_has_no_wait_and_timeout(self, temp_project):
         """build cook now has --no-wait and --timeout options."""

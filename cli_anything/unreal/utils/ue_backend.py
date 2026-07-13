@@ -451,6 +451,10 @@ def _allocate_log_path(project_dir: str | None, label: str) -> str:
     return str(log_dir / filename)
 
 
+def _build_output_encoding() -> str:
+    return "mbcs" if sys.platform == "win32" else "utf-8"
+
+
 def _decode_process_output(data) -> str:
     if data is None:
         return ""
@@ -989,9 +993,9 @@ def _run_subprocess(
     launch_cmd: list[str] | str = cmd
     startupinfo = None
     if is_windows:
-        # Detached task workers have no console, so MSVC falls back to the
-        # system code page while UBT decodes action output as UTF-8. Give the
-        # build its own hidden console and align its code page before UAT runs.
+        # Redirected MSVC diagnostics use the system ANSI code page. Give
+        # detached workers a hidden console with the same encoding so UBT
+        # decodes native tool output without losing localized text.
         encoded_items = [
             base64.b64encode(str(item).encode("utf-8")).decode("ascii")
             for item in cmd
@@ -1013,7 +1017,10 @@ def _run_subprocess(
             "setlocal EnableDelayedExpansion\r\n"
             f"{safe_assignments}\r\n"
             "setlocal DisableDelayedExpansion\r\n"
-            "chcp 65001 >nul\r\n"
+            "set \"VSLANG=\"\r\n"
+            "set \"DOTNET_CLI_UI_LANGUAGE=\"\r\n"
+            "set \"DOTNET_CLI_FORCE_UTF8_ENCODING=\"\r\n"
+            "chcp %UE_CLI_NATIVE_CP% >nul\r\n"
             f"{argument_refs}\r\n"
         )
         encoded_wrapper = base64.b64encode(wrapper_content.encode("ascii")).decode("ascii")
@@ -1024,7 +1031,10 @@ def _run_subprocess(
             f"{item_expressions}\n"
             ")\n"
             "if ($items.Count -lt 1) { exit 87 }\n"
-            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
+            "$nativeEncoding = [Text.Encoding]::Default\n"
+            "[Console]::OutputEncoding = $nativeEncoding\n"
+            "[Environment]::SetEnvironmentVariable(\n"
+            "  'UE_CLI_NATIVE_CP', [string]$nativeEncoding.CodePage, 'Process')\n"
             "for ($index = 0; $index -lt $items.Count; $index++) {\n"
             "  [Environment]::SetEnvironmentVariable(\n"
             "    ('UE_CLI_ARG_' + $index), [string]$items[$index], 'Process')\n"
