@@ -1201,6 +1201,32 @@ def test_editor_launch_extra_args_propagate_to_payload(mini_project):
     assert captured["payload"]["extra_args"] == ["-vulkan", "-ResX=1280", "-ResY=720"]
 
 
+def test_editor_launch_normalizes_absolute_project_umap_to_package_path(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    map_file = Path(mini_project).parent / "Content" / "Maps" / "Oregon_Main.umap"
+    map_file.parent.mkdir(parents=True)
+    map_file.touch()
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["command"] = command
+        captured["payload"] = payload
+        return {"task_id": "task-map", "status": "submitted"}
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--map", str(map_file),
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["command"] == "editor.launch"
+    assert captured["payload"]["map_path"] == "/Game/Maps/Oregon_Main"
+
+
 def test_editor_launch_accepts_command_level_project(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

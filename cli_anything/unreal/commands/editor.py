@@ -1136,6 +1136,36 @@ def _build_launch_cmd(editor_exe, project_path, map_path, extra_args=None) -> li
     return cmd
 
 
+def _normalize_launch_map_path(map_path: str | None, project_dir: str) -> str | None:
+    if not map_path:
+        return None
+
+    raw_path = str(map_path).strip()
+    filesystem_path = Path(raw_path)
+    if not filesystem_path.is_absolute():
+        return raw_path
+
+    if filesystem_path.suffix.lower() != ".umap":
+        raise AppError(
+            "INVALID_MAP_PATH",
+            f"Absolute --map paths must name a .umap file: {raw_path}",
+            exit_code=2,
+            suggestion="Pass a /Game/... package path or an absolute .umap under the project Content directory.",
+        )
+
+    content_dir = (Path(project_dir) / "Content").resolve()
+    try:
+        relative_path = filesystem_path.resolve().relative_to(content_dir)
+    except ValueError:
+        raise AppError(
+            "MAP_OUTSIDE_PROJECT_CONTENT",
+            f"Absolute --map path is outside this project's Content directory: {raw_path}",
+            exit_code=2,
+            suggestion=f'Use a .umap under "{content_dir}" or pass its /Game/... package path.',
+        )
+    return "/Game/" + relative_path.with_suffix("").as_posix()
+
+
 _FATAL_LOG_PATTERNS = [
     "modules are missing or built with a different engine version",
     "Still incompatible or missing module:",
@@ -1475,6 +1505,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
 def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, extra_args):
     _load_command_project(state, project_path)
     require_project(state)
+    map_path = _normalize_launch_map_path(map_path, state.session.project_dir)
     foreground_timeout, worker_timeout = _launch_wait_timeouts(timeout)
     duplicate = _check_already_running(state.session, state)
     if duplicate is not None:
