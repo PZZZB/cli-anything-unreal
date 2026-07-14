@@ -1,9 +1,8 @@
 """core/screenshot.py — Screenshot capture and comparison.
 
 Requires a running UE editor with Remote Control API. Capture uses **one**
-implementation: on **Windows**, the CLI process grabs the main Unreal Editor
-window with GDI (``PrintWindow`` + ``GetDIBits``) and writes PNG via Pillow —
-no C++ plugin. Output path:
+implementation: the bridge redraws the active ``FSceneViewport``, reads its current
+pixels, and synchronously writes a fresh PNG. Output path:
   {ProjectDir}/Saved/Screenshots/WindowsEditor/{filename}.png
 
 Also provides CVar A/B testing, atlas layout, Pillow compare/compress — these
@@ -12,8 +11,8 @@ are orchestration around the same capture primitive.
 
 import math
 import os
-import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +20,13 @@ from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 # Default screenshot delay to allow viewport to render
 _DEFAULT_RENDER_DELAY = 1.0
+_MIN_CAPTURE_WINDOW_SIZE = (640, 360)
+_TEMP_CAPTURE_WINDOW_SIZE = (1280, 720)
+
+
+def _looks_like_timeout(value: object) -> bool:
+    text = str(value or "").lower()
+    return "timeout" in text or "timed out" in text
 
 
 def _filename_as_png(filename: str) -> str:
@@ -130,26 +136,30 @@ def _refresh_editor_viewports(api: UEEditorAPI, timeout: float = 3.0) -> dict:
     return steps
 
 
-def _get_active_viewport_rect(api: UEEditorAPI, timeout: float | None) -> tuple[int, int, int, int] | None:
-    bounds_script = (
-        "import unreal\n"
-        "try:\n"
-        "    bounds = unreal.CliAnythingBridgeLibrary.get_active_viewport_screen_bounds()\n"
-        "    unreal.log(f'VIEWPORT_BOUNDS:{bounds.x},{bounds.y},{bounds.z},{bounds.w}')\n"
-        "except Exception:\n"
-        "    pass"
-    )
-    bounds_res = api.exec_python_ex(bounds_script, timeout=timeout)
-    for log_item in bounds_res.get("LogOutput", []):
-        line = log_item.get("Output", "")
-        if line.startswith("VIEWPORT_BOUNDS:"):
-            parts = line.split(":", 1)[1].split(",")
-            try:
-                x, y, w, h = map(int, parts)
-                if w > 0 and h > 0:
-                    return (x, y, x + w, y + h)
-            except ValueError:
-                pass
+def _expand_tiny_editor_window(api: UEEditorAPI) -> tuple[int, int, int, int] | None:
+    """Temporarily make a zero-layout editor window large enough to render a viewport."""
+    try:
+        rect = api.get_window_rect()
+        if not isinstance(rect, (tuple, list)) or len(rect) != 4:
+            return None
+        left, top, right, bottom = (int(value) for value in rect)
+        width = right - left
+        height = bottom - top
+        if left <= -30000 or top <= -30000 or width <= 0 or height <= 0:
+            return None
+        min_width, min_height = _MIN_CAPTURE_WINDOW_SIZE
+        if width >= min_width and height >= min_height:
+            return None
+        capture_width, capture_height = _TEMP_CAPTURE_WINDOW_SIZE
+        if api.set_window_rect(
+            left,
+            top,
+            left + capture_width,
+            top + capture_height,
+        ):
+            return (left, top, right, bottom)
+    except Exception:
+        pass
     return None
 
 
@@ -164,30 +174,12 @@ def _capture_viewport_png_raw(
     refresh: bool = True,
     foreground: bool = True,
     rc_timeout: float | None = None,
-    viewport_rect: tuple[int, int, int, int] | None = None,
-    use_viewport_bounds: bool = True,
     output_path: str | None = None,
 ) -> dict:
-    """Capture the main editor window to PNG from the CLI host (Windows GDI + Pillow).
-
-    ``res_x`` / ``res_y`` are reserved for API compatibility; capture uses the
-    current editor window size.
-    """
-    if sys.platform != "win32":
-        return {
-            "status": "error",
-            "message": "Editor window capture is only implemented on Windows (CLI host).",
-            "failure_stage": "platform",
-            "foreground_ok": False,
-            "refresh": {},
-        }
-
+    """Redraw and synchronously capture the active Level Viewport through the bridge."""
     capture_timeout = max(float(wait_timeout), 0.1)
     remote_timeout = min(capture_timeout, max(float(rc_timeout or 3.0), 0.1))
     foreground_ok = api.bring_to_foreground() if foreground else False
-    refresh_result = _refresh_editor_viewports(api, timeout=remote_timeout) if refresh else {}
-
-    time.sleep(delay)
 
     if output_path:
         requested_path = Path(output_path).expanduser()
@@ -208,56 +200,135 @@ def _capture_viewport_png_raw(
         save_path = save_dir / f"{filename}.png"
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    hwnd = api.find_editor_window_hwnd()
-    if not hwnd:
-        return {
-            "status": "error",
-            "message": "Could not find Unreal Editor window handle (is the editor running?).",
-            "failure_stage": "host_window_resolution",
-            "foreground_ok": foreground_ok,
-            "refresh": refresh_result,
-        }
-
-    viewport_bounds_error = None
-    if use_viewport_bounds and viewport_rect is None:
-        try:
-            viewport_rect = _get_active_viewport_rect(api, timeout=remote_timeout)
-        except Exception as exc:
-            viewport_bounds_error = str(exc)
-
-    from cli_anything.unreal.core.win32_editor_capture import capture_hwnd_to_png_bounded
-
-    capture_result = capture_hwnd_to_png_bounded(
-        hwnd,
-        save_path,
-        crop_rect=viewport_rect,
-        timeout=capture_timeout,
+    temp_path = save_path.with_name(
+        f".{save_path.stem}.ue-cli-{uuid.uuid4().hex}.png"
+    ).resolve()
+    script = (
+        "import unreal\n"
+        f"_ok = unreal.CliAnythingBridgeLibrary.take_active_viewport_screenshot({temp_path.as_posix()!r})\n"
+        "if not _ok:\n"
+        '    raise RuntimeError("active viewport screenshot failed")\n'
+        'unreal.log("UECLI_SCREENSHOT_RESULT:ok")'
     )
-    if not capture_result.get("ok"):
-        result = {
-            "status": "error",
-            "message": capture_result.get("error", "GDI capture failed."),
-            "failure_stage": "capture_backend",
-            "timed_out": bool(capture_result.get("timed_out")),
-            "timeout_seconds": capture_timeout,
-            "foreground_ok": foreground_ok,
-            "refresh": refresh_result,
-        }
-        if viewport_bounds_error:
-            result["viewport_bounds_error"] = viewport_bounds_error
-        return result
+    window_restore_rect = _expand_tiny_editor_window(api)
+    window_restore_ok: bool | None = None
+    refresh_result: dict = {}
+    response: dict | None = None
+    try:
+        refresh_result = (
+            _refresh_editor_viewports(api, timeout=remote_timeout) if refresh else {}
+        )
+        time.sleep(delay)
+
+        try:
+            capture_result = api.exec_python_ex(script, timeout=capture_timeout)
+        except Exception as exc:
+            timed_out = isinstance(exc, TimeoutError) or _looks_like_timeout(exc)
+            response = {
+                "status": "error",
+                "message": f"Could not request an active viewport screenshot: {exc}",
+                "failure_stage": "capture_request",
+                "timed_out": timed_out,
+                **({"timeout_seconds": capture_timeout} if timed_out else {}),
+                "foreground_ok": foreground_ok,
+                "refresh": refresh_result,
+            }
+            return response
+
+        capture_error = ""
+        failure_stage = "capture_backend"
+        if isinstance(capture_result, dict):
+            capture_error = str(capture_result.get("error") or "")
+            if capture_error:
+                failure_stage = "capture_request"
+            elif capture_result.get("ReturnValue") is False:
+                capture_error = str(
+                    capture_result.get("CommandResult")
+                    or "The screenshot bridge command failed."
+                )
+            else:
+                for item in capture_result.get("LogOutput", []):
+                    output = str(item.get("Output", ""))
+                    if "UECLI_SCREENSHOT_RESULT:failed" in output:
+                        capture_error = "The active viewport could not be redrawn or read."
+                        break
+
+        if capture_error:
+            timed_out = failure_stage == "capture_request" and _looks_like_timeout(
+                capture_error
+            )
+            suggestion = None
+            if (
+                "take_active_viewport_screenshot" in capture_error.lower()
+                or "attribute" in capture_error.lower()
+            ):
+                suggestion = (
+                    "Run editor plugin-upgrade for this project, restart the editor, "
+                    "then retry screenshot capture."
+                )
+            response = {
+                "status": "error",
+                "message": capture_error,
+                "failure_stage": failure_stage,
+                "timed_out": timed_out,
+                **({"timeout_seconds": capture_timeout} if timed_out else {}),
+                "foreground_ok": foreground_ok,
+                "refresh": refresh_result,
+                **({"suggestion": suggestion} if suggestion else {}),
+            }
+            return response
+
+        if not (temp_path.is_file() and temp_path.stat().st_size > 0):
+            response = {
+                "status": "error",
+                "message": "The bridge did not produce an active viewport screenshot.",
+                "failure_stage": "capture_backend",
+                "timed_out": False,
+                "foreground_ok": foreground_ok,
+                "refresh": refresh_result,
+            }
+            return response
+
+        os.replace(temp_path, save_path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if window_restore_rect is not None:
+            try:
+                window_restore_ok = bool(api.set_window_rect(*window_restore_rect))
+                if window_restore_ok:
+                    restored_rect = api.get_window_rect()
+                    window_restore_ok = (
+                        isinstance(restored_rect, (tuple, list))
+                        and tuple(int(value) for value in restored_rect)
+                        == window_restore_rect
+                    )
+            except Exception:
+                window_restore_ok = False
+            if response is not None:
+                response["window_restore_ok"] = window_restore_ok
+                if not window_restore_ok:
+                    response["warning"] = (
+                        "Screenshot capture also failed to restore the editor window size."
+                    )
 
     size = save_path.stat().st_size
     result = {
         "status": "ok",
         "path_raw": str(save_path),
         "size_raw": size,
-        "capture_mode": "win32_gdi_cli",
+        "capture_mode": "bridge_active_viewport",
         "foreground_ok": foreground_ok,
         "refresh": refresh_result,
     }
-    if viewport_bounds_error:
-        result["viewport_bounds_error"] = viewport_bounds_error
+    if window_restore_rect is not None:
+        result["window_restore_ok"] = window_restore_ok
+        if not window_restore_ok:
+            result["warning"] = (
+                "Screenshot succeeded, but the editor window size could not be restored."
+            )
     return result
 
 
@@ -271,15 +342,15 @@ def take_screenshot(
     delay: float = _DEFAULT_RENDER_DELAY,
     output_path: str | None = None,
 ) -> dict:
-    """Capture the main Unreal Editor window to PNG (then optional JPEG for agents).
+    """Capture the active Level Viewport to PNG (then optional JPEG for agents).
 
     Args:
         api: Connected UEEditorAPI instance.
         filename: Output filename (without extension).
         project_dir: Project directory (for finding saved screenshots).
-        wait_timeout: Maximum seconds allowed for the blocking GDI capture helper.
-        res_x: Unused; capture uses the live editor window size.
-        res_y: Unused; capture uses the live editor window size.
+        wait_timeout: Maximum seconds allowed for active viewport capture.
+        res_x: Reserved for API compatibility; capture uses the live viewport width.
+        res_y: Reserved for API compatibility; capture uses the live viewport height.
         delay: Seconds for viewport to render before capture.
         output_path: Optional full path for the requested PNG/JPG output.
 
@@ -307,6 +378,10 @@ def take_screenshot(
             "capture_mode": raw["capture_mode"],
             "refresh": raw["refresh"],
         }
+        if "window_restore_ok" in raw:
+            response["window_restore_ok"] = raw["window_restore_ok"]
+        if raw.get("warning"):
+            response["warning"] = raw["warning"]
         if requested_path:
             response["requested_path"] = str(requested_path)
         if compressed:
@@ -456,9 +531,9 @@ def capture_screenshot_atlas(
         filename_prefix: Stem for per-frame files ( …_000, …_001 ).
         output_atlas: Output .png path; default under project's Screenshots/WindowsEditor.
         project_dir: UE project directory (for finding/writing screenshots).
-        res_x, res_y: Unused (compatibility); native capture uses editor window size.
+        res_x, res_y: Reserved for compatibility; capture uses live viewport resolution.
         delay: Seconds to wait for rendering before each capture.
-        wait_timeout: Unused (synchronous capture); kept for API compatibility.
+        wait_timeout: Maximum wait for each active viewport capture.
         padding, label_frames: Passed to ``combine_images_to_atlas``.
         jpeg_for_llm: Also write a downscaled JPEG next to the atlas.
         max_atlas_edge: Max dimension for JPEG downsampling.
@@ -488,10 +563,8 @@ def capture_screenshot_atlas(
     prep_refresh: dict = {}
 
     try:
-        # Dynamic / multi-frame: keep realtime on but avoid repeated refresh calls
-        # and repeated viewport-bound queries, which can each wait on Remote Control.
+        # Dynamic / multi-frame: keep realtime on but avoid repeated refresh calls.
         prep_refresh = {"realtime": _ensure_editor_viewport_realtime(api, timeout=min(wait_timeout, 1.0))}
-        viewport_rect = _get_active_viewport_rect(api, timeout=min(wait_timeout, 1.0))
 
         for i in range(frame_count):
             fname = f"{filename_prefix}_{i:03d}"
@@ -506,8 +579,6 @@ def capture_screenshot_atlas(
                 refresh=False,
                 foreground=False,
                 rc_timeout=wait_timeout,
-                viewport_rect=viewport_rect,
-                use_viewport_bounds=False,
             )
             frame_results.append({"index": i, **shot})
             pr = shot.get("path_raw")

@@ -15,9 +15,13 @@
 #include "Modules/ModuleManager.h"
 #include "Framework/Application/SlateApplication.h"
 #include "HAL/CriticalSection.h"
+#include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
+#include "ImageUtils.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "RenderingThread.h"
+#include "Slate/SceneViewport.h"
 
 #include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
@@ -260,6 +264,90 @@ FIntVector4 UCliAnythingBridgeLibrary::GetActiveViewportScreenBounds()
 	return Bounds;
 }
 
+bool UCliAnythingBridgeLibrary::TakeActiveViewportScreenshot(const FString& OutputPath)
+{
+	if (OutputPath.IsEmpty() || !FModuleManager::Get().IsModuleLoaded("LevelEditor"))
+	{
+		return false;
+	}
+
+	FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>("LevelEditor");
+	TSharedPtr<ILevelEditor> ActiveLevelEditor = LevelEditorModule.GetFirstLevelEditor();
+	if (!ActiveLevelEditor.IsValid())
+	{
+		return false;
+	}
+
+	TSharedPtr<SLevelViewport> ActiveViewport = ActiveLevelEditor->GetActiveViewportInterface();
+	if (!ActiveViewport.IsValid())
+	{
+		for (const TSharedPtr<SLevelViewport>& Viewport : ActiveLevelEditor->GetViewports())
+		{
+			if (Viewport.IsValid() && Viewport->GetSharedActiveViewport().IsValid())
+			{
+				ActiveViewport = Viewport;
+				break;
+			}
+		}
+		if (!ActiveViewport.IsValid())
+		{
+			return false;
+		}
+	}
+
+	TSharedPtr<FSceneViewport> SceneViewport = ActiveViewport->GetSharedActiveViewport();
+	if (!SceneViewport.IsValid())
+	{
+		return false;
+	}
+
+	SceneViewport->Draw();
+	FlushRenderingCommands();
+
+	const FIntPoint Size = SceneViewport->GetRenderTargetTextureSizeXY();
+	if (Size.X <= 0 || Size.Y <= 0)
+	{
+		return false;
+	}
+	const FIntRect CaptureRect(0, 0, Size.X, Size.Y);
+	TArray<FColor> Pixels;
+	Pixels.SetNum(CaptureRect.Area());
+	if (!SceneViewport->ReadPixels(
+		Pixels,
+		FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX),
+		CaptureRect))
+	{
+		return false;
+	}
+	const int64 PixelCount = static_cast<int64>(Size.X) * Size.Y;
+	if (Pixels.Num() != PixelCount)
+	{
+		return false;
+	}
+	for (int64 Index = 0; Index < PixelCount; ++Index)
+	{
+		Pixels[Index].A = 255;
+	}
+
+	TArray64<uint8> CompressedPng;
+	FImageUtils::PNGCompressImageArray(
+		Size.X,
+		Size.Y,
+		TArrayView64<const FColor>(Pixels.GetData(), PixelCount),
+		CompressedPng);
+	if (CompressedPng.IsEmpty())
+	{
+		return false;
+	}
+
+	const FString Directory = FPaths::GetPath(OutputPath);
+	if (!Directory.IsEmpty() && !IFileManager::Get().MakeDirectory(*Directory, true))
+	{
+		return false;
+	}
+	return FFileHelper::SaveArrayToFile(CompressedPng, *OutputPath);
+}
+
 extern TArray<FString> GCapturedEngineErrors;
 extern FCriticalSection GCapturedEngineErrorsMutex;
 
@@ -277,7 +365,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.18");
+	return TEXT("1.19");
 }
 
 FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)

@@ -772,12 +772,17 @@ except Exception as _e:
             if not hwnd:
                 return False
             # SWP_NOZORDER=0x0004, SWP_NOACTIVATE=0x0010
-            user32.SetWindowPos(
-                ctypes.wintypes.HWND(hwnd), 0,
-                left, top, right - left, bottom - top,
-                0x0004 | 0x0010,
+            return bool(
+                user32.SetWindowPos(
+                    ctypes.wintypes.HWND(hwnd),
+                    0,
+                    left,
+                    top,
+                    right - left,
+                    bottom - top,
+                    0x0004 | 0x0010,
+                )
             )
-            return True
         except Exception:
             return False
 

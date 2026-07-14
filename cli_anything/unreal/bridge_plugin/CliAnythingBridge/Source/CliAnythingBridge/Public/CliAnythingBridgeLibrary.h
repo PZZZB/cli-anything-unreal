@@ -44,6 +44,13 @@ public:
 	static FIntVector4 GetActiveViewportScreenBounds();
 
 	/**
+	 * Redraws the active Level Viewport and synchronously writes a PNG.
+	 * Unlike HighResShot, this targets one viewport and preserves its live state.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static bool TakeActiveViewportScreenshot(const FString& OutputPath);
+
+	/**
 	 * Gets recent engine error and warning logs.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")

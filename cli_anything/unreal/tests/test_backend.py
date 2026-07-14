@@ -722,6 +722,14 @@ class TestHTTPAPI:
         assert "SetWindowPos" not in source
         assert "MonitorFromWindow" not in source
 
+    def test_set_window_rect_returns_win32_result(self):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        source = inspect.getsource(UEEditorAPI.set_window_rect)
+
+        assert "return bool(" in source
+        assert "user32.SetWindowPos(" in source
+
     def test_select_editor_window_prefers_main_unreal_editor_title(self):
         from cli_anything.unreal.utils.ue_http_api import _select_editor_window_hwnd
 

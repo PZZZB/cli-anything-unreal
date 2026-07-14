@@ -192,7 +192,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.18"
+        assert version == "1.19"
 
     def test_bridge_declares_umg_helpers(self):
         """UMG authoring helpers live in the bridge because WidgetTree fields are protected."""
@@ -269,6 +269,29 @@ class TestPluginBridge:
         assert "GetTextureSourceInfo" in header
         assert "GetTextureSourceInfo" in cpp
         assert "LockMipReadOnly" in cpp
+
+    def test_bridge_declares_active_viewport_screenshot_helper(self):
+        """Viewport capture must redraw and read only the active FSceneViewport."""
+        root = Path(__file__).parent.parent / "bridge_plugin" / "CliAnythingBridge"
+        header = (
+            root
+            / "Source"
+            / "CliAnythingBridge"
+            / "Public"
+            / "CliAnythingBridgeLibrary.h"
+        ).read_text(encoding="utf-8")
+        cpp = (
+            root
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+
+        assert "TakeActiveViewportScreenshot" in header
+        assert "GetViewports()" in cpp
+        assert "SceneViewport->Draw()" in cpp
+        assert "SceneViewport->ReadPixels" in cpp
 
     def test_bridge_declares_umg_image_helper(self):
         """WidgetBlueprint Image slot/brush editing needs bridge access to WidgetTree."""
