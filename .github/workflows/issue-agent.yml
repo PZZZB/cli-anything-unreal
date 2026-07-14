@@ -34,6 +34,7 @@ jobs:
         run: python -m pip install -e ".[dev]"
 
       - name: Build untrusted Issue prompt
+        id: prepare_prompt
         uses: actions/github-script@v7
         with:
           script: |
@@ -93,9 +94,25 @@ jobs:
         if: ${{ always() }}
         run: rm -f .codex-issue-prompt.md
 
+      - name: Evaluate fixed outcome
+        id: decision
+        if: ${{ always() }}
+        uses: actions/github-script@v7
+        env:
+          CODEX_OUTCOME: ${{ steps.codex.outcome }}
+          CODEX_FINAL_MESSAGE: ${{ steps.codex.outputs.final-message }}
+        with:
+          script: |
+            const rawFinalMessage = process.env.CODEX_FINAL_MESSAGE ?? "";
+            const firstLine = rawFinalMessage.split(/\r?\n/, 1)[0];
+            const isFixed =
+              process.env.CODEX_OUTCOME === "success" &&
+              firstLine === "Outcome: fixed";
+            core.setOutput("is-fixed", isFixed ? "true" : "false");
+
       - name: Commit and push verified repair
         id: publish
-        if: steps.codex.outcome == 'success'
+        if: ${{ steps.decision.outputs.is-fixed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
@@ -105,34 +122,68 @@ jobs:
             exit 0
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
             exit 0
           fi
 
-          git commit -m "fix: address Issue #${ISSUE_NUMBER}"
           gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: address Issue #${ISSUE_NUMBER}"
           git push origin HEAD:main
           echo "pushed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Publish agent final message
+      - name: Publish workflow result
         if: ${{ always() }}
         uses: actions/github-script@v7
         env:
           CODEX_FINAL_MESSAGE: ${{ steps.codex.outputs.final-message }}
+          PROMPT_OUTCOME: ${{ steps.prepare_prompt.outcome }}
+          CODEX_OUTCOME: ${{ steps.codex.outcome }}
+          IS_FIXED: ${{ steps.decision.outputs.is-fixed }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          PUSHED: ${{ steps.publish.outputs.pushed }}
         with:
           script: |
+            const promptOutcome = process.env.PROMPT_OUTCOME;
+            const codexOutcome = process.env.CODEX_OUTCOME;
+            const isFixed = process.env.IS_FIXED;
+            const publishOutcome = process.env.PUBLISH_OUTCOME;
+            const pushed = process.env.PUSHED;
+            let workflowStatus;
+            if (promptOutcome !== "success" || codexOutcome !== "success") {
+              workflowStatus =
+                "Workflow status: Prompt preparation or Codex execution failed; no changes were published.";
+            } else if (isFixed !== "true") {
+              workflowStatus =
+                "Workflow status: Codex did not return an accepted fixed outcome; no changes were published.";
+            } else if (publishOutcome !== "success") {
+              workflowStatus =
+                "Workflow status: Publishing the reported fix failed; the Issue remains open.";
+            } else if (pushed === "true") {
+              workflowStatus =
+                "Workflow status: The fix was committed and pushed to main.";
+            } else {
+              workflowStatus =
+                "Workflow status: Codex reported a fix, but no repository diff remained; nothing was published.";
+            }
+            const rawFinalMessage = process.env.CODEX_FINAL_MESSAGE ?? "";
+            const finalMessage =
+              rawFinalMessage.trim().length > 0
+                ? rawFinalMessage
+                : "Codex final message unavailable.";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${workflowStatus}\n\n${finalMessage}\n\nWorkflow run: ${runUrl}`;
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.issue.number,
-              body: process.env.CODEX_FINAL_MESSAGE,
+              body,
             });
 
       - name: Close pushed fix
-        if: steps.publish.outputs.pushed == 'true'
+        if: ${{ always() && steps.publish.outputs.pushed == 'true' }}
         uses: actions/github-script@v7
         with:
           script: |

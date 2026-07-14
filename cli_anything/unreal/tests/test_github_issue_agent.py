@@ -192,26 +192,69 @@ def test_issue_worker_only_pushes_verified_agent_diffs_after_removing_prompt():
     assert document.index("Remove temporary prompt") < document.index("Commit and push verified repair")
     assert "if: ${{ always() }}" in remove_prompt
     assert "rm -f .codex-issue-prompt.md" in remove_prompt
-    assert "if: steps.codex.outcome == 'success'" in publish
+    assert "if: ${{ steps.decision.outputs.is-fixed == 'true' }}" in publish
     assert "git diff --quiet" in publish
     assert "git add -A" in publish
     assert "git diff --cached --quiet" in publish
     assert "git commit" in publish
     assert "gh auth setup-git" in publish
+    assert publish.index("gh auth setup-git") < publish.index("git commit")
     assert publish.index("gh auth setup-git") < publish.index("git push origin HEAD:main")
     assert "--force" not in publish
     assert "pushed=true" in publish
 
 
-def test_issue_worker_always_comments_verbatim_and_only_closes_a_pushed_fix():
+def test_issue_worker_only_accepts_exact_fixed_first_line_from_successful_codex():
     document = _workflow_document()
-    comment = _workflow_step(document, "Publish agent final message")
+    decision = _workflow_step(document, "Evaluate fixed outcome")
+    publish = _workflow_step(document, "Commit and push verified repair")
+
+    assert "if: ${{ always() }}" in decision
+    assert "CODEX_OUTCOME: ${{ steps.codex.outcome }}" in decision
+    assert "CODEX_FINAL_MESSAGE: ${{ steps.codex.outputs.final-message }}" in decision
+    assert re.search(r"split\(/\\r\?\\n/, 1\)\[0\]", decision)
+    assert 'process.env.CODEX_OUTCOME === "success"' in decision
+    assert 'firstLine === "Outcome: fixed"' in decision
+    assert 'core.setOutput("is-fixed", isFixed ? "true" : "false")' in decision
+    assert "if: ${{ steps.decision.outputs.is-fixed == 'true' }}" in publish
+    assert "steps.codex.outcome == 'success'" not in publish
+
+
+def test_issue_worker_always_comments_nonempty_status_message_and_run_url():
+    document = _workflow_document()
+    prepare = _workflow_step(document, "Build untrusted Issue prompt")
+    comment = _workflow_step(document, "Publish workflow result")
     close = _workflow_step(document, "Close pushed fix")
 
+    assert "id: prepare_prompt" in prepare
     assert "if: ${{ always() }}" in comment
     assert "CODEX_FINAL_MESSAGE: ${{ steps.codex.outputs.final-message }}" in comment
-    assert "body: process.env.CODEX_FINAL_MESSAGE" in comment
-    assert "if: steps.publish.outputs.pushed == 'true'" in close
+    assert "PROMPT_OUTCOME: ${{ steps.prepare_prompt.outcome }}" in comment
+    assert "CODEX_OUTCOME: ${{ steps.codex.outcome }}" in comment
+    assert "IS_FIXED: ${{ steps.decision.outputs.is-fixed }}" in comment
+    assert "PUBLISH_OUTCOME: ${{ steps.publish.outcome }}" in comment
+    assert "PUSHED: ${{ steps.publish.outputs.pushed }}" in comment
+    assert 'promptOutcome !== "success" || codexOutcome !== "success"' in comment
+    assert 'isFixed !== "true"' in comment
+    assert 'publishOutcome !== "success"' in comment
+    assert 'pushed === "true"' in comment
+    for status in (
+        "Prompt preparation or Codex execution failed",
+        "Codex did not return an accepted fixed outcome",
+        "Publishing the reported fix failed",
+        "The fix was committed and pushed to main",
+        "no repository diff remained",
+    ):
+        assert status in comment
+    assert "rawFinalMessage.trim().length > 0" in comment
+    assert "Codex final message unavailable." in comment
+    assert "context.serverUrl" in comment
+    assert "context.repo.owner" in comment
+    assert "context.repo.repo" in comment
+    assert "context.runId" in comment
+    assert "Workflow run: ${runUrl}" in comment
+    assert "body," in comment
+    assert "if: ${{ always() && steps.publish.outputs.pushed == 'true' }}" in close
     assert "github.rest.issues.update" in close
     assert "state: \"closed\"" in close
     assert not re.search(r"(?i)\blabels?\b", document)
