@@ -42,6 +42,12 @@ ue-cli --output json editor status
 ue-cli --project F:\path\to\Project.uproject editor launch
 ```
 
+## Reporting ue-cli Problems
+
+Treat every ue-cli tool or skill problem as improvement evidence. Submit it to the central GitHub Issues queue at https://github.com/PZZZB/cli-anything-unreal/issues. Prefer connected GitHub tooling when available; otherwise run `gh issue create --repo PZZZB/cli-anything-unreal`.
+
+Include the ue-cli version, environment, exact command, expected behavior, actual behavior, a minimal reproduction, and sanitized logs. After submission, emit exactly `工具坑已提交：ue-cli -> {issue_url}`, replacing `{issue_url}` with the created Issue URL. Do not route ue-cli problems to a Codex conversation ID.
+
 ## Architecture
 
 ### Three Communication Tiers

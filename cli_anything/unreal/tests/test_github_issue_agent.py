@@ -10,6 +10,8 @@ BUG_REPORT = ISSUE_TEMPLATE_DIR / "bug-report.yml"
 TEMPLATE_CONFIG = ISSUE_TEMPLATE_DIR / "config.yml"
 AGENT_PROMPT = ROOT / ".github" / "codex" / "prompts" / "issue-agent.md"
 ISSUE_WORKFLOW = ROOT / ".github" / "workflows" / "issue-agent.yml"
+REPOSITORY_AGENTS = ROOT / "AGENTS.md"
+PACKAGED_SKILL = ROOT / "cli_anything" / "unreal" / "skills" / "SKILL.md"
 
 UNTRUSTED_ISSUE_BEGIN = "<<<UNTRUSTED_ISSUE_JSON_BEGIN>>>"
 UNTRUSTED_ISSUE_END = "<<<UNTRUSTED_ISSUE_JSON_END>>>"
@@ -22,6 +24,11 @@ REQUIRED_REPORT_FIELDS = {
     "actual",
     "reproduction",
 }
+
+REPORTING_GUIDES = (REPOSITORY_AGENTS, PACKAGED_SKILL)
+ISSUE_QUEUE_URL = "https://github.com/PZZZB/cli-anything-unreal/issues"
+GH_ISSUE_COMMAND = "gh issue create --repo PZZZB/cli-anything-unreal"
+SUBMISSION_MARKER = "工具坑已提交：ue-cli -> {issue_url}"
 
 
 def _form_items(document: str) -> dict[str, str]:
@@ -46,6 +53,30 @@ def _workflow_step(document: str, name: str) -> str:
     )
     assert match, f"workflow step {name!r} must exist"
     return match.group(0)
+
+
+def test_repository_and_packaged_guides_route_ue_cli_problems_to_github_issues():
+    for guide in REPORTING_GUIDES:
+        document = guide.read_text(encoding="utf-8")
+
+        assert ISSUE_QUEUE_URL in document, guide
+        assert "connected GitHub" in document, guide
+        assert GH_ISSUE_COMMAND in document, guide
+        for evidence in (
+            "version",
+            "environment",
+            "exact command",
+            "expected",
+            "actual",
+            "minimal reproduction",
+            "sanitized logs",
+        ):
+            assert evidence in document.lower(), f"{guide}: missing {evidence}"
+        assert SUBMISSION_MARKER in document, guide
+        assert re.search(
+            r"(?is)(?:do not|never|must not).*ue-cli.*Codex conversation ID",
+            document,
+        ), guide
 
 
 def test_bug_report_collects_required_agent_evidence_without_labels():
