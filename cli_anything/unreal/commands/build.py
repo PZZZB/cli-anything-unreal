@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import re
 import sys
 import time
 from pathlib import Path
@@ -138,11 +139,64 @@ def _guard_compile_against_editor_locks(state: AppState, platform: str) -> None:
     )
 
 
+_MSVC_COMMAND_LINE_WARNING_PATTERN = re.compile(
+    r"^\s*(?:.*[\\/])?cl(?:\.exe)?\s*:\s*.*?\b"
+    r"(?P<warning>warning\s+D\d{4}\b)",
+    re.IGNORECASE,
+)
+
+
+class _MSVCWarningFolder:
+    """Fold repeated MSVC command-line warnings in the live stream only."""
+
+    def __init__(self, log_file: str | None):
+        self.log_file = log_file or ""
+        self.pending = ""
+        self.seen: set[str] = set()
+        self.suppressed = 0
+
+    def reset(self) -> None:
+        self.pending = ""
+        self.seen.clear()
+        self.suppressed = 0
+
+    def _render_line(self, line: str) -> str:
+        match = _MSVC_COMMAND_LINE_WARNING_PATTERN.search(line)
+        if match is None:
+            return line
+        key = " ".join(line[match.start("warning"):].split()).casefold()
+        if key in self.seen:
+            self.suppressed += 1
+            return ""
+        self.seen.add(key)
+        return line
+
+    def feed(self, text: str, *, final: bool = False) -> str:
+        lines = (self.pending + text).splitlines(keepends=True)
+        self.pending = ""
+        if not final and lines and not lines[-1].endswith("\n"):
+            self.pending = lines.pop()
+
+        rendered = "".join(self._render_line(line) for line in lines)
+        if final and self.pending:
+            rendered += self._render_line(self.pending)
+            self.pending = ""
+        if final and self.suppressed:
+            if rendered and not rendered.endswith(("\r", "\n")):
+                rendered += "\n"
+            rendered += (
+                f"[ue-cli] folded {self.suppressed} repeated MSVC command-line warning lines; "
+                f"full log: {self.log_file}\n"
+            )
+        return rendered
+
+
 def _stream_log_delta(
     log_file: str | None,
     offset: int = 0,
     *,
     decoder=None,
+    warning_folder: _MSVCWarningFolder | None = None,
     final: bool = False,
 ) -> int:
     if not log_file:
@@ -156,9 +210,14 @@ def _stream_log_delta(
         offset = 0
         if decoder is not None:
             decoder.reset()
+        if warning_folder is not None:
+            warning_folder.reset()
     if size <= offset:
         if final and decoder is not None:
-            sys.stderr.write(decoder.decode(b"", final=True))
+            text = decoder.decode(b"", final=True)
+            if warning_folder is not None:
+                text = warning_folder.feed(text, final=True)
+            sys.stderr.write(text)
         return offset
     try:
         with path.open("rb") as fh:
@@ -171,6 +230,8 @@ def _stream_log_delta(
             text = data.decode(_build_output_encoding(), errors="replace")
         else:
             text = decoder.decode(data, final=final)
+        if warning_folder is not None:
+            text = warning_folder.feed(text, final=final)
         sys.stderr.write(text)
         sys.stderr.flush()
     return size
@@ -179,19 +240,32 @@ def _stream_log_delta(
 def _wait_for_task_with_log_stream(task_id: str, timeout: int | None, log_file: str | None) -> dict | None:
     deadline = None if timeout is None else time.time() + timeout
     decoder = codecs.getincrementaldecoder(_build_output_encoding())(errors="replace")
+    warning_folder = _MSVCWarningFolder(log_file)
     offset = 0
-    while True:
-        offset = _stream_log_delta(log_file, offset, decoder=decoder)
-        task = load_task(task_id)
-        if task is None:
-            return None
-        if task.get("status") in FINAL_TASK_STATUSES:
-            _stream_log_delta(log_file, offset, decoder=decoder, final=True)
-            return task
-        if deadline is not None and time.time() >= deadline:
-            _stream_log_delta(log_file, offset, decoder=decoder, final=True)
-            return None
-        time.sleep(0.5)
+    try:
+        while True:
+            offset = _stream_log_delta(
+                log_file,
+                offset,
+                decoder=decoder,
+                warning_folder=warning_folder,
+            )
+            task = load_task(task_id)
+            if task is None:
+                return None
+            if task.get("status") in FINAL_TASK_STATUSES:
+                return task
+            if deadline is not None and time.time() >= deadline:
+                return None
+            time.sleep(0.5)
+    finally:
+        _stream_log_delta(
+            log_file,
+            offset,
+            decoder=decoder,
+            warning_folder=warning_folder,
+            final=True,
+        )
 
 
 def _run_task(command: str, payload: dict, *, timeout: int | None, no_wait: bool, timeout_code: str):

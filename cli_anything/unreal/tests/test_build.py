@@ -2479,6 +2479,74 @@ class TestBuildCLI:
         assert task["status"] == "completed"
         assert capsys.readouterr().err.replace("\r\n", "\n") == "first\nsecond\nthird\n"
 
+    @pytest.mark.parametrize("warning_code", ["D8002", "D9002"])
+    def test_build_wait_folds_repeated_msvc_command_line_warnings_without_rewriting_log(
+        self,
+        tmp_path,
+        capsys,
+        warning_code,
+    ):
+        from cli_anything.unreal.commands.build import _wait_for_task_with_log_stream
+
+        warning = f"cl : command line warning {warning_code} : repeated command-line issue\n"
+        log_file = tmp_path / "compile.log"
+        log_file.write_text(warning, encoding="ascii")
+        calls = {"count": 0}
+
+        def fake_load_task(task_id):
+            calls["count"] += 1
+            with log_file.open("a", encoding="ascii") as fh:
+                fh.write(warning)
+                if calls["count"] == 2:
+                    fh.write("build complete\n")
+            status = "running" if calls["count"] == 1 else "completed"
+            return {"task_id": task_id, "command": "build.compile", "status": status}
+
+        with patch("cli_anything.unreal.commands.build.load_task", side_effect=fake_load_task):
+            task = _wait_for_task_with_log_stream("t-msvc-warning", timeout=5, log_file=str(log_file))
+
+        streamed = capsys.readouterr().err.replace("\r\n", "\n")
+        assert task["status"] == "completed"
+        assert streamed.count(warning) == 1
+        assert "[ue-cli] folded 2 repeated MSVC command-line warning lines" in streamed
+        assert str(log_file) in streamed
+        assert "build complete\n" in streamed
+        assert log_file.read_text(encoding="ascii").count(warning) == 3
+
+    def test_build_wait_does_not_fold_plain_text_that_mentions_d8_warning(self, tmp_path, capsys):
+        from cli_anything.unreal.commands.build import _wait_for_task_with_log_stream
+
+        note = "note: documentation mentions warning D8002 for reference\n"
+        log_file = tmp_path / "compile.log"
+        log_file.write_text(note + note, encoding="ascii")
+
+        with patch(
+            "cli_anything.unreal.commands.build.load_task",
+            return_value={"task_id": "t-note", "command": "build.compile", "status": "completed"},
+        ):
+            task = _wait_for_task_with_log_stream("t-note", timeout=5, log_file=str(log_file))
+
+        streamed = capsys.readouterr().err.replace("\r\n", "\n")
+        assert task["status"] == "completed"
+        assert streamed == note + note
+
+    def test_build_wait_flushes_fold_summary_when_task_disappears(self, tmp_path, capsys):
+        from cli_anything.unreal.commands.build import _wait_for_task_with_log_stream
+
+        warning = "cl : command line warning D8002 : repeated command-line issue\n"
+        tail = "worker task record disappeared"
+        log_file = tmp_path / "compile.log"
+        log_file.write_text(warning + warning + tail, encoding="ascii")
+
+        with patch("cli_anything.unreal.commands.build.load_task", return_value=None):
+            task = _wait_for_task_with_log_stream("t-missing", timeout=5, log_file=str(log_file))
+
+        streamed = capsys.readouterr().err.replace("\r\n", "\n")
+        assert task is None
+        assert streamed.count(warning) == 1
+        assert tail in streamed
+        assert "[ue-cli] folded 1 repeated MSVC command-line warning lines" in streamed
+
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows compiler encoding behavior")
     def test_build_wait_streams_split_localized_bytes_without_replacement(self, tmp_path, capsys):
         from cli_anything.unreal.commands.build import _wait_for_task_with_log_stream

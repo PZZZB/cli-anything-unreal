@@ -104,7 +104,7 @@ All asset commands require editor.
 
 Build commands do not require editor.
 
-Synchronous `build compile` / `build cook` / `build package` stream the live UAT/UBT log to stderr while waiting, similar to UE `Build.bat`. JSON stdout stays one final payload with `log_file`.
+Synchronous `build compile` / `build cook` / `build package` stream the live UAT/UBT log to stderr while waiting, similar to UE `Build.bat`. Repeated MSVC command-line warnings show once plus a folded count; the `log_file` retains the complete unmodified output. JSON stdout stays one final payload with `log_file`.
 For non-Win64 platforms, `build compile` calls UE `Build.bat` directly for the project's detected Game target, falling back to the `.uproject` name when no Game `Target.cs` is present.
 For focused Win64 Editor validation, repeat `--module NAME`; ue-cli calls `Build.bat` for the detected Editor target with one constrained `-Module=NAME` per value instead of running the full BuildCookRun target set.
 
