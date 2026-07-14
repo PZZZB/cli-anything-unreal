@@ -431,6 +431,107 @@ class TestBuildSuccessPaths:
             assert result["returncode"] == 0
             assert result["log_file"].endswith("cli_cook.log")
             assert "-utf8output" not in mock_run.call_args.args[2]
+            assert "-allmaps" in mock_run.call_args.args[2]
+
+    def test_cook_native_options(self, temp_project):
+        """Targeted cook inputs must reach their native UAT/Cooker options."""
+        from cli_anything.unreal.core.build import cook_content
+
+        command = ["RunUAT.bat", "BuildCookRun", "-cook"]
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.find_engine_root",
+            return_value=self._mock_engine_root(),
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={
+                "returncode": 0,
+                "log_file": r"F:\Test\Saved\Logs\cli_cook.log",
+                "duration_seconds": 30.0,
+                "command": command,
+            },
+        ) as mock_run:
+            result = cook_content(
+                temp_project["uproject"],
+                platform="Android",
+                packages=["/Game/Foo/A", "/Game/Foo/B"],
+                output_dir=r"F:\Cook Output",
+                ini_overrides=[
+                    "Engine:[Section]:Key=Value",
+                    "Game:[Other]:Flag=True",
+                ],
+            )
+
+        uat_args = mock_run.call_args.args[2]
+        assert "-allmaps" not in uat_args
+        assert (
+            "-AdditionalCookerOptions=-Package=/Game/Foo/A+/Game/Foo/B"
+            in uat_args
+        )
+        assert r"-CookOutputDir=F:\Cook Output" in uat_args
+        assert "-ini:Engine:[Section]:Key=Value" in uat_args
+        assert "-ini:Game:[Other]:Flag=True" in uat_args
+        assert result["uat_command"] == command
+
+    def test_cook_rejects_embedded_plus_in_package(self, temp_project):
+        """One package value cannot contain the separator used by UE."""
+        from cli_anything.unreal.core.build import cook_content
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+        ) as mock_run:
+            result = cook_content(
+                temp_project["uproject"],
+                packages=["/Game/Foo/A+/Game/Foo/B"],
+            )
+
+        assert result["status"] == "error"
+        assert "must not contain '+'" in result["error"]
+        mock_run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"packages": [""]}, "cook package must not be empty"),
+            ({"output_dir": ""}, "cook output directory must not be empty"),
+            ({"ini_overrides": [""]}, "ini override must not be empty"),
+            (
+                {"ini_overrides": ["-ini:Engine:[Section]:Key=Value"]},
+                "omit the '-ini:' prefix",
+            ),
+        ],
+        ids=["empty_package", "empty_output_dir", "empty_ini", "prefixed_ini"],
+    )
+    def test_cook_rejects_invalid_native_option_values(
+        self, temp_project, kwargs, message
+    ):
+        """Core callers get the same native-option validation as Click."""
+        from cli_anything.unreal.core.build import cook_content
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.find_engine_root",
+            return_value=self._mock_engine_root(),
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={
+                "returncode": 0,
+                "log_file": r"F:\Test\Saved\Logs\cli_cook.log",
+                "duration_seconds": 1.0,
+            },
+        ) as mock_run:
+            result = cook_content(temp_project["uproject"], **kwargs)
+
+        assert result["status"] == "error"
+        assert message in result["error"]
+        mock_run.assert_not_called()
 
     def test_package_success(self, temp_project):
         from cli_anything.unreal.core.build import package_project
@@ -1367,6 +1468,46 @@ class TestBuildStopAndDetect:
         assert kwargs["maps"] == ["/Game/Maps/Oregon_Main"]
         assert kwargs["cook_flavor"] == "ASTC"
         assert kwargs["uat_args"] == ["-pak", "-iostore"]
+
+    def test_run_build_task_forwards_targeted_cook_options(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """Async cook workers must preserve native cook inputs."""
+        from cli_anything.unreal.core.tasks import (
+            _run_build_task,
+            create_task,
+            save_task,
+        )
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task(
+            "build.cook",
+            {
+                "project_path": temp_project["uproject"],
+                "platform": "Android",
+                "packages": ["/Game/Foo/A", "/Game/Foo/B"],
+                "output_dir": r"F:\Cook Output",
+                "ini_overrides": ["Engine:[Section]:Key=Value"],
+            },
+        )
+        task["status"] = "running"
+        save_task(task)
+
+        with patch(
+            "cli_anything.unreal.core.build.cook_content",
+            return_value={"status": "ok", "log_file": "cook.log"},
+        ) as mock_cook:
+            result = _run_build_task(
+                task,
+                "cook_content",
+                estimated_total_seconds=300,
+            )
+
+        assert result["status"] == "completed"
+        kwargs = mock_cook.call_args.kwargs
+        assert kwargs["packages"] == ["/Game/Foo/A", "/Game/Foo/B"]
+        assert kwargs["output_dir"] == r"F:\Cook Output"
+        assert kwargs["ini_overrides"] == ["Engine:[Section]:Key=Value"]
 
     def test_run_build_task_forwards_compile_modules(
         self, temp_project, tmp_path, monkeypatch
@@ -2376,7 +2517,92 @@ class TestBuildCLI:
         assert "--project" in result.output
         assert "--no-wait" in result.output
         assert "--timeout" in result.output
+        assert "--package" in result.output
+        assert "--output-dir" in result.output
+        assert "--ini" in result.output
         assert "--log-tail-lines" not in result.output
+
+    def test_build_cook_native_options_reach_task_payload(self, temp_project):
+        """Cook CLI must preserve native inputs for the shared worker."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        captured = {}
+
+        def fake_submit(command, payload):
+            captured["command"] = command
+            captured["payload"] = payload
+            return {"task_id": "t-targeted-cook"}
+
+        with patch(
+            "cli_anything.unreal.commands.build.submit_task",
+            side_effect=fake_submit,
+        ):
+            result = CliRunner().invoke(cli, [
+                "--output", "json",
+                "--project", temp_project["uproject"],
+                "build", "cook",
+                "--platform", "Android",
+                "--package", "/Game/Foo/A",
+                "--package", "/Game/Foo/B",
+                "--output-dir", r"F:\Cook Output",
+                "--ini", "Engine:[Section]:Key=Value",
+                "--ini", "Game:[Other]:Flag=True",
+                "--no-wait",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert captured["command"] == "build.cook"
+        assert captured["payload"]["packages"] == (
+            "/Game/Foo/A",
+            "/Game/Foo/B",
+        )
+        assert captured["payload"]["output_dir"] == r"F:\Cook Output"
+        assert captured["payload"]["ini_overrides"] == (
+            "Engine:[Section]:Key=Value",
+            "Game:[Other]:Flag=True",
+        )
+
+    @pytest.mark.parametrize(
+        ("option", "value", "message"),
+        [
+            ("--package", "/Game/Foo/A+/Game/Foo/B", "must not contain '+'"),
+            ("--package", "", "cook package must not be empty"),
+            ("--output-dir", 'F:\\Cook" & echo PWNED', "Unsafe cook output directory"),
+            ("--output-dir", "", "cook output directory must not be empty"),
+            ("--ini", 'Engine:[Section]:Key=" & echo PWNED', "Unsafe ini override"),
+            ("--ini", "", "ini override must not be empty"),
+            (
+                "--ini",
+                "-ini:Engine:[Section]:Key=Value",
+                "omit the '-ini:' prefix",
+            ),
+        ],
+        ids=[
+            "package_separator",
+            "empty_package",
+            "output_dir",
+            "empty_output_dir",
+            "ini",
+            "empty_ini",
+            "prefixed_ini",
+        ],
+    )
+    def test_build_cook_rejects_unsafe_native_values(
+        self, temp_project, option, value, message
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = CliRunner().invoke(cli, [
+            "--project", temp_project["uproject"],
+            "build", "cook",
+            option, value,
+            "--no-wait",
+        ])
+
+        assert result.exit_code == 2
+        assert message in result.output
 
     def test_build_package_targeted_options_reach_task_payload(
         self, temp_project

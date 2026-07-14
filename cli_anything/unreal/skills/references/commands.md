@@ -114,12 +114,26 @@ On Windows, `build compile --platform Win64` refuses to start while an UnrealEdi
 | Command | Description |
 |---------|-------------|
 | `build compile [--project PATH] [--config C] [--platform P] [--module NAME]... [--no-wait] [--timeout N]` | Compile C++; repeated modules select a focused Win64 Editor-module build |
-| `build cook [--project PATH] [--platform P] [--no-wait] [--timeout N]` | Cook content |
+| `build cook [--project PATH] [--platform P] [--package PACKAGE]... [--output-dir DIR] [--ini OVERRIDE]... [--no-wait] [--timeout N]` | Cook content through UAT; package seeds, cook output, and ini overrides map to native UE options |
 | `build package [--project PATH] [--platform P] [--config C] [--output-dir DIR] [--map MAP]... [--cook-flavor F] [--uat-arg=-ARG]... [--no-wait] [--timeout N]` | Reproducible BuildCookRun package pipeline; final result includes `uat_command` |
 | `build stop [--project PATH]` | Cancel project-owned async build tasks, then kill any remaining MSBuild/UBT tree |
 | `build is-building [--project PATH]` | Check compile/build running |
 | `build status [--project PATH] [TASK_ID]` | Check artifacts/logs or async progress |
 | `build cancel TASK_ID` | Cancel async build |
+
+Targeted cook example:
+
+```powershell
+ue-cli --project F:\Game\Game.uproject build cook --platform Android `
+  --package /Game/Foo/A --package /Game/Foo/B `
+  --output-dir "F:\Cook Output" `
+  --ini "Engine:[Section]:Key=Value"
+```
+
+`--package` supplies package seeds to CookCommandlet; UE may also cook their
+dependencies and roots selected by project configuration. `build cook
+--output-dir` is the cooked-content root. The separate `build package
+--output-dir` option remains the archive destination.
 
 Targeted Android example (repeat `--uat-arg=...` for long-tail BuildCookRun switches and per-run ini overrides):
 

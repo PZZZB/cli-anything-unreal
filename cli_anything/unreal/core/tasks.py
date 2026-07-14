@@ -643,6 +643,9 @@ def _run_build_task(task: dict, func_name: str, *, estimated_total_seconds: int)
         kwargs["modules"] = payload.get("modules")
     elif func_name == "cook_content":
         kwargs["platform"] = payload.get("platform", "Win64")
+        kwargs["packages"] = payload.get("packages")
+        kwargs["output_dir"] = payload.get("output_dir")
+        kwargs["ini_overrides"] = payload.get("ini_overrides")
     elif func_name == "package_project":
         kwargs["platform"] = payload.get("platform", "Win64")
         kwargs["config"] = payload.get("build_config", "Development")

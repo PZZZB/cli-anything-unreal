@@ -10,6 +10,8 @@ from pathlib import Path
 import click
 
 from cli_anything.unreal.core.build import (
+    validate_cook_ini_override,
+    validate_cook_package,
     validate_module_name,
     validate_package_uat_value,
 )
@@ -53,14 +55,23 @@ def _validate_package_value(ctx, param, value):
         "maps": "map",
         "cook_flavor": "cook flavor",
         "uat_args": "UAT argument",
+        "packages": "cook package",
+        "output_dir": "cook output directory",
+        "ini_overrides": "ini override",
     }
     try:
         for item in values:
-            validate_package_uat_value(
-                item,
-                label=labels.get(param.name, param.name),
-                require_option=param.name == "uat_args",
-            )
+            if param.name == "packages":
+                validate_cook_package(item)
+            elif param.name == "ini_overrides":
+                validate_cook_ini_override(item)
+            else:
+                validate_package_uat_value(
+                    item,
+                    label=labels.get(param.name, param.name),
+                    require_option=param.name == "uat_args",
+                    require_value=param.name == "output_dir",
+                )
     except ValueError as exc:
         raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
     return value
@@ -264,14 +275,50 @@ def build_compile(state: AppState, project_path, build_config, platform, modules
 @build_group.command("cook")
 @_project_option
 @click.option("--platform", default="Win64")
+@click.option(
+    "--package",
+    "packages",
+    multiple=True,
+    callback=_validate_package_value,
+    help="Package seed to cook; repeat for multiple packages.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(),
+    callback=_validate_package_value,
+    help="Root directory for cooked output.",
+)
+@click.option(
+    "--ini",
+    "ini_overrides",
+    multiple=True,
+    callback=_validate_package_value,
+    help="Per-run UE ini override without the -ini: prefix; repeat as needed.",
+)
 @click.option("--no-wait", is_flag=True, default=False)
 @click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
-def build_cook(state: AppState, project_path, platform, no_wait, timeout):
+def build_cook(
+    state: AppState,
+    project_path,
+    platform,
+    packages,
+    output_dir,
+    ini_overrides,
+    no_wait,
+    timeout,
+):
     _load_command_project(state, project_path)
     require_project(state)
-    payload = _build_payload(state, "cook", platform=platform)
+    payload = _build_payload(
+        state,
+        "cook",
+        platform=platform,
+        packages=packages,
+        output_dir=output_dir,
+        ini_overrides=ini_overrides,
+    )
     result = _run_task("build.cook", payload, timeout=timeout, no_wait=no_wait, timeout_code="BUILD_WAIT_TIMEOUT")
     output(result, state)
 

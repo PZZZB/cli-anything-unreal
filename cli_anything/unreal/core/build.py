@@ -41,8 +41,11 @@ def validate_package_uat_value(
     *,
     label: str,
     require_option: bool = False,
+    require_value: bool = False,
 ) -> str:
     """Validate a package option before it reaches the Windows UAT wrapper."""
+    if require_value and not value:
+        raise ValueError(f"{label} must not be empty")
     if require_option and not value.startswith("-"):
         raise ValueError(
             f"{label} must start with '-' (for example --uat-arg=-pak)"
@@ -52,6 +55,30 @@ def validate_package_uat_value(
             f"Unsafe {label}: literal quotes, shell control characters, and "
             "NUL/CR/LF are not allowed"
         )
+    return value
+
+
+def validate_cook_package(value: str) -> str:
+    """Validate one package before combining UE's ``+``-separated list."""
+    value = validate_package_uat_value(
+        value,
+        label="cook package",
+        require_value=True,
+    )
+    if "+" in value:
+        raise ValueError("Cook package must not contain '+'")
+    return value
+
+
+def validate_cook_ini_override(value: str) -> str:
+    """Validate one ini override before adding the native prefix."""
+    value = validate_package_uat_value(
+        value,
+        label="ini override",
+        require_value=True,
+    )
+    if value.lower().startswith("-ini:"):
+        raise ValueError("ini override must omit the '-ini:' prefix")
     return value
 
 
@@ -319,7 +346,26 @@ def cook_content(
     engine_root: str | None = None,
     log_file: str | None = None,
     on_start=None,
+    *,
+    packages: list[str] | tuple[str, ...] | None = None,
+    output_dir: str | None = None,
+    ini_overrides: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
+    try:
+        packages = [validate_cook_package(value) for value in (packages or ())]
+        if output_dir is not None:
+            output_dir = validate_package_uat_value(
+                output_dir,
+                label="cook output directory",
+                require_value=True,
+            )
+        ini_overrides = [
+            validate_cook_ini_override(value)
+            for value in (ini_overrides or ())
+        ]
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
     already = _check_already_building(uproject_path)
     if already:
         return already
@@ -333,8 +379,16 @@ def cook_content(
         f"-platform={platform}",
         "-cook",
         "-noP4",
-        "-allmaps",
     ]
+    if packages:
+        args.append(
+            "-AdditionalCookerOptions=-Package=" + "+".join(packages)
+        )
+    else:
+        args.append("-allmaps")
+    if output_dir:
+        args.append(f"-CookOutputDir={output_dir}")
+    args.extend(f"-ini:{override}" for override in ini_overrides)
     result = run_uat(
         engine_root,
         "BuildCookRun",

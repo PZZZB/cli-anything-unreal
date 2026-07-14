@@ -47,6 +47,9 @@ identifies its type.
   Supplying at least one package removes `-allmaps`, so a targeted cook cannot
   silently expand into a full-map cook.
 
+Packages are cook seeds, not an exclusion list. Unreal may also cook referenced
+dependencies, always-cook assets, and roots selected by project configuration.
+
 No direct `UnrealEditor-Cmd.exe` invocation is added.
 
 ## Data Flow
