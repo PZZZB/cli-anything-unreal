@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible problem with ue-cli
+title: "[Bug] "
+body:
+  - type: input
+    id: tool_version
+    attributes:
+      label: Affected tool and version
+      placeholder: "ue-cli 1.2.3"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Operating system and environment
+      description: Include the OS, Python version, Unreal Engine version, and relevant setup details.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or workflow
+      description: Show the command or workflow that failed.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction steps
+      description: Provide the smallest sequence that reliably reproduces the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Paste logs or attach screenshots that help explain the failure.
