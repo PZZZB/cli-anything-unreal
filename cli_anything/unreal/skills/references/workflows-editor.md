@@ -10,7 +10,7 @@ Step 1: editor status
   No matching online instance? Continue to Step 2.
 
 Step 2: preflight (or editor preflight)
-  Ready? editor launch
+  Engine/project ready? editor launch (launch prepares editor integration files)
   BuildId mismatch? Continue to Step 3.
 
 Step 3: editor close (if running) -> build compile -> editor launch
@@ -23,7 +23,8 @@ Step 4: editor status (verify)
 ```
 
 Key points:
-- `preflight` (`editor preflight` also works) verifies Remote Control config and enables the `RemoteControl` plugin only when loadable module binaries exist. UE4/custom engines with source-only RemoteControl are reported as unavailable and are not modified.
+- `preflight` (`editor preflight` also works) is strictly read-only. It reports engine/project, Remote Control, and bridge readiness but never changes `.uproject`, config, or plugin files. It is an editor-startup check, not a prerequisite for `build cook` or `build package`.
+- `editor enable-remote` is the explicit Remote Control mutation command. `editor launch` may perform the same Remote Control preparation and deploy/enable CliAnythingBridge because launching the controlled editor requires them.
 - `editor launch` waits until API online or timeout. Without `--timeout`, foreground wait is bounded; slow launches return `launching` with a task id instead of hanging until the shell kills ue-cli. Do not use `sleep`.
 - Async: `--no-wait`, then `editor status <task_id>` or `task status <task_id>`.
 - DLL locked build fail -> `editor close`, then compile. If `editor plugin-upgrade` reports `LNK1104` with `locked_file`, close/kill all UnrealEditor processes for that project and retry the reported command. `plugin-upgrade` waits for matching editor processes to exit before compiling, but another stale process can still hold third-party plugin DLLs.

@@ -9,8 +9,8 @@ Workflow examples live in sibling workflow docs.
 | Command | Description | Requires Editor |
 |---------|-------------|:-:|
 | `editor status [--project PATH] [--all] [--scan-range START-END] [TASK_ID]` | No TASK_ID: list Unreal Editor processes/result array. `--project` is accepted here or as top-level `ue-cli --project PATH editor status`; it filters to that project unless `--all` is set. Online entries include bridge plugin version fields; mismatch entries include `next_command` when project is known. Offline entries include recovery hints. With TASK_ID: async progress | - |
-| `preflight` / `editor preflight` | Check engine/project build compatibility | No |
-| `editor launch [--map /Game/PATH] [--no-wait] [--timeout N]` | Launch editor; waits until ready; kills zombies. Map package paths must include their mount root; bare names such as `Oregon_Main` are rejected. Without `--timeout`, foreground wait is bounded so shells do not kill the command; if the editor is still starting, the command returns a pollable `launching` task. | No |
+| `preflight` / `editor preflight` | Read-only editor-startup check for engine, project, Remote Control, and bridge readiness. It never modifies project files and is not required before `build cook` or `build package` | No |
+| `editor launch [--map /Game/PATH] [--no-wait] [--timeout N]` | Prepare Remote Control/bridge project files when needed, then launch editor; waits until ready and kills zombies. Map package paths must include their mount root; bare names such as `Oregon_Main` are rejected. Without `--timeout`, foreground wait is bounded so shells do not kill the command; if the editor is still starting, the command returns a pollable `launching` task. | No |
 | `editor close` | Gracefully close editor, then waits for same-project UnrealEditor process exit (kills stale lock holder if needed) | No |
 | `editor new-level PATH [--template PATH]` | Safely create/open new level; verifies the active editor world and attempts recovery if the HTTP bridge resets during transition | Yes |
 | `editor open-level /Game/PATH` | Safely open an existing level via `LevelEditorSubsystem.LoadLevel`, then verifies the active editor world. The path must include its Unreal mount root; use this instead of top-level `EditorLoadingAndSavingUtils.load_map` in `run-script` | Yes |
@@ -21,7 +21,7 @@ Workflow examples live in sibling workflow docs.
 | `editor viewport bookmark jump --index N [--timeout SEC]` | Jump Level Viewport bookmark 0-9; Windows only | Yes |
 | `editor run-script [PATH|-] [-c CODE] [--timeout N] [--no-save]` | Execute Python file, stdin (`-`), or short inline code with result capture. Use `--timeout` for long asset saves/build steps; read timeouts return `EDITOR_SCRIPT_TIMEOUT` with unknown completion state. Blocks known-crashy top-level map transitions via `EditorLoadingAndSavingUtils.new_blank_map`/`load_map`; helper definitions for offline modes are allowed when not called at module top level. | Yes |
 | `editor cvar get NAME` / `editor cvar set NAME VALUE` | Get/set console variable; `get` errors on missing/unverified empty CVars, negative values are supported (`... set r.X -4` or `... set r.X -- -4`) | Yes |
-| `editor enable-remote` | Enable Remote Control config | No |
+| `editor enable-remote` | Explicitly enable the RemoteControl plugin in `.uproject` and create/update `DefaultRemoteControl.ini` | No |
 | `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover UE class/struct/API. TARGET: class, struct, asset path, loaded UObject/subobject path, actor path | Yes |
 | `editor cancel TASK_ID` | Cancel async editor launch | - |
 | `editor plugin-version` | Compare bundled vs loaded plugin | Yes (loaded) |

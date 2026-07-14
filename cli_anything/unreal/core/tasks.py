@@ -749,7 +749,12 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         _summarize_startup_precheck,
         _wait_for_api,
     )
-    from cli_anything.unreal.utils.ue_backend import find_editor_exe, preflight_check
+    from cli_anything.unreal.utils.ue_backend import (
+        ensure_remote_control_config,
+        find_editor_exe,
+        get_editor_binary_prefix,
+        preflight_check,
+    )
 
     payload = task["payload"]
     state = AppState()
@@ -758,7 +763,48 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     if payload.get("port") is not None:
         state.session.port = int(payload["port"])
 
+    launch_binary_prefix = (
+        get_editor_binary_prefix(state.session.engine_root)
+        if state.session.engine_root
+        else None
+    )
+    bridge_launch_prepare = None
+    if launch_binary_prefix == "UE4Editor":
+        from cli_anything.unreal.core.plugin_bridge import ensure_project_bridge_disabled_by_default
+
+        bridge_launch_prepare = ensure_project_bridge_disabled_by_default(state.session.project_dir)
+
     preflight = preflight_check(state.session.project_path, state.session.engine_root)
+    remote_control = preflight.get("remote_control", {})
+    if remote_control.get("configured", False):
+        remote_control_prepare = {
+            "status": "not_needed",
+            "changes": [],
+            "reason": "already_configured",
+        }
+    elif not (
+        preflight.get("engine", {}).get("ready", False)
+        and preflight.get("project", {}).get("ready", False)
+    ):
+        remote_control_prepare = {
+            "status": "not_applied",
+            "changes": [],
+            "reason": "engine_or_project_not_ready",
+        }
+    elif not remote_control.get("plugin_loadable", {}).get("available", False):
+        remote_control_prepare = {
+            "status": "not_applied",
+            "changes": [],
+            "reason": "plugin_unavailable",
+        }
+    else:
+        remote_control_prepare = ensure_remote_control_config(
+            state.session.project_dir,
+            engine_root=state.session.engine_root,
+            editor_binary_prefix=launch_binary_prefix,
+        )
+        preflight = preflight_check(state.session.project_path, state.session.engine_root)
+
     startup_precheck = _summarize_startup_precheck(preflight)
     if not preflight.get("ready"):
         task["status"] = "failed"
@@ -767,7 +813,12 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "message": "Editor preflight failed",
             "details": startup_precheck,
         }
-        task["result"] = {"startup_precheck": startup_precheck, "preflight": preflight}
+        task["result"] = {
+            "startup_precheck": startup_precheck,
+            "preflight": preflight,
+            "remote_control_prepare": remote_control_prepare,
+            "bridge_launch_prepare": bridge_launch_prepare,
+        }
         return save_task(task)
 
     editor_exe = find_editor_exe(state.session.engine_root)
@@ -803,11 +854,13 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     if editor_binary_prefix == "UE4Editor":
         from cli_anything.unreal.core.plugin_bridge import ensure_project_bridge_disabled_by_default
 
+        if bridge_launch_prepare is None:
+            bridge_launch_prepare = ensure_project_bridge_disabled_by_default(state.session.project_dir)
         deploy_result = {
             "deployed": False,
             "action": "skipped_ue4",
             "skipped": True,
-            "normalize_result": ensure_project_bridge_disabled_by_default(state.session.project_dir),
+            "normalize_result": bridge_launch_prepare,
         }
     else:
         deploy_result = _deploy_bridge(state.session, state)
@@ -842,6 +895,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "project": state.session.project_name,
             "editor_exe": editor_exe,
             "startup_precheck": startup_precheck,
+            "remote_control_prepare": remote_control_prepare,
             "bridge_deploy": deploy_result,
             "bridge_enabled_changed": bridge_enabled_changed,
             "bridge_binary_status": bridge_binary_status,
@@ -897,6 +951,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         "project": state.session.project_name,
         "editor_exe": editor_exe,
         "startup_precheck": startup_precheck,
+        "remote_control_prepare": remote_control_prepare,
         "bridge_deploy": deploy_result,
         "bridge_binary_status": bridge_binary_status,
     })

@@ -1091,12 +1091,27 @@ def test_check_remote_control_config_requires_enabled_plugin(tmp_path):
     assert any("RemoteControl plugin is not enabled" in issue for issue in result["issues"])
 
 
-def test_preflight_enables_remote_control_plugin_when_ini_already_valid(tmp_path):
-    """preflight should auto-enable RemoteControl even when DefaultRemoteControl.ini is already valid."""
+def test_ensure_remote_control_unavailable_error_is_command_neutral(tmp_path):
+    from cli_anything.unreal.utils.ue_backend import ensure_remote_control_config
+
+    with patch("cli_anything.unreal.utils.ue_backend._check_plugin_loadable", return_value={
+        "available": False,
+        "reason": "module_missing",
+    }):
+        result = ensure_remote_control_config(str(tmp_path), engine_root="F:/MockEngine")
+
+    assert result["status"] == "unavailable"
+    assert "preflight" not in result["error"].lower()
+    assert result["changes"] == []
+
+
+def test_preflight_is_read_only_when_remote_control_plugin_is_disabled(tmp_path):
+    """preflight reports RemoteControl work without changing the project."""
     from cli_anything.unreal.utils.ue_backend import _is_plugin_enabled_in_uproject, preflight_check
 
     project_dir = tmp_path / "RemoteOnly"
     uproject = _write_remote_control_project(project_dir, remote_enabled=False)
+    before = uproject.read_bytes()
 
     with patch("cli_anything.unreal.utils.ue_backend.check_engine_build", return_value={
         "ready": True,
@@ -1120,15 +1135,101 @@ def test_preflight_enables_remote_control_plugin_when_ini_already_valid(tmp_path
          patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
              "deployed": True,
              "action": "already_up_to_date",
+         }) as mock_deploy:
+        result = preflight_check(str(uproject), engine_root="F:/MockEngine")
+
+    assert uproject.read_bytes() == before
+    assert _is_plugin_enabled_in_uproject(str(project_dir), "RemoteControl") is False
+    assert result["read_only"] is True
+    assert result["remote_control"]["auto_fixed"] is False
+    assert result["remote_control"]["configured"] is False
+    assert "editor enable-remote" in result["remote_control"]["suggestion"]
+    assert not any("Fixed:" in warning for warning in result["project"]["warnings"])
+    mock_deploy.assert_not_called()
+
+
+def test_preflight_does_not_create_remote_control_config(tmp_path):
+    from cli_anything.unreal.utils.ue_backend import preflight_check
+
+    project_dir = tmp_path / "RemoteMissingConfig"
+    uproject = _write_remote_control_project(project_dir, remote_enabled=True)
+    config_file = project_dir / "Config" / "DefaultRemoteControl.ini"
+    config_file.unlink()
+    before = uproject.read_bytes()
+
+    with patch("cli_anything.unreal.utils.ue_backend.check_engine_build", return_value={
+        "ready": True,
+        "build_id": "engine-build",
+        "errors": [],
+        "warnings": [],
+        "details": {},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.check_project_build", return_value={
+             "ready": True,
+             "needs_compile": False,
+             "errors": [],
+             "warnings": [],
+             "details": {},
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._check_plugin_loadable", return_value={
+             "available": True,
+             "plugin": "RemoteControl",
+             "reason": "test",
          }):
         result = preflight_check(str(uproject), engine_root="F:/MockEngine")
 
-    assert _is_plugin_enabled_in_uproject(str(project_dir), "RemoteControl") is True
-    assert result["remote_control"]["auto_fixed"] is True
-    assert any(
-        "Fixed: RemoteControl plugin is not enabled" in warning
-        for warning in result["project"]["warnings"]
+    assert uproject.read_bytes() == before
+    assert not config_file.exists()
+    assert result["read_only"] is True
+    assert result["remote_control"]["auto_fixed"] is False
+    assert result["remote_control"]["configured"] is False
+
+
+def test_preflight_does_not_normalize_existing_bridge_descriptor(tmp_path):
+    from cli_anything.unreal.utils.ue_backend import preflight_check
+
+    project_dir = tmp_path / "BridgeDescriptor"
+    uproject = _write_remote_control_project(project_dir, remote_enabled=True)
+    project_data = json.loads(uproject.read_text(encoding="utf-8"))
+    project_data["Plugins"].append({"Name": "CliAnythingBridge", "Enabled": True})
+    uproject.write_text(json.dumps(project_data), encoding="utf-8")
+    descriptor = project_dir / "Plugins" / "CliAnythingBridge" / "CliAnythingBridge.uplugin"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text(
+        json.dumps({"VersionName": "1.18", "EnabledByDefault": True}),
+        encoding="utf-8",
     )
+    before = descriptor.read_bytes()
+
+    with patch("cli_anything.unreal.utils.ue_backend.check_engine_build", return_value={
+        "ready": True,
+        "build_id": "engine-build",
+        "errors": [],
+        "warnings": [],
+        "details": {},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.check_project_build", return_value={
+             "ready": True,
+             "needs_compile": False,
+             "errors": [],
+             "warnings": [],
+             "details": {},
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._check_plugin_loadable", return_value={
+             "available": True,
+             "plugin": "RemoteControl",
+             "reason": "test",
+         }), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.18"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+         }):
+        result = preflight_check(str(uproject), engine_root="F:/MockEngine")
+
+    assert descriptor.read_bytes() == before
+    assert result["read_only"] is True
+    assert result["bridge_plugin"]["ready"] is True
 
 
 def test_preflight_does_not_enable_unavailable_remote_control_plugin(tmp_path):

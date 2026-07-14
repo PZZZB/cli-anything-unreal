@@ -1299,6 +1299,18 @@ def test_editor_launch_help_lists_command_level_project():
     assert result.exit_code == 0, result.output
     assert "--project" in result.output
     assert "/Game/" in result.output
+    assert "DefaultRemoteControl.ini" in result.output
+
+
+def test_editor_enable_remote_help_discloses_project_file_changes():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    result = CliRunner().invoke(cli, ["editor", "enable-remote", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert ".uproject" in result.output
+    assert "DefaultRemoteControl.ini" in result.output
 
 
 def test_editor_launch_no_extra_args_yields_empty_list(mini_project):
@@ -1733,11 +1745,23 @@ def test_run_editor_launch_task_precompiles_when_bridge_binary_missing(tmp_path)
         "port": 30010,
     })
 
-    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
-        "ready": True,
-        "engine": {"errors": [], "warnings": []},
-        "project": {"errors": [], "warnings": []},
-    }), \
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", side_effect=[
+        {
+            "ready": False,
+            "engine": {"ready": True, "errors": [], "warnings": []},
+            "project": {"ready": True, "errors": [], "warnings": []},
+            "remote_control": {
+                "configured": False,
+                "plugin_loadable": {"available": True},
+            },
+        },
+        {
+            "ready": True,
+            "engine": {"ready": True, "errors": [], "warnings": []},
+            "project": {"ready": True, "errors": [], "warnings": []},
+            "remote_control": {"configured": True},
+        },
+    ]) as mock_preflight, \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
          patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
@@ -1786,11 +1810,27 @@ def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
         "port": 30010,
     })
 
-    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
-        "ready": True,
-        "engine": {"errors": [], "warnings": []},
-        "project": {"errors": [], "warnings": []},
-    }), \
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", side_effect=[
+        {
+            "ready": False,
+            "engine": {"ready": True, "errors": [], "warnings": []},
+            "project": {"ready": True, "errors": [], "warnings": []},
+            "remote_control": {
+                "configured": False,
+                "plugin_loadable": {"available": True},
+            },
+        },
+        {
+            "ready": True,
+            "engine": {"ready": True, "errors": [], "warnings": []},
+            "project": {"ready": True, "errors": [], "warnings": []},
+            "remote_control": {"configured": True},
+        },
+    ]) as mock_preflight, \
+         patch("cli_anything.unreal.utils.ue_backend.ensure_remote_control_config", return_value={
+             "status": "ok",
+             "changes": [],
+         }) as mock_prepare_remote, \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
          patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
@@ -1809,6 +1849,8 @@ def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
          patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
+    mock_prepare_remote.assert_called_once()
+    assert mock_preflight.call_count == 2
     mock_compile.assert_not_called()
     assert result["status"] == "completed"
 
@@ -2136,7 +2178,7 @@ def test_run_editor_launch_task_skips_bridge_for_ue4(tmp_path):
          patch("cli_anything.unreal.core.plugin_bridge.ensure_project_bridge_disabled_by_default", return_value={
              "status": "ok",
              "changed": True,
-         }), \
+         }) as mock_normalize_bridge, \
          patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
          patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
          patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
@@ -2145,8 +2187,45 @@ def test_run_editor_launch_task_skips_bridge_for_ue4(tmp_path):
     mock_deploy.assert_not_called()
     mock_enable.assert_not_called()
     mock_compile.assert_not_called()
+    mock_normalize_bridge.assert_called_once()
     assert result["status"] == "completed"
     assert result["result"]["bridge_deploy"]["action"] == "skipped_ue4"
+
+
+def test_run_editor_launch_task_normalizes_ue4_bridge_before_preflight_failure(tmp_path):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    project_dir = tmp_path / "UE4UnavailableRemote"
+    project_dir.mkdir()
+    uproject = project_dir / "UE4UnavailableRemote.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "4.26"}', encoding="utf-8")
+    task = create_task("editor.launch", {"project_path": str(uproject), "port": 30010})
+
+    with patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockUE4"), \
+         patch("cli_anything.unreal.utils.ue_backend.get_editor_binary_prefix", return_value="UE4Editor"), \
+         patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+             "ready": False,
+             "engine": {"ready": True, "errors": [], "warnings": []},
+             "project": {"ready": True, "errors": [], "warnings": []},
+             "remote_control": {
+                 "configured": False,
+                 "plugin_loadable": {"available": False},
+             },
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend.ensure_remote_control_config", return_value={
+             "status": "unavailable",
+             "changes": [],
+         }) as mock_prepare_remote, \
+         patch("cli_anything.unreal.core.plugin_bridge.ensure_project_bridge_disabled_by_default", return_value={
+             "status": "ok",
+             "changed": True,
+         }) as mock_normalize_bridge:
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    mock_normalize_bridge.assert_called_once()
+    mock_prepare_remote.assert_not_called()
+    assert result["status"] == "failed"
+    assert result["result"]["bridge_launch_prepare"]["changed"] is True
 
 
 def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
@@ -2424,7 +2503,8 @@ def test_summarize_startup_precheck_includes_bridge_plugin_issues():
         },
     }
     result = _summarize_startup_precheck(check)
-    assert "Fixed: CliAnythingBridge plugin not enabled in .uproject" in result["warnings"]
+    assert "CliAnythingBridge plugin not enabled in .uproject" in result["warnings"]
+    assert not any(warning.startswith("Fixed:") for warning in result["warnings"])
 
 
 def test_remove_tree_with_retries_handles_locked_dll():

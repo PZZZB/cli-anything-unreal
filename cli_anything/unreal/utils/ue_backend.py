@@ -1452,7 +1452,7 @@ def _check_plugin_loadable(
             "source_only_modules": source_only,
             "message": (
                 f"{plugin_name} plugin has source but no {editor_binary_prefix} module binaries. "
-                "Preflight will not enable it automatically because the editor cannot load uncompiled plugin modules."
+                "Automatic setup will not enable it because the editor cannot load uncompiled plugin modules."
             ),
         }
 
@@ -1515,7 +1515,7 @@ def ensure_remote_control_config(
                 "status": "unavailable",
                 "file": str(config_file),
                 "changes": [],
-                "error": "RemoteControl plugin is not available/loadable for this engine; preflight did not modify .uproject or DefaultRemoteControl.ini.",
+                "error": "RemoteControl plugin is not available/loadable for this engine; no project files were modified.",
                 "details": loadable,
                 "suggestion": "Install or compile the engine RemoteControl plugin first, or use an editor automation path that does not require Remote Control.",
             }
@@ -1983,9 +1983,11 @@ def check_project_build(
 
 
 def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
-    """Full preflight check before launching editor.
+    """Read-only preflight check before launching editor.
 
-    Checks both engine build and project build status.
+    Checks engine, project, Remote Control, and bridge readiness without
+    modifying project files. Commands with explicit mutation semantics, such
+    as ``editor launch`` and ``editor enable-remote``, prepare prerequisites.
 
     Args:
         uproject_path: Path to .uproject file.
@@ -1997,7 +1999,7 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
     if engine_root is None:
         engine_root = find_engine_root(uproject_path)
 
-    result = {"ready": False}
+    result = {"ready": False, "read_only": True}
 
     if not engine_root:
         result["engine"] = {
@@ -2029,6 +2031,7 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
         engine_root=engine_root,
         editor_binary_prefix=editor_binary_prefix,
     )
+    rc_check["auto_fixed"] = False
     if not rc_plugin_check.get("available", False):
         rc_check["configured"] = False
         rc_check["plugin_loadable"] = rc_plugin_check
@@ -2045,53 +2048,64 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
             "suggestion": "Install or compile the engine RemoteControl plugin first, or use an editor automation path that does not require Remote Control.",
         }
     elif not rc_check["configured"]:
-        # Auto-fix: create/update the config
-        fix_result = ensure_remote_control_config(
-            project_dir,
-            engine_root=engine_root,
-            editor_binary_prefix=editor_binary_prefix,
+        rc_check["plugin_loadable"] = rc_plugin_check
+        rc_check["suggestion"] = (
+            "Run ue-cli editor enable-remote to prepare the project explicitly, "
+            "or use editor launch, which prepares Remote Control as part of startup."
         )
-        rc_check["auto_fixed"] = fix_result["status"] in ("created", "updated")
-        rc_check["fix_result"] = fix_result
-        if fix_result["status"] in ("created", "updated"):
-            for issue in rc_check["issues"]:
-                project_check.setdefault("warnings", []).append(
-                    f"Fixed: {issue} (editor restart needed)"
-                )
 
     # Check bridge plugin readiness (informational — auto-fixed during launch)
     bridge_issues = []
     if editor_binary_prefix == "UE4Editor":
-        from cli_anything.unreal.core.plugin_bridge import ensure_project_bridge_disabled_by_default
-
-        bridge_normalize = ensure_project_bridge_disabled_by_default(project_dir)
         bridge_issues.append("CliAnythingBridge is skipped for UE4 projects; UE5 bridge-only commands are unavailable.")
         result["bridge_plugin"] = {
             "ready": False,
             "issues": bridge_issues,
             "auto_fixable": False,
             "skipped": True,
-            "normalize_result": bridge_normalize,
         }
     else:
-        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+        from cli_anything.unreal.core.plugin_bridge import get_bundled_version, get_plugin_binary_status
 
-        bridge_deploy = ensure_plugin_deployed(project_dir)
+        bridge_descriptor = Path(project_dir) / "Plugins" / "CliAnythingBridge" / "CliAnythingBridge.uplugin"
+        bundled_version = get_bundled_version()
+        deployed_version = None
+        if bridge_descriptor.is_file():
+            try:
+                deployed_version = json.loads(
+                    bridge_descriptor.read_text(encoding="utf-8-sig")
+                ).get("VersionName")
+            except (OSError, json.JSONDecodeError):
+                bridge_issues.append("CliAnythingBridge descriptor could not be read")
+        else:
+            bridge_issues.append("CliAnythingBridge plugin source is not deployed")
+
+        if bridge_descriptor.is_file() and deployed_version != bundled_version:
+            bridge_issues.append(
+                f"CliAnythingBridge plugin version {deployed_version or 'unknown'} "
+                f"does not match bundled version {bundled_version or 'unknown'}"
+            )
         bridge_enabled = _is_plugin_enabled_in_uproject(project_dir, "CliAnythingBridge")
         if not bridge_enabled:
             bridge_issues.append("CliAnythingBridge plugin not enabled in .uproject")
-        if bridge_deploy.get("action") != "already_up_to_date":
-            bridge_issues.append(f"CliAnythingBridge plugin needs {bridge_deploy.get('action', 'update')}")
+        bridge_binary_status = get_plugin_binary_status(project_dir, engine_root=engine_root)
+        if bridge_descriptor.is_file() and not bridge_binary_status.get("ready", False):
+            bridge_issues.append(
+                bridge_binary_status.get("message", "CliAnythingBridge binary is not ready")
+            )
         result["bridge_plugin"] = {
             "ready": len(bridge_issues) == 0,
             "issues": bridge_issues,
             "auto_fixable": True,
+            "bundled_version": bundled_version,
+            "deployed_version": deployed_version,
+            "binary_status": bridge_binary_status,
         }
 
     result["engine"] = engine_check
     result["project"] = project_check
     result["remote_control"] = rc_check
-    remote_ready = rc_check["configured"] or rc_check.get("auto_fixed", False)
+    remote_ready = rc_check["configured"]
     result["ready"] = engine_check["ready"] and project_check["ready"] and remote_ready
     result["engine_root"] = engine_root
 

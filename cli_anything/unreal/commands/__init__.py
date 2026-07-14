@@ -178,7 +178,7 @@ def require_project(state: AppState):
 @handle_error
 @click.pass_obj
 def preflight_cmd(state: AppState):
-    """Run editor startup preflight checks."""
+    """Run read-only editor startup preflight checks."""
     from cli_anything.unreal.utils.ue_backend import preflight_check
 
     require_project(state)

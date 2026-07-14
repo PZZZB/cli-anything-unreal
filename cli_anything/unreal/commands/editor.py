@@ -710,6 +710,7 @@ def editor_status(state: AppState, scan_range, show_all, project_path, task_id):
 @handle_error
 @click.pass_obj
 def editor_preflight(state: AppState):
+    """Run read-only editor startup preflight checks."""
     from cli_anything.unreal.utils.ue_backend import preflight_check
 
     require_project(state)
@@ -785,7 +786,7 @@ def _summarize_startup_precheck(check: dict) -> dict:
     errors = check.get("engine", {}).get("errors", []) + check.get("project", {}).get("errors", [])
     warnings = check.get("engine", {}).get("warnings", []) + check.get("project", {}).get("warnings", [])
     for issue in check.get("bridge_plugin", {}).get("issues", []):
-        warnings.append(f"Fixed: {issue}")
+        warnings.append(issue)
     return {
         "ready": check.get("ready", False),
         "errors": errors,
@@ -1521,6 +1522,11 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
 @handle_error
 @click.pass_obj
 def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, extra_args):
+    """Launch the controlled editor.
+
+    May update .uproject, DefaultRemoteControl.ini, and project
+    CliAnythingBridge files when editor integration needs preparation.
+    """
     _load_command_project(state, project_path)
     require_project(state)
     map_path = _normalize_launch_map_path(map_path, state.session.project_dir)
@@ -2298,9 +2304,9 @@ def editor_api_discover(state: AppState, target, query, detail, timeout):
 def editor_enable_remote(state: AppState):
     """Enable Remote Control features for CLI use.
 
-    Creates/updates DefaultRemoteControl.ini to allow remote console
-    command execution and remote Python execution. Requires editor
-    restart to take effect.
+    Enables RemoteControl in .uproject and creates/updates
+    DefaultRemoteControl.ini for remote console and Python execution.
+    Requires editor restart to take effect.
     """
     from cli_anything.unreal.utils.ue_backend import ensure_remote_control_config, get_editor_binary_prefix
 
