@@ -34,6 +34,10 @@ REPORTING_PREFERENCE = (
     "Prefer connected GitHub tooling when available; otherwise run "
     f"`{GH_ISSUE_COMMAND}`."
 )
+EVIDENCE_REQUIREMENTS = (
+    "Include the ue-cli version, environment, exact command, expected behavior, "
+    "actual behavior, a minimal reproduction, and sanitized logs."
+)
 SUBMISSION_MARKER = "工具坑已提交：ue-cli -> {issue_url}"
 CONVERSATION_PROHIBITION = "Do not send ue-cli issues to a Codex conversation ID."
 
@@ -65,16 +69,7 @@ def _workflow_step(document: str, name: str) -> str:
 def _assert_reporting_guide_contract(document: str, guide: Path) -> None:
     assert ISSUE_QUEUE_URL in document, guide
     assert REPORTING_PREFERENCE in document, guide
-    for evidence in (
-        "version",
-        "environment",
-        "exact command",
-        "expected",
-        "actual",
-        "minimal reproduction",
-        "sanitized logs",
-    ):
-        assert evidence in document.lower(), f"{guide}: missing {evidence}"
+    assert EVIDENCE_REQUIREMENTS in document, guide
     assert SUBMISSION_MARKER in document, guide
     assert CONVERSATION_PROHIBITION in document, guide
 
@@ -109,6 +104,17 @@ def test_reporting_contract_rejects_affirmative_conversation_routing():
         document = guide.read_text(encoding="utf-8").replace(
             CONVERSATION_PROHIBITION,
             "Send ue-cli issues to a Codex conversation ID.",
+        )
+
+        with pytest.raises(AssertionError):
+            _assert_reporting_guide_contract(document, guide)
+
+
+def test_reporting_contract_rejects_version_removed_from_evidence_requirements():
+    for guide in REPORTING_GUIDES:
+        document = guide.read_text(encoding="utf-8").replace(
+            EVIDENCE_REQUIREMENTS,
+            EVIDENCE_REQUIREMENTS.replace("ue-cli version", "ue-cli release"),
         )
 
         with pytest.raises(AssertionError):
