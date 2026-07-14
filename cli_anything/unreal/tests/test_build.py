@@ -69,6 +69,52 @@ class TestBuildSuccessPaths:
     def _mock_engine_root(self):
         return r"F:\RX_ENGINE_5.7"
 
+    @staticmethod
+    def _write_editor_receipt(
+        project_dir: Path,
+        products,
+        *,
+        config: str = "Development",
+        filename: str = "TestProjectEditor.target",
+    ) -> Path:
+        receipt = project_dir / "Binaries" / "Win64" / filename
+        receipt.write_text(
+            json.dumps({
+                "TargetName": "TestProjectEditor",
+                "Platform": "Win64",
+                "Configuration": config,
+                "TargetType": "Editor",
+                "BuildProducts": products,
+            }),
+            encoding="utf-8",
+        )
+        return receipt
+
+    @staticmethod
+    def _minimal_pe_image() -> bytes:
+        image = bytearray(1024)
+        image[:2] = b"MZ"
+        image[0x3C:0x40] = (0x80).to_bytes(4, "little")
+        image[0x80:0x84] = b"PE\0\0"
+        image[0x84:0x86] = (0x8664).to_bytes(2, "little")
+        image[0x86:0x88] = (1).to_bytes(2, "little")
+        image[0x94:0x96] = (0xF0).to_bytes(2, "little")
+        image[0x96:0x98] = (0x2022).to_bytes(2, "little")
+        image[0x98:0x9A] = (0x20B).to_bytes(2, "little")
+        image[0xB0:0xB8] = (0x140000000).to_bytes(8, "little")
+        image[0xB8:0xBC] = (0x1000).to_bytes(4, "little")
+        image[0xBC:0xC0] = (0x200).to_bytes(4, "little")
+        image[0xD0:0xD4] = (0x2000).to_bytes(4, "little")
+        image[0xD4:0xD8] = (0x200).to_bytes(4, "little")
+        image[0x104:0x108] = (16).to_bytes(4, "little")
+        image[0x188:0x190] = b".text\0\0\0"
+        image[0x190:0x194] = (1).to_bytes(4, "little")
+        image[0x194:0x198] = (0x1000).to_bytes(4, "little")
+        image[0x198:0x19C] = (0x200).to_bytes(4, "little")
+        image[0x19C:0x1A0] = (0x200).to_bytes(4, "little")
+        image[0x1AC:0x1B0] = (0x60000020).to_bytes(4, "little")
+        return bytes(image)
+
     def test_compile_success(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
 
@@ -87,6 +133,263 @@ class TestBuildSuccessPaths:
             assert "stdout" not in result
             assert "stderr" not in result
             assert "-utf8output" not in mock_run.call_args.args[2]
+
+    def test_compile_rejects_corrupt_pe_from_editor_target_receipt(
+        self, temp_project
+    ):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        product = (
+            project_dir
+            / "Plugins"
+            / "SGFramework"
+            / "Binaries"
+            / "Win64"
+            / "UnrealEditor-SGFramework.dll"
+        )
+        product.parent.mkdir(parents=True)
+        product.write_bytes(b"\0" * (2 * 1024 * 1024))
+        receipt = self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Plugins/SGFramework/Binaries/Win64/"
+                "UnrealEditor-SGFramework.dll",
+                "Type": "DynamicLibrary",
+            }],
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={
+                "returncode": 0,
+                "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
+                "duration_seconds": 12.3,
+            },
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "error"
+        assert result["code"] == "INVALID_BUILD_OUTPUT"
+        assert result["returncode"] == 0
+        assert result["failure_kind"] == "invalid_pe_build_product"
+        assert result["receipt_file"] == str(receipt)
+        assert result["validated_pe_products"] == 1
+        assert result["invalid_build_products"] == [{
+            "path": str(product),
+            "type": "DynamicLibrary",
+            "reason": "missing DOS MZ signature",
+        }]
+
+    def test_compile_accepts_valid_pe_from_editor_target_receipt(
+        self, temp_project
+    ):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        product = project_dir / "Binaries" / "Win64" / "TestProjectEditor.dll"
+        product.write_bytes(self._minimal_pe_image())
+        self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Binaries/Win64/TestProjectEditor.dll",
+                "Type": "DynamicLibrary",
+            }],
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={
+                "returncode": 0,
+                "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
+                "duration_seconds": 12.3,
+            },
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "ok"
+        assert result["returncode"] == 0
+        assert "invalid_build_products" not in result
+
+    @pytest.mark.parametrize(
+        ("config", "filename"),
+        [
+            ("Shipping", "TestProjectEditor-Win64-Shippingx64.target"),
+            ("Development", "TestProjectEditor-Win64-Developmentx64.target"),
+        ],
+    )
+    def test_compile_finds_configured_or_architecture_suffixed_receipt(
+        self, temp_project, config, filename
+    ):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        product = project_dir / "Binaries" / "Win64" / "Broken.dll"
+        product.write_bytes(b"\0" * 512)
+        self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Binaries/Win64/Broken.dll",
+                "Type": "DynamicLibrary",
+            }],
+            config=config,
+            filename=filename,
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                config=config,
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "error"
+        assert result["code"] == "INVALID_BUILD_OUTPUT"
+        assert result["receipt_file"].endswith(filename)
+
+    def test_compile_rejects_truncated_pe_headers(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        product = project_dir / "Binaries" / "Win64" / "Truncated.dll"
+        product.write_bytes(self._minimal_pe_image()[:154])
+        self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Binaries/Win64/Truncated.dll",
+                "Type": "DynamicLibrary",
+            }],
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "error"
+        assert result["invalid_build_products"][0]["reason"] == (
+            "optional header extends past end of file"
+        )
+
+    def test_compile_rejects_truncated_pe_section_data(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        product = project_dir / "Binaries" / "Win64" / "TruncatedSection.dll"
+        product.write_bytes(self._minimal_pe_image()[:0x300])
+        self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Binaries/Win64/TruncatedSection.dll",
+                "Type": "DynamicLibrary",
+            }],
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "error"
+        assert result["invalid_build_products"][0]["reason"] == (
+            "section 0 raw data extends past end of file"
+        )
+
+    def test_compile_prefers_newer_matching_architecture_receipt(
+        self, temp_project
+    ):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        valid = project_dir / "Binaries" / "Win64" / "Valid.dll"
+        corrupt = project_dir / "Binaries" / "Win64" / "Corrupt.dll"
+        valid.write_bytes(self._minimal_pe_image())
+        corrupt.write_bytes(b"\0" * 512)
+        default_receipt = self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Binaries/Win64/Valid.dll",
+                "Type": "DynamicLibrary",
+            }],
+        )
+        os.utime(default_receipt, (1, 1))
+        architecture_receipt = self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Binaries/Win64/Corrupt.dll",
+                "Type": "DynamicLibrary",
+            }],
+            filename="TestProjectEditor-Win64-Developmentx64.target",
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "error"
+        assert result["receipt_file"] == str(architecture_receipt)
+
+    def test_compile_rejects_invalid_build_products_schema(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        self._write_editor_receipt(project_dir, None)
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_uat",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+            )
+
+        assert result["status"] == "error"
+        assert result["code"] == "INVALID_BUILD_OUTPUT"
+        assert result["failure_kind"] == "invalid_build_receipt"
 
     def test_compile_error_returncode(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
@@ -144,6 +447,117 @@ class TestBuildSuccessPaths:
         )
         mock_run_uat.assert_not_called()
         assert result["status"] == "ok"
+
+    def test_compile_module_ignores_unrelated_invalid_target_product(
+        self, temp_project
+    ):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        renderer = project_dir / "Binaries" / "Win64" / "UnrealEditor-Renderer.dll"
+        unrelated = project_dir / "Binaries" / "Win64" / "UnrealEditor-Broken.dll"
+        renderer.write_bytes(self._minimal_pe_image())
+        unrelated.write_bytes(b"\0" * 512)
+        self._write_editor_receipt(
+            project_dir,
+            [
+                {
+                    "Path": "$(ProjectDir)/Binaries/Win64/UnrealEditor-Renderer.dll",
+                    "Type": "DynamicLibrary",
+                },
+                {
+                    "Path": "$(ProjectDir)/Binaries/Win64/UnrealEditor-Broken.dll",
+                    "Type": "DynamicLibrary",
+                },
+            ],
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+                modules=("Renderer",),
+            )
+
+        assert result["status"] == "ok"
+
+    def test_compile_module_validates_config_suffixed_binary(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        product = (
+            project_dir
+            / "Binaries"
+            / "Win64"
+            / "UnrealEditor-Renderer-Win64-DebugGame.dll"
+        )
+        product.write_bytes(b"\0" * 512)
+        self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Binaries/Win64/"
+                "UnrealEditor-Renderer-Win64-DebugGame.dll",
+                "Type": "DynamicLibrary",
+            }],
+            config="DebugGame",
+            filename="TestProjectEditor-Win64-DebugGamex64.target",
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                config="DebugGame",
+                engine_root=self._mock_engine_root(),
+                modules=("Renderer",),
+            )
+
+        assert result["status"] == "error"
+        assert result["invalid_build_products"][0]["path"] == str(product)
+
+    def test_compile_module_rejects_receipt_without_requested_product(
+        self, temp_project
+    ):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        product = project_dir / "Binaries" / "Win64" / "UnrealEditor-RHI.dll"
+        product.write_bytes(self._minimal_pe_image())
+        self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Binaries/Win64/UnrealEditor-RHI.dll",
+                "Type": "DynamicLibrary",
+            }],
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+                modules=("Renderer",),
+            )
+
+        assert result["status"] == "error"
+        assert result["failure_kind"] == "invalid_build_receipt"
+        assert "Renderer" in result["error"]
 
     @pytest.mark.parametrize("module", ["Renderer -Clean", "../Renderer", ""])
     def test_compile_modules_rejects_unsafe_names(self, temp_project, module):
@@ -1427,6 +1841,32 @@ class TestBuildStopAndDetect:
         assert saved["status"] == "completed"
         assert saved["cancel_result"]["remaining"] == [45001]
 
+    def test_finalize_build_task_preserves_specific_failure_code(
+        self, tmp_path, monkeypatch
+    ):
+        from cli_anything.unreal.core.tasks import (
+            _finalize_build_task,
+            create_task,
+        )
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task("build.compile", {"project_path": "P.uproject"})
+
+        result = _finalize_build_task(
+            task["task_id"],
+            {
+                "status": "error",
+                "code": "INVALID_BUILD_OUTPUT",
+                "error": "Compile produced an invalid DLL.",
+            },
+        )
+
+        assert result["status"] == "failed"
+        assert result["error"] == {
+            "code": "INVALID_BUILD_OUTPUT",
+            "message": "Compile produced an invalid DLL.",
+        }
+
     def test_run_build_task_forwards_targeted_package_options(
         self, temp_project, tmp_path, monkeypatch
     ):
@@ -2400,6 +2840,70 @@ class TestBuildCLI:
         assert result.exit_code == 0, result.output
         assert captured["command"] == "build.compile"
         assert captured["payload"]["modules"] == ["Renderer", "RHI"]
+
+    def test_build_compile_surfaces_invalid_build_output_failure(
+        self, temp_project
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        invalid_product = str(
+            Path(temp_project["dir"])
+            / "Plugins"
+            / "Broken"
+            / "Binaries"
+            / "Win64"
+            / "UnrealEditor-Broken.dll"
+        )
+        final_task = {
+            "task_id": "t-invalid-output",
+            "command": "build.compile",
+            "status": "failed",
+            "log_file": "compile.log",
+            "result": {
+                "status": "error",
+                "code": "INVALID_BUILD_OUTPUT",
+                "error": "Compile produced an invalid DLL.",
+                "receipt_file": "TestProjectEditor.target",
+                "invalid_build_products": [{
+                    "path": invalid_product,
+                    "type": "DynamicLibrary",
+                    "reason": "missing DOS MZ signature",
+                }],
+            },
+            "error": {
+                "code": "INVALID_BUILD_OUTPUT",
+                "message": "Compile produced an invalid DLL.",
+            },
+        }
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.build.find_running_editors",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.commands.build.submit_task",
+            return_value={"task_id": "t-invalid-output"},
+        ), patch(
+            "cli_anything.unreal.commands.build._wait_for_task_with_log_stream",
+            return_value=final_task,
+        ):
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "--project", temp_project["uproject"],
+                "build", "compile",
+            ])
+
+        assert result.exit_code == 3
+        data = self._parse_json_output(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "INVALID_BUILD_OUTPUT"
+        assert data["details"]["result"]["receipt_file"] == (
+            "TestProjectEditor.target"
+        )
+        assert data["details"]["result"]["invalid_build_products"][0][
+            "path"
+        ] == invalid_product
 
     def test_build_compile_blocks_when_matching_editor_online(self, temp_project):
         from click.testing import CliRunner

@@ -249,7 +249,7 @@ def _finalize_build_task(
         })
         if status == "failed":
             task["error"] = {
-                "code": "TASK_EXECUTION_FAILED",
+                "code": result.get("code", "TASK_EXECUTION_FAILED"),
                 "message": result.get("error", "Task execution failed"),
             }
         else:

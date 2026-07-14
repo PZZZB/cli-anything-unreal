@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -26,6 +27,9 @@ _EDITOR_TARGET_PATTERN = re.compile(
     r"\bType\s*=\s*TargetType\s*\.\s*Editor\s*;"
 )
 _MODULE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PE_BUILD_PRODUCT_TYPES = frozenset({"dynamiclibrary", "executable"})
+_PE_BUILD_PRODUCT_SUFFIXES = frozenset({".dll", ".exe"})
+_MAX_REPORTED_INVALID_BUILD_PRODUCTS = 20
 
 _TARGET_LEXICAL_NOISE_PATTERN = re.compile(
     r"//[^\r\n]*|/\*.*?\*/|"
@@ -256,6 +260,283 @@ def _normalize_result(result: dict, action: str) -> dict:
     return out
 
 
+def _validate_pe_image(path: Path) -> str | None:
+    """Return a concise reason when a Windows build product is not a PE image."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            dos_header = handle.read(64)
+            if len(dos_header) < 64:
+                return f"file is too small for a DOS header ({size} bytes)"
+            if dos_header[:2] != b"MZ":
+                return "missing DOS MZ signature"
+
+            pe_offset = int.from_bytes(dos_header[0x3C:0x40], "little")
+            if pe_offset < 64 or pe_offset > size - 26:
+                return f"invalid PE header offset {pe_offset}"
+
+            handle.seek(pe_offset)
+            coff_header = handle.read(24)
+            if len(coff_header) != 24 or coff_header[:4] != b"PE\0\0":
+                return "missing PE signature"
+
+            machine = int.from_bytes(coff_header[4:6], "little")
+            section_count = int.from_bytes(coff_header[6:8], "little")
+            optional_header_size = int.from_bytes(coff_header[20:22], "little")
+            characteristics = int.from_bytes(coff_header[22:24], "little")
+            if machine == 0:
+                return "COFF machine is zero"
+            if section_count == 0:
+                return "COFF section count is zero"
+            if optional_header_size < 64:
+                return "PE optional header is missing"
+
+            optional_header_end = pe_offset + 24 + optional_header_size
+            if optional_header_end > size:
+                return "optional header extends past end of file"
+            section_table_end = optional_header_end + section_count * 40
+            if section_table_end > size:
+                return "section table extends past end of file"
+
+            optional_header = handle.read(optional_header_size)
+            optional_magic = int.from_bytes(optional_header[:2], "little")
+            if optional_magic not in (0x10B, 0x20B):
+                return f"invalid PE optional header magic 0x{optional_magic:04x}"
+            section_alignment = int.from_bytes(optional_header[32:36], "little")
+            file_alignment = int.from_bytes(optional_header[36:40], "little")
+            size_of_image = int.from_bytes(optional_header[56:60], "little")
+            size_of_headers = int.from_bytes(optional_header[60:64], "little")
+            if section_alignment == 0 or file_alignment == 0:
+                return "PE alignment is zero"
+            if size_of_headers < section_table_end:
+                return "SizeOfHeaders does not include the section table"
+            if size_of_headers > size:
+                return "SizeOfHeaders extends past end of file"
+            if size_of_image < size_of_headers:
+                return "SizeOfImage is smaller than SizeOfHeaders"
+            if path.suffix.casefold() == ".dll" and not characteristics & 0x2000:
+                return "COFF DLL characteristic is missing"
+
+            section_table = handle.read(section_count * 40)
+            for index in range(section_count):
+                section = section_table[index * 40:(index + 1) * 40]
+                raw_size = int.from_bytes(section[16:20], "little")
+                raw_offset = int.from_bytes(section[20:24], "little")
+                if raw_size and (
+                    raw_offset == 0
+                    or raw_offset > size
+                    or raw_size > size - raw_offset
+                ):
+                    return f"section {index} raw data extends past end of file"
+    except FileNotFoundError:
+        return "file is missing"
+    except OSError as exc:
+        return f"could not read file: {exc}"
+    return None
+
+
+def _resolve_receipt_product_path(
+    value: str,
+    *,
+    project_dir: Path,
+    engine_root: Path,
+) -> Path | None:
+    replacements = {
+        "$(ProjectDir)": str(project_dir),
+        "$(EngineDir)": str(engine_root / "Engine"),
+    }
+    for prefix, root in replacements.items():
+        if value.startswith(prefix):
+            return Path(root + value[len(prefix):])
+    if "$(" in value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else project_dir / path
+
+
+def _invalid_build_receipt(receipt_path: Path, reason: str) -> dict:
+    return {
+        "status": "error",
+        "code": "INVALID_BUILD_OUTPUT",
+        "failure_kind": "invalid_build_receipt",
+        "receipt_file": str(receipt_path),
+        "error": f"Compile exited 0, but the Editor target receipt is invalid: {reason}",
+    }
+
+
+def _load_editor_target_receipt(
+    project_dir: Path,
+    target: str,
+    config: str,
+) -> tuple[Path | None, dict | None, dict | None]:
+    """Load the receipt path selected by UE's target/config naming rules."""
+    bin_dir = project_dir / "Binaries" / "Win64"
+    candidates = []
+    if config.casefold() == "development":
+        default_path = bin_dir / f"{target}.target"
+        if default_path.is_file():
+            candidates.append(default_path)
+    candidates.extend(bin_dir.glob(f"{target}-Win64-{config}*.target"))
+    candidates = sorted(
+        dict.fromkeys(candidates),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+
+    first_error = None
+    for receipt_path in candidates:
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            if first_error is None:
+                first_error = _invalid_build_receipt(receipt_path, str(exc))
+            continue
+        if not isinstance(receipt, dict):
+            if first_error is None:
+                first_error = _invalid_build_receipt(
+                    receipt_path,
+                    "root value is not an object",
+                )
+            continue
+        if str(receipt.get("TargetName", "")).casefold() != target.casefold():
+            continue
+        if str(receipt.get("TargetType", "")).casefold() != "editor":
+            continue
+        if str(receipt.get("Platform", "")).casefold() != "win64":
+            continue
+        if str(receipt.get("Configuration", "")).casefold() != config.casefold():
+            continue
+        return receipt_path, receipt, None
+    return None, None, first_error
+
+
+def _validate_win64_editor_build_products(
+    uproject_path: str,
+    engine_root: str,
+    config: str,
+    modules: list[str] | tuple[str, ...] | None = None,
+) -> dict:
+    """Validate PE products declared by UE's generated Editor target receipt."""
+    target, target_error = _resolve_editor_target(uproject_path)
+    if target_error or not target:
+        return {}
+
+    project_dir = Path(uproject_path).parent
+    receipt_path, receipt, receipt_error = _load_editor_target_receipt(
+        project_dir,
+        target,
+        config,
+    )
+    if receipt_error:
+        return receipt_error
+    if receipt_path is None or receipt is None:
+        return {}
+
+    products = receipt.get("BuildProducts")
+    if not isinstance(products, list):
+        return _invalid_build_receipt(
+            receipt_path,
+            "BuildProducts is not an array",
+        )
+
+    invalid_products = []
+    validated_count = 0
+    engine_path = Path(engine_root)
+    requested_modules = {module.casefold() for module in (modules or ())}
+    for index, product in enumerate(products):
+        if not isinstance(product, dict):
+            return _invalid_build_receipt(
+                receipt_path,
+                f"BuildProducts[{index}] is not an object",
+            )
+        product_type = str(product.get("Type", ""))
+        raw_path = str(product.get("Path", ""))
+        if product_type.casefold() not in _PE_BUILD_PRODUCT_TYPES:
+            continue
+        if Path(raw_path).suffix.casefold() not in _PE_BUILD_PRODUCT_SUFFIXES:
+            continue
+        if requested_modules:
+            binary_tokens = set(Path(raw_path).stem.casefold().split("-"))
+            if requested_modules.isdisjoint(binary_tokens):
+                continue
+
+        path = _resolve_receipt_product_path(
+            raw_path,
+            project_dir=project_dir,
+            engine_root=engine_path,
+        )
+        if path is None:
+            return _invalid_build_receipt(
+                receipt_path,
+                f"unsupported path macro in BuildProducts[{index}]: {raw_path}",
+            )
+        validated_count += 1
+        reason = _validate_pe_image(path)
+        if reason:
+            invalid_products.append({
+                "path": str(path),
+                "type": product_type,
+                "reason": reason,
+            })
+
+    if validated_count == 0:
+        if requested_modules:
+            reason = (
+                "BuildProducts contains no PE file for requested module(s): "
+                + ", ".join(sorted(modules or ()))
+            )
+        else:
+            reason = "BuildProducts contains no resolvable PE files"
+        return _invalid_build_receipt(
+            receipt_path,
+            reason,
+        )
+    if not invalid_products:
+        return {}
+
+    invalid_count = len(invalid_products)
+    return {
+        "status": "error",
+        "code": "INVALID_BUILD_OUTPUT",
+        "failure_kind": "invalid_pe_build_product",
+        "receipt_file": str(receipt_path),
+        "validated_pe_products": validated_count,
+        "invalid_build_product_count": invalid_count,
+        "invalid_build_products": invalid_products[
+            :_MAX_REPORTED_INVALID_BUILD_PRODUCTS
+        ],
+        "error": (
+            f"Compile exited 0, but {invalid_count} PE build product(s) declared "
+            f"by {receipt_path.name} are missing or malformed. The target is not "
+            "launchable; inspect invalid_build_products and rebuild through the "
+            "project's normal local build path."
+        ),
+    }
+
+
+def _normalize_compile_result(
+    result: dict,
+    *,
+    uproject_path: str,
+    engine_root: str,
+    config: str,
+    platform: str,
+    modules: list[str] | tuple[str, ...] | None = None,
+) -> dict:
+    out = _normalize_result(result, "Compile")
+    if out["status"] != "ok" or platform.casefold() != "win64":
+        return out
+    validation = _validate_win64_editor_build_products(
+        uproject_path,
+        engine_root,
+        config,
+        modules,
+    )
+    if validation.get("status") == "error":
+        out.update(validation)
+    return out
+
+
 def compile_project(
     uproject_path: str,
     config: str = "Development",
@@ -302,7 +583,14 @@ def compile_project(
             project_dir=str(Path(uproject_path).parent),
             on_start=on_start,
         )
-        return _normalize_result(result, "Compile")
+        return _normalize_compile_result(
+            result,
+            uproject_path=uproject_path,
+            engine_root=engine_root,
+            config=config,
+            platform=platform,
+            modules=modules,
+        )
 
     if platform.lower() != "win64":
         target, target_error = _resolve_game_target(uproject_path)
@@ -319,7 +607,14 @@ def compile_project(
             project_dir=str(Path(uproject_path).parent),
             on_start=on_start,
         )
-        return _normalize_result(result, "Compile")
+        return _normalize_compile_result(
+            result,
+            uproject_path=uproject_path,
+            engine_root=engine_root,
+            config=config,
+            platform=platform,
+            modules=modules,
+        )
 
     args = [
         f"-project={uproject_path}",
@@ -337,7 +632,14 @@ def compile_project(
         project_dir=str(Path(uproject_path).parent),
         on_start=on_start,
     )
-    return _normalize_result(result, "Compile")
+    return _normalize_compile_result(
+        result,
+        uproject_path=uproject_path,
+        engine_root=engine_root,
+        config=config,
+        platform=platform,
+        modules=modules,
+    )
 
 
 def cook_content(
