@@ -1469,7 +1469,11 @@ def test_editor_launch_returns_online_when_task_wait_times_out_but_editor_is_onl
              "bridge_version": "1.17",
              "bundled_version": "1.17",
              "plugin_match": True,
-         }]):
+         }]), \
+         patch(
+             "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+             return_value=68348,
+         ):
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "launch", "--timeout", "120",
@@ -1518,7 +1522,16 @@ def test_editor_launch_does_not_recover_map_launch_without_level_verification(mi
              "bridge_version": "1.17",
              "bundled_version": "1.17",
              "plugin_match": True,
-         }]):
+         }]), \
+         patch(
+             "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+             return_value=68348,
+         ), \
+         patch("cli_anything.unreal.core.scene._verify_current_level", return_value={
+             "status": "failed",
+             "expected_package": requested_map,
+             "active_world": {"package": "/Game/Maps/TestMap"},
+         }):
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "launch", "--map", requested_map, "--timeout", "120",
@@ -1528,6 +1541,213 @@ def test_editor_launch_does_not_recover_map_launch_without_level_verification(mi
     data = json.loads(result.output)
     assert data["result"]["status"] == "launching"
     assert data["result"]["next_command"] == f'ue-cli --project "{mini_project}" editor status launch-task'
+
+
+def test_editor_launch_recovers_map_launch_after_exact_level_verification(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    requested_map = "/Game/Maps/Oregon_Main"
+    running_task = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "timeout",
+        "payload": {
+            "project_path": mini_project,
+            "map_path": requested_map,
+            "port": 30011,
+        },
+        "pid": 68348,
+    }
+    verification = {
+        "status": "ok",
+        "expected_package": requested_map,
+        "active_world": {
+            "package": requested_map,
+            "world": f"{requested_map}.Oregon_Main",
+        },
+    }
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", return_value={
+            "task_id": "launch-task",
+            "command": "editor.launch",
+        }), \
+         patch("cli_anything.unreal.commands.editor.wait_for_task", return_value=running_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
+             "status": "online",
+             "pid": 68348,
+             "port": 30011,
+             "project_path": mini_project,
+             "bridge_version": "1.18",
+             "bundled_version": "1.18",
+             "plugin_match": True,
+         }]), \
+         patch(
+             "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+             return_value=68348,
+         ), \
+         patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--map", requested_map, "--timeout", "120",
+        ])
+
+    assert result.exit_code == 0, result.output
+    recovered = json.loads(result.output)["result"]
+    assert recovered["status"] == "online"
+    assert recovered["pid"] == 68348
+    assert recovered["launch_task_status"] == "timeout"
+    assert recovered["requested_map"] == requested_map
+    assert recovered["map_verification"] == verification
+
+
+def test_editor_status_reconciles_timed_out_map_launch_when_exact_editor_is_online(
+    mini_project,
+    tmp_path,
+    monkeypatch,
+):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import create_task, load_task, save_task
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    requested_map = "/Game/Maps/Oregon_Main"
+    task = create_task("editor.launch", {
+        "project_path": mini_project,
+        "map_path": requested_map,
+        "port": 30011,
+    })
+    task.update({
+        "status": "timeout",
+        "pid": 68348,
+        "error": {"code": "TASK_TIMEOUT", "message": "startup timed out"},
+        "result": {
+            "status": "timeout",
+            "failure_kind": "api_route_unhealthy",
+            "api_route_healthy": False,
+            "next_command": f'ue-cli --project "{mini_project}" editor status {task["task_id"]}',
+            "error": "Editor API did not respond within 120s.",
+        },
+    })
+    save_task(task)
+    verification = {
+        "status": "ok",
+        "expected_package": requested_map,
+        "active_world": {"package": requested_map},
+    }
+
+    with patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
+            "status": "online",
+            "pid": 68348,
+            "port": 30011,
+            "project_path": mini_project,
+            "bridge_version": "1.18",
+            "bundled_version": "1.18",
+            "plugin_match": True,
+        }]), \
+         patch(
+             "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+             return_value=68348,
+         ), \
+         patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status", task["task_id"],
+        ])
+
+    assert result.exit_code == 0, result.output
+    progress = json.loads(result.output)["result"]
+    assert progress["status"] == "completed"
+    assert progress["result"]["status"] == "online"
+    assert progress["result"]["launch_task_status"] == "timeout"
+    assert progress["result"]["recovered_from"] == "launch_task_status"
+    assert "failure_kind" not in progress["result"]
+    assert "api_route_healthy" not in progress["result"]
+    assert "next_command" not in progress["result"]
+    assert "error" not in progress["result"]
+    persisted = load_task(task["task_id"])
+    assert persisted["status"] == "completed"
+    assert "error" not in persisted
+
+
+def test_editor_launch_recovery_rejects_online_editor_with_different_pid(mini_project):
+    from cli_anything.unreal.commands import AppState
+    from cli_anything.unreal.commands.editor import _recover_online_launch_result
+
+    state = AppState()
+    state.session.load_project(mini_project)
+    task = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "timeout",
+        "pid": 68348,
+        "payload": {"project_path": mini_project, "port": 30011},
+    }
+
+    with patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
+        "status": "online",
+        "pid": 99999,
+        "port": 30011,
+        "project_path": mini_project,
+    }]):
+        result = _recover_online_launch_result(state, task["task_id"], task)
+
+    assert result is None
+
+
+def test_editor_launch_recovery_rejects_port_owned_by_different_pid(mini_project):
+    from cli_anything.unreal.commands import AppState
+    from cli_anything.unreal.commands.editor import _recover_online_launch_result
+
+    state = AppState()
+    state.session.load_project(mini_project)
+    task = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "timeout",
+        "pid": 68348,
+        "payload": {"project_path": mini_project, "port": 30011},
+    }
+
+    with patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
+            "status": "online",
+            "pid": 68348,
+            "port": 30011,
+            "project_path": mini_project,
+        }]), \
+         patch(
+             "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+             return_value=99999,
+         ):
+        result = _recover_online_launch_result(state, task["task_id"], task)
+
+    assert result is None
+
+
+def test_editor_launch_recovery_requires_task_pid(mini_project):
+    from cli_anything.unreal.commands import AppState
+    from cli_anything.unreal.commands.editor import _recover_online_launch_result
+
+    state = AppState()
+    state.session.load_project(mini_project)
+    task = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "submitted",
+        "payload": {"project_path": mini_project, "port": 30011},
+    }
+
+    with patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
+        "status": "online",
+        "pid": 68348,
+        "port": 30011,
+        "project_path": mini_project,
+    }]):
+        result = _recover_online_launch_result(state, task["task_id"], task)
+
+    assert result is None
 
 
 def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
@@ -2315,9 +2535,10 @@ def test_wait_for_api_timeout_reports_listening_port_with_http_server_log_hints(
     assert result["failure_kind"] == "api_route_unhealthy"
     assert result["port_listening"] is True
     assert result["api_route_healthy"] is False
-    assert result["likely_cause"] == "http_server_restarted_by_project_plugin"
-    assert "FalconTunnel" in result["log_hints"][0]
-    assert "port is listening" in result["suggestion"]
+    assert "likely_cause" not in result
+    assert result["http_server_restart_status"] == "completed"
+    assert any("All listeners started" in hint for hint in result["log_hints"])
+    assert "restart completed" in result["suggestion"]
 
 
 def test_api_unreachable_diagnostics_find_http_server_hints_outside_log_tail(tmp_path):
@@ -2344,9 +2565,11 @@ def test_api_unreachable_diagnostics_find_http_server_hints_outside_log_tail(tmp
     with patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True):
         result = _diagnose_api_unreachable(log_file, 30010)
 
-    assert result["likely_cause"] == "http_server_restarted_by_project_plugin"
+    assert result["likely_cause"] == "remote_control_port_bind_failed"
     assert any("FalconTunnel" in hint for hint in result["log_hints"])
     assert any("unable to bind to 127.0.0.1:30010" in hint for hint in result["log_hints"])
+    assert "bind failure" in result["suggestion"]
+    assert "project-plugin" not in result["suggestion"]
 
 
 def test_wait_for_api_timeout_keeps_startup_log_window_for_diagnostics(tmp_path):
@@ -2380,8 +2603,58 @@ def test_wait_for_api_timeout_keeps_startup_log_window_for_diagnostics(tmp_path)
         result = _wait_for_api(proc, 30010, 3, log_file, state)
 
     assert result["status"] == "timeout"
-    assert result["likely_cause"] == "http_server_restarted_by_project_plugin"
+    assert result["likely_cause"] == "remote_control_port_bind_failed"
     assert any("FalconTunnel" in hint for hint in result["log_hints"])
+
+
+def test_remote_control_diagnostics_ignore_old_and_other_port_bind_failures(tmp_path):
+    from cli_anything.unreal.commands.editor import _diagnose_api_unreachable
+
+    log_file = tmp_path / "RXGame.log"
+    log_file.write_text(
+        "\n".join([
+            "LogHttpServerModule: Stopping all listeners...",
+            "LogHttpListener: Error: HttpListener unable to bind to 127.0.0.1:30011",
+            "LogHttpServerModule: Starting all listeners...",
+            "LogHttpServerModule: All listeners started",
+            "LogHttpServerModule: Stopping all listeners...",
+            "LogFalconTunnel: StartHttpServer on port 8262",
+            "LogHttpListener: Error: HttpListener unable to bind to 127.0.0.1:31010",
+            "LogHttpListener: Created new HttpListener on 127.0.0.1:30011",
+            "LogHttpServerModule: Starting all listeners...",
+            "LogHttpServerModule: All listeners started",
+        ]),
+        encoding="utf-8",
+    )
+
+    with patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True):
+        result = _diagnose_api_unreachable(log_file, 30011)
+
+    assert result["http_server_restart_status"] == "completed"
+    assert "likely_cause" not in result
+    assert "restart completed" in result["suggestion"]
+
+
+def test_remote_control_log_hints_prioritize_target_bind_and_restart_evidence(tmp_path):
+    from cli_anything.unreal.commands.editor import _diagnose_api_unreachable
+
+    log_file = tmp_path / "RXGame.log"
+    log_file.write_text(
+        "\n".join([
+            "LogHttpServerModule: Stopping all listeners...",
+            *[f"LogFalconTunnel: noisy diagnostic {index}" for index in range(20)],
+            "LogHttpListener: Error: HttpListener unable to bind to 127.0.0.1:30011",
+            "LogHttpServerModule: Starting all listeners...",
+            "LogHttpServerModule: All listeners started",
+        ]),
+        encoding="utf-8",
+    )
+
+    with patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True):
+        result = _diagnose_api_unreachable(log_file, 30011)
+
+    assert any("unable to bind to 127.0.0.1:30011" in hint for hint in result["log_hints"])
+    assert any("All listeners started" in hint for hint in result["log_hints"])
 
 
 def test_wait_for_api_crash_reports_progress_and_bounded_log_tail(tmp_path):
@@ -2486,6 +2759,58 @@ def test_run_editor_launch_task_persists_wait_progress(tmp_path, monkeypatch):
     assert result["result"]["startup_phase"] == "waiting_for_remote_control"
     assert result["result"]["elapsed_seconds"] == 15
     assert result["result"]["process_alive"] is True
+
+
+def test_run_editor_launch_task_timeout_returns_exact_poll_command(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text(
+        '{"FileVersion": 3, "EngineAssociation": "5.7"}',
+        encoding="utf-8",
+    )
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+        "timeout": 120,
+    })
+    proc = MagicMock()
+    proc.pid = 4242
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={
+             "status": "timeout",
+             "port": 30010,
+             "process_alive": True,
+             "failure_kind": "api_route_unhealthy",
+             "error": "Editor API did not respond within 120s on port 30010.",
+         }):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    expected = f'ue-cli --project "{uproject}" editor status {task["task_id"]}'
+    assert result["status"] == "timeout"
+    assert result["result"]["next_command"] == expected
+    assert result["error"]["details"]["next_command"] == expected
 
 
 def test_summarize_startup_precheck_includes_bridge_plugin_issues():

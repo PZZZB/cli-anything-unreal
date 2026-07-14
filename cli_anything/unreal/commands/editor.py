@@ -15,7 +15,7 @@ from pathlib import Path
 import click
 
 from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_editor, require_project
-from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, cancel_task, iter_tasks, load_task, submit_task, task_data_path, task_progress, wait_for_task
+from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, cancel_task, iter_tasks, load_task, save_task, submit_task, task_data_path, task_progress, wait_for_task
 
 
 DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 110
@@ -658,29 +658,82 @@ def _launch_wait_timeouts(timeout: int | None) -> tuple[int, int]:
     return DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS, DEFAULT_EDITOR_LAUNCH_WORKER_TIMEOUT_SECONDS
 
 
-def _recover_online_launch_result(state: AppState, task_id: str, current_task: dict) -> dict | None:
-    if (current_task.get("payload") or {}).get("map_path"):
+def _recover_online_launch_result(
+    state: AppState,
+    task_id: str,
+    current_task: dict,
+    *,
+    recovered_from: str = "launch_task_wait",
+) -> dict | None:
+    payload = current_task.get("payload") or {}
+    target_project = payload.get("project_path") or state.session.project_path
+    if not target_project:
+        return None
+    if state.session.project_path and not _same_project_path(state.session.project_path, target_project):
         return None
 
     try:
-        instances = _scan_editor_status_instances(state, "30010-30020")
-        instances = _filter_editor_status_instances(instances, state.session.project_path)
+        task_port = payload.get("port")
+        scan_range = str(task_port) if task_port is not None else "30010-30020"
+        instances = _scan_editor_status_instances(state, scan_range)
+        instances = _filter_editor_status_instances(instances, target_project)
     except Exception:
         return None
 
-    online = next((item for item in instances if item.get("status") == "online"), None)
+    task_pid = current_task.get("pid")
+    if task_pid is None:
+        return None
+    online = next(
+        (
+            item for item in instances
+            if item.get("status") == "online"
+            and (
+                item.get("pid") is not None
+                and int(item["pid"]) == int(task_pid)
+            )
+        ),
+        None,
+    )
     if online is None:
         return None
+
+    online_port = online.get("port")
+    if online_port is None:
+        return None
+    try:
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        owner_pid = UEEditorAPI._get_pid_listening_on_port(int(online_port))
+    except Exception:
+        return None
+    if owner_pid is None or int(owner_pid) != int(task_pid):
+        return None
+
+    requested_map = payload.get("map_path")
+    map_verification = None
+    if requested_map:
+        try:
+            from cli_anything.unreal.core.scene import _verify_current_level
+
+            api = UEEditorAPI(port=int(online.get("port") or task_port or state.session.port))
+            map_verification = _verify_current_level(api, requested_map, verify_timeout=5.0)
+        except Exception:
+            return None
+        if map_verification.get("status") != "ok":
+            return None
 
     result = dict(online)
     result["task_id"] = task_id
     result["command"] = "editor.launch"
     result["launch_task_status"] = current_task.get("status", "unknown")
-    result["recovered_from"] = "launch_task_wait"
+    result["recovered_from"] = recovered_from
     if not result.get("pid") and current_task.get("pid"):
         result["pid"] = current_task.get("pid")
     if current_task.get("log_file") and not result.get("log_file"):
         result["log_file"] = current_task.get("log_file")
+    if requested_map:
+        result["requested_map"] = requested_map
+        result["map_verification"] = map_verification
     return result
 
 
@@ -692,14 +745,26 @@ def _recover_online_launch_result(state: AppState, task_id: str, current_task: d
 @handle_error
 @click.pass_obj
 def editor_status(state: AppState, scan_range, show_all, project_path, task_id):
+    _load_command_project(state, project_path)
     if task_id:
         task = load_task(task_id)
         if task is None:
             raise AppError("TASK_NOT_FOUND", f"Task not found: {task_id}", exit_code=3)
+        if task.get("command") == "editor.launch" and task.get("status") == "timeout":
+            recovered = _recover_online_launch_result(
+                state,
+                task_id,
+                task,
+                recovered_from="launch_task_status",
+            )
+            if recovered is not None:
+                task["status"] = "completed"
+                task["result"] = recovered
+                task.pop("error", None)
+                task = save_task(task)
         output(task_progress(task), state)
         return
 
-    _load_command_project(state, project_path)
     instances = _scan_editor_status_instances(state, scan_range)
     if not show_all:
         instances = _filter_editor_status_instances(instances, state.session.project_path)
@@ -1283,7 +1348,12 @@ def _bounded_log_tail_lines(
 
 
 
-def _remote_control_health_from_lines(lines: list[str], *, limit: int = 8) -> dict:
+def _remote_control_health_from_lines(
+    lines: list[str],
+    *,
+    limit: int = 8,
+    target_port: int | None = None,
+) -> dict:
     falcon_lines = [line for line in lines if re.search(r"FalconTunnel|connect failed", line, re.IGNORECASE)]
     http_restart_lines = [
         line for line in lines
@@ -1296,8 +1366,44 @@ def _remote_control_health_from_lines(lines: list[str], *, limit: int = 8) -> di
         if re.search(r"RemoteControl|WebRemoteControl|WebSocket", line, re.IGNORECASE)
     ]
 
+    latest_stop = max(
+        (
+            index for index, line in enumerate(lines)
+            if re.search(r"LogHttpServerModule:.*Stopping all listeners", line, re.IGNORECASE)
+        ),
+        default=None,
+    )
+    cycle_lines = lines[latest_stop:] if latest_stop is not None else lines
+    cycle_http_lines = [line for line in cycle_lines if line in http_restart_lines]
+    cycle_falcon_lines = [line for line in cycle_lines if line in falcon_lines]
+
+    def _mentions_target_port(line: str) -> bool:
+        if target_port is None:
+            return True
+        return bool(re.search(rf"(?<!\d){re.escape(str(target_port))}(?!\d)", line))
+
+    target_bind_lines = [
+        line for line in cycle_lines
+        if re.search(r"HttpListener.*unable to bind", line, re.IGNORECASE)
+        and _mentions_target_port(line)
+    ]
+    restart_completed = bool(
+        latest_stop is not None
+        and any(
+            re.search(r"LogHttpServerModule:.*All listeners started", line, re.IGNORECASE)
+            for line in cycle_lines
+        )
+    )
+
     hints: list[str] = []
-    for group in (falcon_lines, http_restart_lines, remote_lines):
+    for group in (
+        target_bind_lines,
+        cycle_http_lines,
+        cycle_falcon_lines,
+        remote_lines,
+        http_restart_lines,
+        falcon_lines,
+    ):
         for line in group[-limit:]:
             if line not in hints:
                 hints.append(line)
@@ -1310,29 +1416,61 @@ def _remote_control_health_from_lines(lines: list[str], *, limit: int = 8) -> di
         return {}
 
     result = {"log_hints": hints}
-    if falcon_lines and http_restart_lines:
-        result["likely_cause"] = "http_server_restarted_by_project_plugin"
+    if latest_stop is not None:
+        if target_bind_lines:
+            result["http_server_restart_status"] = "bind_failed"
+        elif restart_completed:
+            result["http_server_restart_status"] = "completed"
+        else:
+            result["http_server_restart_status"] = "incomplete"
+
+    if target_bind_lines:
+        result["likely_cause"] = "remote_control_port_bind_failed"
+        port_label = str(target_port) if target_port is not None else "the requested Remote Control port"
         result["cause_hint"] = (
-            "A project plugin appears to restart Unreal's HttpServer after Remote Control starts, "
-            "leaving the TCP port reachable while Remote Control routes are unhealthy."
+            f"Unreal's HttpListener failed to bind {port_label}."
         )
-    elif http_restart_lines:
-        result["likely_cause"] = "http_server_restarted"
-        result["cause_hint"] = "Unreal's HttpServer listeners were restarted while waiting for Remote Control."
+    elif latest_stop is not None and not restart_completed:
+        if cycle_falcon_lines:
+            result["likely_cause"] = "http_server_restart_incomplete_by_project_plugin"
+            result["cause_hint"] = (
+                "A project plugin restarted Unreal's HttpServer, but the latest log cycle did not record listener startup completion."
+            )
+        else:
+            result["likely_cause"] = "http_server_restart_incomplete"
+            result["cause_hint"] = (
+                "Unreal's latest HttpServer restart did not record listener startup completion."
+            )
+    elif restart_completed:
+        result["cause_hint"] = (
+            "The HttpServer listener restart completed without a logged bind failure. "
+            "This log sequence alone does not show that Remote Control routes were lost."
+        )
     elif remote_lines:
         result["likely_cause"] = "remote_control_started_but_not_reachable"
         result["cause_hint"] = "Remote Control logged startup lines, but its HTTP route did not answer."
     return result
 
 
-def _extract_remote_control_health_hints(text: str, *, limit: int = 8) -> dict:
+def _extract_remote_control_health_hints(
+    text: str,
+    *,
+    limit: int = 8,
+    target_port: int | None = None,
+) -> dict:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return {}
-    return _remote_control_health_from_lines(lines, limit=limit)
+    return _remote_control_health_from_lines(lines, limit=limit, target_port=target_port)
 
 
-def _extract_remote_control_health_hints_from_log(log_file: Path, *, since_offset: int | None = None, limit: int = 8) -> dict:
+def _extract_remote_control_health_hints_from_log(
+    log_file: Path,
+    *,
+    since_offset: int | None = None,
+    limit: int = 8,
+    target_port: int | None = None,
+) -> dict:
     if not log_file.exists():
         return {}
     matched: list[str] = []
@@ -1361,7 +1499,7 @@ def _extract_remote_control_health_hints_from_log(log_file: Path, *, since_offse
 
     if not matched:
         return {}
-    return _remote_control_health_from_lines(matched, limit=limit)
+    return _remote_control_health_from_lines(matched, limit=limit, target_port=target_port)
 
 
 def _diagnose_api_unreachable(log_file: Path, port: int, *, since_offset: int | None = None) -> dict:
@@ -1371,21 +1509,43 @@ def _diagnose_api_unreachable(log_file: Path, port: int, *, since_offset: int | 
         "api_route_healthy": False,
         "failure_kind": "api_route_unhealthy" if port_listening else "api_not_listening",
     }
-    if port_listening:
+    hints = _extract_remote_control_health_hints_from_log(
+        log_file,
+        since_offset=since_offset,
+        target_port=port,
+    )
+    if not hints:
+        hints = _extract_remote_control_health_hints(
+            _read_log_tail(log_file),
+            target_port=port,
+        )
+    result.update(hints)
+    if port_listening and result.get("http_server_restart_status") == "completed" and not result.get("likely_cause"):
         result["suggestion"] = (
             f"Remote Control port is listening on {port}, but the HTTP route did not answer. "
-            "Check project plugins that restart Unreal's HttpServer or bind competing HTTP listeners, then retry editor status/launch."
+            "The HttpServer listener restart completed without bind errors, so do not restart the editor from this signal alone; "
+            "poll the active launch task or retry editor status."
+        )
+    elif port_listening and result.get("likely_cause") == "remote_control_port_bind_failed":
+        result["suggestion"] = (
+            f"Remote Control port is listening on {port}, but the HTTP route did not answer and the log shows a bind failure "
+            "for that port. Inspect port ownership and the reported HttpListener log hints, then retry editor status."
+        )
+    elif port_listening and result.get("likely_cause") == "http_server_restart_incomplete_by_project_plugin":
+        result["suggestion"] = (
+            f"Remote Control port is listening on {port}, but the HTTP route did not answer and the log shows an incomplete "
+            "listener restart or bind failure. Inspect the reported project-plugin log hints, then retry editor status."
+        )
+    elif port_listening:
+        result["suggestion"] = (
+            f"Remote Control port is listening on {port}, but the HTTP route did not answer. "
+            "The editor may still be initializing or temporarily busy; retry editor status."
         )
     else:
         result["suggestion"] = (
             f"Port {port} is not accepting TCP connections yet. The editor may still be starting, blocked by a dialog, "
             "or Remote Control may not have bound the configured port."
         )
-
-    hints = _extract_remote_control_health_hints_from_log(log_file, since_offset=since_offset)
-    if not hints:
-        hints = _extract_remote_control_health_hints(_read_log_tail(log_file))
-    result.update(hints)
     return result
 
 

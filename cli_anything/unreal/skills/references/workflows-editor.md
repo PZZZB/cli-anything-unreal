@@ -81,7 +81,7 @@ With top-level `--project`, `editor status` filters to that project by default. 
 
 If an online item has `plugin_match: false` and `next_command`, run it (`editor plugin-upgrade`). Do not force recompile before every launch; `editor launch` deploys bridge source and recompiles only when plugin load failure requires it.
 
-`editor status <task_id>` returns async task progress.
+`editor status <task_id>` returns async task progress. After a launch timeout, it also reconciles the task to completed only when the same project/PID is online and any requested map matches; use the returned `next_command` instead of relaunching blindly.
 
 ## Close
 

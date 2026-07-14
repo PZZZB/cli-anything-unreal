@@ -1103,6 +1103,12 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
                         f'ue-cli --project "{state.session.project_path}" editor open-level {requested_map}'
                     )
 
+    if wait_result.get("status") == "timeout":
+        wait_result.setdefault(
+            "next_command",
+            f'ue-cli --project "{state.session.project_path}" editor status {task["task_id"]}',
+        )
+
     task = load_task(task["task_id"]) or task
     task["log_file"] = str(log_file)
     merged_result = dict(task.get("result", {}))
