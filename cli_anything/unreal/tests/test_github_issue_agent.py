@@ -3,6 +3,8 @@
 from pathlib import Path
 import re
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[3]
 ISSUE_TEMPLATE_DIR = ROOT / ".github" / "ISSUE_TEMPLATE"
@@ -28,7 +30,12 @@ REQUIRED_REPORT_FIELDS = {
 REPORTING_GUIDES = (REPOSITORY_AGENTS, PACKAGED_SKILL)
 ISSUE_QUEUE_URL = "https://github.com/PZZZB/cli-anything-unreal/issues"
 GH_ISSUE_COMMAND = "gh issue create --repo PZZZB/cli-anything-unreal"
+REPORTING_PREFERENCE = (
+    "Prefer connected GitHub tooling when available; otherwise run "
+    f"`{GH_ISSUE_COMMAND}`."
+)
 SUBMISSION_MARKER = "工具坑已提交：ue-cli -> {issue_url}"
+CONVERSATION_PROHIBITION = "Do not send ue-cli issues to a Codex conversation ID."
 
 
 def _form_items(document: str) -> dict[str, str]:
@@ -55,28 +62,57 @@ def _workflow_step(document: str, name: str) -> str:
     return match.group(0)
 
 
+def _assert_reporting_guide_contract(document: str, guide: Path) -> None:
+    assert ISSUE_QUEUE_URL in document, guide
+    assert REPORTING_PREFERENCE in document, guide
+    for evidence in (
+        "version",
+        "environment",
+        "exact command",
+        "expected",
+        "actual",
+        "minimal reproduction",
+        "sanitized logs",
+    ):
+        assert evidence in document.lower(), f"{guide}: missing {evidence}"
+    assert SUBMISSION_MARKER in document, guide
+    assert CONVERSATION_PROHIBITION in document, guide
+
+
 def test_repository_and_packaged_guides_route_ue_cli_problems_to_github_issues():
     for guide in REPORTING_GUIDES:
-        document = guide.read_text(encoding="utf-8")
+        _assert_reporting_guide_contract(guide.read_text(encoding="utf-8"), guide)
 
-        assert ISSUE_QUEUE_URL in document, guide
-        assert "connected GitHub" in document, guide
-        assert GH_ISSUE_COMMAND in document, guide
-        for evidence in (
-            "version",
-            "environment",
-            "exact command",
-            "expected",
-            "actual",
-            "minimal reproduction",
-            "sanitized logs",
-        ):
-            assert evidence in document.lower(), f"{guide}: missing {evidence}"
-        assert SUBMISSION_MARKER in document, guide
-        assert re.search(
-            r"(?is)(?:do not|never|must not).*ue-cli.*Codex conversation ID",
-            document,
-        ), guide
+
+@pytest.mark.parametrize(
+    "mutated_preference",
+    (
+        f"Prefer `{GH_ISSUE_COMMAND}` when available; otherwise use connected GitHub tooling.",
+        f"Do not prefer connected GitHub tooling when available; otherwise run `{GH_ISSUE_COMMAND}`.",
+    ),
+    ids=("reversed", "negated"),
+)
+def test_reporting_contract_rejects_reversed_or_negated_github_preference(
+    mutated_preference: str,
+):
+    for guide in REPORTING_GUIDES:
+        document = guide.read_text(encoding="utf-8").replace(
+            REPORTING_PREFERENCE, mutated_preference
+        )
+
+        with pytest.raises(AssertionError):
+            _assert_reporting_guide_contract(document, guide)
+
+
+def test_reporting_contract_rejects_affirmative_conversation_routing():
+    for guide in REPORTING_GUIDES:
+        document = guide.read_text(encoding="utf-8").replace(
+            CONVERSATION_PROHIBITION,
+            "Send ue-cli issues to a Codex conversation ID.",
+        )
+
+        with pytest.raises(AssertionError):
+            _assert_reporting_guide_contract(document, guide)
 
 
 def test_bug_report_collects_required_agent_evidence_without_labels():
