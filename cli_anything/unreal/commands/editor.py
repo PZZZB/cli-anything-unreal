@@ -1136,14 +1136,27 @@ def _build_launch_cmd(editor_exe, project_path, map_path, extra_args=None) -> li
     return cmd
 
 
+def _require_rooted_level_path(path: str) -> str:
+    normalized = str(path).strip()
+    if normalized.startswith("/"):
+        return normalized
+    raise AppError(
+        "INVALID_LEVEL_PATH",
+        f"Level paths must include an Unreal mount root: {normalized or '<empty>'}",
+        exit_code=2,
+        suggestion="Pass a rooted package path such as /Game/Maps/Oregon_Main.",
+        details={"path": normalized},
+    )
+
+
 def _normalize_launch_map_path(map_path: str | None, project_dir: str) -> str | None:
-    if not map_path:
+    if map_path is None:
         return None
 
     raw_path = str(map_path).strip()
     filesystem_path = Path(raw_path)
     if not filesystem_path.is_absolute():
-        return raw_path
+        return _require_rooted_level_path(raw_path)
 
     if filesystem_path.suffix.lower() != ".umap":
         raise AppError(
@@ -1489,7 +1502,12 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
 
 @editor_group.command("launch")
 @_project_option
-@click.option("--map", "map_path", default=None, help="Level/map to open (.umap path)")
+@click.option(
+    "--map",
+    "map_path",
+    default=None,
+    help="Rooted level package path (/Game/...) or absolute .umap under project Content.",
+)
 @click.option("--no-wait", is_flag=True, default=False)
 @click.option("--timeout", default=None, type=int, help="Max seconds to wait for editor startup")
 @click.option(
@@ -2530,8 +2548,9 @@ def editor_new_level(state: AppState, level_path, template):
 @handle_error
 @click.pass_obj
 def editor_open_level(state: AppState, level_path):
-    """Open an existing level."""
+    """Open an existing level using a rooted package path such as /Game/Maps/MyMap."""
     from cli_anything.unreal.core.scene import open_level
+    level_path = _require_rooted_level_path(level_path)
     api = require_editor(state)
     result = open_level(api, level_path)
     if _is_transport_disconnect_result(result):

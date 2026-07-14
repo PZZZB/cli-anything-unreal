@@ -1227,6 +1227,43 @@ def test_editor_launch_normalizes_absolute_project_umap_to_package_path(mini_pro
     assert captured["payload"]["map_path"] == "/Game/Maps/Oregon_Main"
 
 
+def test_editor_launch_rejects_unrooted_map_name_before_submitting_task(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    with patch("cli_anything.unreal.commands.editor.submit_task") as mock_submit, \
+         patch("cli_anything.unreal.commands.editor._check_already_running") as mock_running:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--map", "Oregon_Main",
+        ])
+
+    assert result.exit_code == 2
+    data = json.loads(result.output)
+    assert data["code"] == "INVALID_LEVEL_PATH"
+    assert "/Game/" in data["suggestion"]
+    assert data["details"]["path"] == "Oregon_Main"
+    mock_submit.assert_not_called()
+    mock_running.assert_not_called()
+
+
+def test_editor_launch_rejects_explicit_empty_map_before_submitting_task(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    with patch("cli_anything.unreal.commands.editor.submit_task") as mock_submit:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--map", "",
+        ])
+
+    assert result.exit_code == 2
+    data = json.loads(result.output)
+    assert data["code"] == "INVALID_LEVEL_PATH"
+    assert data["details"]["path"] == ""
+    mock_submit.assert_not_called()
+
+
 def test_editor_launch_accepts_command_level_project(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
@@ -1261,6 +1298,7 @@ def test_editor_launch_help_lists_command_level_project():
 
     assert result.exit_code == 0, result.output
     assert "--project" in result.output
+    assert "/Game/" in result.output
 
 
 def test_editor_launch_no_extra_args_yields_empty_list(mini_project):

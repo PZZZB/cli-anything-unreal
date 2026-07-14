@@ -1655,6 +1655,25 @@ class TestScriptRunner:
         assert data["result"]["status"] == "ok"
         mock_open_level.assert_called_once()
 
+    def test_editor_open_level_rejects_unrooted_name_before_contacting_editor(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.open_level") as mock_open_level:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "open-level", "Oregon_Main",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "INVALID_LEVEL_PATH"
+        assert "/Game/" in data["suggestion"]
+        assert data["details"]["path"] == "Oregon_Main"
+        mock_editor.assert_not_called()
+        mock_open_level.assert_not_called()
+
     def test_editor_open_level_mismatch_is_top_level_error(self):
         """Open-level active-world verification failures should fail the CLI."""
         from click.testing import CliRunner
@@ -2188,5 +2207,4 @@ result = {'status': 'live_editor_ok'}
 # ═══════════════════════════════════════════════════════════════════════
 #  Test scene.py (mocked API)
 # ═══════════════════════════════════════════════════════════════════════
-
 
