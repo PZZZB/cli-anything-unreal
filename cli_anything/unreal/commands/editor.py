@@ -497,7 +497,12 @@ def _add_online_bridge_statuses(entries: list[dict]) -> None:
                 pass
 
 
-def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict]:
+def _scan_editor_status_instances(
+    state: AppState,
+    scan_range: str,
+    *,
+    include_bridge_status: bool = True,
+) -> list[dict]:
     from cli_anything.unreal.utils.ue_backend import find_running_editors
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI, scan_editor_ports
 
@@ -639,7 +644,8 @@ def _scan_editor_status_instances(state: AppState, scan_range: str) -> list[dict
         )
         instances.append(entry)
 
-    _add_online_bridge_statuses(instances)
+    if include_bridge_status:
+        _add_online_bridge_statuses(instances)
     return instances
 
 

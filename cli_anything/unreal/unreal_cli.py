@@ -267,7 +267,7 @@ def _default_output_mode() -> str:
 )
 @click.option("--output", "output_mode", type=click.Choice(["json", "text"]), default=None)
 @click.option("--project", "project_path", type=click.Path(), help="Path to .uproject file")
-@click.option("--port", type=int, default=None, help="Editor Remote Control API port (auto-detected from project config if omitted)")
+@click.option("--port", type=int, default=None, help="Editor Remote Control API port (auto-detected from a unique live editor or project config if omitted)")
 @click.option("--list-commands", is_flag=True, help="List CLI commands in a machine-readable format")
 @click.pass_context
 def cli(ctx, output_mode, project_path, port, list_commands):
@@ -284,6 +284,7 @@ def cli(ctx, output_mode, project_path, port, list_commands):
             raise SystemExit(3)
 
     if port is not None:
+        state.port_is_explicit = True
         state.session.port = port
     elif state.session.project_dir:
         from cli_anything.unreal.utils.ue_backend import read_rc_port

@@ -815,6 +815,109 @@ class TestCLI:
         data = json.loads(result.output)
         assert data["result"][0]["port"] == 30099
 
+    @pytest.mark.parametrize("with_project", [False, True])
+    def test_editor_command_recovers_stale_auto_detected_port(self, temp_project, with_project):
+        """Normal commands reuse the unique live instance found by editor status."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        created_ports = []
+
+        class FakeAPI:
+            def __init__(self, port):
+                self.port = port
+                self.project_path = None
+                created_ports.append(port)
+
+            def is_alive(self):
+                return self.port == 30011
+
+        args = ["--output", "json"]
+        if with_project:
+            args.extend(["--project", temp_project["uproject"]])
+        args.extend(["editor", "open-level", "/Game/Maps/TestMap"])
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", FakeAPI), \
+             patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[
+                 {
+                     "status": "online",
+                     "pid": 84156,
+                     "port": 30011,
+                     "project_path": temp_project["uproject"],
+                 },
+             ]) as scan_status, \
+             patch("cli_anything.unreal.commands._guard_editor_project", return_value=None), \
+             patch("cli_anything.unreal.core.scene.open_level", return_value={"status": "opened"}) as open_level:
+            result = runner.invoke(cli, args)
+
+        assert result.exit_code == 0, result.output
+        assert created_ports == [30010, 30011]
+        scan_state = scan_status.call_args.args[0]
+        assert scan_state.session.port == 30011
+        assert scan_status.call_args.args[1] == "30010-30020"
+        assert scan_status.call_args.kwargs == {"include_bridge_status": False}
+        open_level.assert_called_once()
+        assert open_level.call_args.args[1] == "/Game/Maps/TestMap"
+        assert open_level.call_args.args[0].port == 30011
+
+    def test_editor_command_does_not_override_explicit_stale_port(self):
+        """An explicit --port remains authoritative even when another editor is online."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        api = MagicMock()
+        api.is_alive.return_value = False
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=api), \
+             patch("cli_anything.unreal.commands.editor._scan_editor_status_instances") as scan_status:
+            result = runner.invoke(cli, [
+                "--output", "json", "--port", "30010",
+                "editor", "open-level", "/Game/Maps/TestMap",
+            ])
+
+        assert result.exit_code == 4
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_UNREACHABLE"
+        assert "30010" in data["message"]
+        scan_status.assert_not_called()
+
+    def test_editor_command_does_not_select_another_projects_live_port(self, temp_project):
+        """Project-scoped commands never recover through an unrelated live editor."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        created_ports = []
+
+        class FakeAPI:
+            def __init__(self, port):
+                self.port = port
+                self.project_path = None
+                created_ports.append(port)
+
+            def is_alive(self):
+                return False
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", FakeAPI), \
+             patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[
+                 {
+                     "status": "online",
+                     "pid": 99999,
+                     "port": 30011,
+                     "project_path": str(Path(temp_project["uproject"]).with_name("Other.uproject")),
+                 },
+             ]):
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "editor", "open-level", "/Game/Maps/TestMap",
+            ])
+
+        assert result.exit_code == 4
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_UNREACHABLE"
+        assert created_ports == [30010]
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Test blueprint.py (mocked)

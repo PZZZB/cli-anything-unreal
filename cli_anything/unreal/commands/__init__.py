@@ -30,6 +30,7 @@ class AppState:
     def __init__(self):
         self.json_output: bool = True
         self.session: Session = Session()
+        self.port_is_explicit: bool = False
         self.skin: ReplSkin = ReplSkin("unreal", version=__version__)
         self.in_repl: bool = False
         self.output_mode: str = "json"
@@ -247,12 +248,56 @@ def _guard_editor_project(state: AppState, api_cls) -> None:
         )
 
 
+def _discover_online_editor_port(state: AppState) -> int | None:
+    """Return one unambiguous live editor port when the selected port is stale."""
+    if state.port_is_explicit:
+        return None
+
+    try:
+        from cli_anything.unreal.commands.editor import _scan_editor_status_instances
+
+        instances = _scan_editor_status_instances(
+            state,
+            "30010-30020",
+            include_bridge_status=False,
+        )
+    except Exception:
+        return None
+
+    ports: set[int] = set()
+    for instance in instances:
+        if instance.get("status") != "online" or instance.get("port") is None:
+            continue
+        if state.session.project_path and not _same_project_path(
+            instance.get("project_path"),
+            state.session.project_path,
+        ):
+            continue
+        try:
+            ports.add(int(instance["port"]))
+        except (TypeError, ValueError):
+            continue
+    if len(ports) == 1:
+        return ports.pop()
+    return None
+
+
 def require_editor(state: AppState):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     api = UEEditorAPI(port=state.session.port)
     api.project_path = state.session.project_path
-    if not api.is_alive():
+    api_alive = api.is_alive()
+    if not api_alive:
+        live_port = _discover_online_editor_port(state)
+        if live_port is not None:
+            live_api = UEEditorAPI(port=live_port)
+            live_api.project_path = state.session.project_path
+            if live_api.is_alive():
+                state.session.port = live_port
+                api = live_api
+                api_alive = True
+    if not api_alive:
         raise AppError(
             "EDITOR_UNREACHABLE",
             f"Editor HTTP API not responding on port {state.session.port}.",
