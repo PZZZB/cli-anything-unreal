@@ -19,6 +19,12 @@ from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
+def _raise_if_editor_became_unreachable(api: UEEditorAPI, result: dict) -> None:
+    """Propagate a failed editor request when the endpoint has disappeared."""
+    if result.get("error") and not api.is_alive():
+        raise ConnectionError(str(result["error"]))
+
+
 def _material_asset_path_candidates(material_path: str) -> list[str]:
     """Return likely loadable material asset paths for UE object path forms."""
     base_path = str(material_path).strip().split(":", 1)[0]
@@ -960,6 +966,7 @@ def get_material_info(
         package_paths=["/Game"],
         recursive=True,
     )
+    _raise_if_editor_became_unreachable(api, search_result)
 
     basic_info = {}
     for asset in search_result.get("Assets", []):
@@ -995,6 +1002,7 @@ def get_material_info(
                 basic_info[key] = script_result[key]
     else:
         # Python script failed — record as note, RC API data still available
+        _raise_if_editor_became_unreachable(api, script_result)
         basic_info["detail_note"] = (
             f"Python script unavailable ({script_result['error']}). "
             "Node-level details require the EditorScriptingUtilities / Python plugin. "

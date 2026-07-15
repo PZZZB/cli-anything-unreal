@@ -202,6 +202,7 @@ class TestMaterials:
                 "Functions": [{"Name": "SetBlendMode"}],
             },
         )
+        mock_api.is_alive.return_value = True
 
         # Script fails (Python plugin not enabled)
         mock_exec_script.return_value = {
@@ -217,6 +218,35 @@ class TestMaterials:
         assert "Python script unavailable" in result["detail_note"]
         # Should NOT have nodes (script failed)
         assert "nodes" not in result
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_get_material_info_raises_when_editor_drops_during_detail(self, mock_exec_script):
+        """A transport failure must not become a successful empty inspection."""
+        from cli_anything.unreal.core.materials import get_material_info
+
+        mock_api = self._make_mock_api(assets={"Assets": []})
+        mock_api.is_alive.return_value = False
+        mock_exec_script.return_value = {
+            "error": "HTTPConnectionPool: WinError 10061 connection actively refused",
+        }
+
+        with pytest.raises(ConnectionError, match="WinError 10061"):
+            get_material_info(mock_api, "/Engine/EngineDebugMaterials/GeomMaterial")
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_get_material_info_raises_when_editor_drops_during_search(self, mock_exec_script):
+        """Asset-search transport failures are propagated before the fallback runs."""
+        from cli_anything.unreal.core.materials import get_material_info
+
+        mock_api = self._make_mock_api(
+            assets={"error": "HTTPConnectionPool: WinError 10061 connection actively refused"},
+        )
+        mock_api.is_alive.return_value = False
+
+        with pytest.raises(ConnectionError, match="WinError 10061"):
+            get_material_info(mock_api, "/Game/TestMat")
+
+        mock_exec_script.assert_not_called()
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_analyze_material_structure(self, mock_exec_script):
@@ -400,6 +430,31 @@ class TestMaterials:
             assert data["status"] == "success"
             assert "nodes" in data["result"]
             assert data["result"]["node_count"] == 1
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_info_cli_reports_editor_unreachable_after_connection_drop(self, mock_exec_script):
+        """The CLI exposes a mid-query disconnect as a top-level protocol error."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec_script.return_value = {
+            "error": "HTTPConnectionPool: WinError 10061 connection actively refused",
+        }
+        mock_api = self._make_mock_api(assets={"Assets": []})
+        mock_api.is_alive.return_value = False
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.material.require_editor", return_value=mock_api):
+            result = runner.invoke(cli, [
+                "--output", "json", "material", "info",
+                "/Engine/EngineDebugMaterials/GeomMaterial",
+            ])
+
+        assert result.exit_code == 4
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "EDITOR_UNREACHABLE"
+        assert "WinError 10061" in data["message"]
 
 
 # ═══════════════════════════════════════════════════════════════════════
