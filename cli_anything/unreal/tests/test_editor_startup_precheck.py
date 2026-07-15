@@ -831,7 +831,7 @@ def test_editor_close_kills_matching_project_process_after_graceful_timeout(mini
         "SaveDirtyPackages",
         {"bSaveMapPackages": True, "bSaveContentPackages": True},
     )
-    mock_api.exec_console.assert_called_once_with("QUIT_EDITOR")
+    mock_api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
     kill_process.assert_called_once_with(1234)
     data = json.loads(result.output)
     assert data["status"] == "success"
@@ -862,6 +862,7 @@ def test_editor_close_waits_for_process_exit_after_api_closes(mini_project):
         ])
 
     assert result.exit_code == 0, result.output
+    mock_api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
     mock_wait.assert_called_once_with(mini_project, 30010, timeout=60)
     data = json.loads(result.output)
     assert data["status"] == "success"

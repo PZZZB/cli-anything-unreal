@@ -1816,7 +1816,10 @@ def _close_editor_for_project(api, state: AppState) -> dict:
     except Exception:
         pass
 
-    api.exec_console("QUIT_EDITOR")
+    # QUIT_EDITOR can tear down Remote Control before its HTTP response is
+    # delivered.  Bound that expected response race so process verification
+    # and the command's final JSON are not delayed by the client's 30s default.
+    api.exec_console("QUIT_EDITOR", timeout=1)
     deadline = time.time() + 30
     last_process_evidence = None
     while time.time() < deadline:
