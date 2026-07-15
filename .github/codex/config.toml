@@ -1,0 +1,41 @@
+default_permissions = "issue-agent"
+
+[features.network_proxy]
+enabled = true
+
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = true
+include_only = [
+  "PATH",
+  "HOME",
+  "USER",
+  "CI",
+  "LANG",
+  "LC_*",
+  "TMP*",
+  "GH_TOKEN",
+  "ISSUE_NUMBER",
+  "ISSUE_URL",
+  "TARGET_BRANCH",
+  "GITHUB_REPOSITORY",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_TERMINAL_PROMPT",
+]
+
+[permissions.issue-agent]
+description = "Edit this repository and publish Issue results through GitHub."
+extends = ":workspace"
+
+[permissions.issue-agent.filesystem]
+":slash_tmp" = "write"
+
+[permissions.issue-agent.filesystem.":workspace_roots"]
+".git" = "write"
+
+[permissions.issue-agent.network]
+enabled = true
+
+[permissions.issue-agent.network.domains]
+"github.com" = "allow"
+"api.github.com" = "allow"
