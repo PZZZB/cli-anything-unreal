@@ -13,7 +13,6 @@ TEMPLATE_CONFIG = ISSUE_TEMPLATE_DIR / "config.yml"
 AGENT_PROMPT = ROOT / ".github" / "codex" / "prompts" / "issue-agent.md"
 CODEX_CONFIG = ROOT / ".github" / "codex" / "config.toml"
 ISSUE_WORKFLOW = ROOT / ".github" / "workflows" / "issue-agent.yml"
-REPOSITORY_AGENTS = ROOT / "AGENTS.md"
 PACKAGED_SKILL = ROOT / "cli_anything" / "unreal" / "skills" / "SKILL.md"
 
 UNTRUSTED_ISSUE_BEGIN = "<<<UNTRUSTED_ISSUE_JSON_BEGIN>>>"
@@ -28,7 +27,7 @@ REQUIRED_REPORT_FIELDS = {
     "reproduction",
 }
 
-REPORTING_GUIDES = (REPOSITORY_AGENTS, PACKAGED_SKILL)
+REPORTING_GUIDES = (PACKAGED_SKILL,)
 ISSUE_QUEUE_URL = "https://github.com/PZZZB/cli-anything-unreal/issues"
 GH_ISSUE_COMMAND = "gh issue create --repo PZZZB/cli-anything-unreal"
 REPORTING_PREFERENCE = (
@@ -75,7 +74,7 @@ def _assert_reporting_guide_contract(document: str, guide: Path) -> None:
     assert CONVERSATION_PROHIBITION in document, guide
 
 
-def test_repository_and_packaged_guides_route_ue_cli_problems_to_github_issues():
+def test_packaged_guide_routes_ue_cli_problems_to_github_issues():
     for guide in REPORTING_GUIDES:
         _assert_reporting_guide_contract(guide.read_text(encoding="utf-8"), guide)
 
