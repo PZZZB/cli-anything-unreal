@@ -5,7 +5,7 @@
 ```bash
 cd F:\workspace\CLI-Anything\unreal\agent-harness
 pip install -e ".[dev]"
-python -m pytest cli_anything/unreal/tests/test_core.py cli_anything/unreal/tests/test_editor_startup_precheck.py -q
+python -m pytest cli_anything/unreal/tests/ -q
 ```
 
 ## Bounded E2E Smoke
