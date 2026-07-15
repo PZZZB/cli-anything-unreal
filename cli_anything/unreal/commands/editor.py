@@ -1716,7 +1716,10 @@ def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, ext
 
     final_task = wait_for_task(task["task_id"], foreground_timeout)
     if final_task is None:
-        current = load_task(task["task_id"]) or task
+        try:
+            current = load_task(task["task_id"]) or task
+        except PermissionError:
+            current = task
         online_result = _recover_online_launch_result(state, task["task_id"], current)
         if online_result is not None:
             output(online_result, state)

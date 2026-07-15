@@ -15,6 +15,7 @@ from pathlib import Path
 
 FINAL_TASK_STATUSES = {"completed", "failed", "timeout", "cancelled"}
 BUILD_TASK_COMMANDS = {"build.compile", "build.cook", "build.package"}
+_WINDOWS_TASK_IO_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
 
 
 def _task_root() -> Path:
@@ -65,6 +66,18 @@ def _task_lock(task_id: str):
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _retry_windows_task_io(operation):
+    """Retry task-file operations blocked by transient Windows sharing locks."""
+    for delay in _WINDOWS_TASK_IO_RETRY_DELAYS_SECONDS:
+        try:
+            return operation()
+        except PermissionError:
+            if sys.platform != "win32":
+                raise
+            time.sleep(delay)
+    return operation()
 
 
 def _normalize_project_path(path: str) -> str:
@@ -164,11 +177,20 @@ def create_task(command: str, payload: dict) -> dict:
     return save_task(task)
 
 
-def load_task(task_id: str) -> dict | None:
+def _load_task_unlocked(task_id: str) -> dict | None:
     path = _task_path(task_id)
-    if not path.exists():
+    try:
+        text = _retry_windows_task_io(
+            lambda: path.read_text(encoding="utf-8")
+        )
+    except FileNotFoundError:
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(text)
+
+
+def load_task(task_id: str) -> dict | None:
+    with _task_lock(task_id):
+        return _load_task_unlocked(task_id)
 
 
 def _write_task_unlocked(task: dict) -> dict:
@@ -182,7 +204,7 @@ def _write_task_unlocked(task: dict) -> dict:
             json.dumps(task, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        os.replace(temp_path, path)
+        _retry_windows_task_io(lambda: os.replace(temp_path, path))
     finally:
         temp_path.unlink(missing_ok=True)
     return task
@@ -202,7 +224,7 @@ def update_task_fields(
 ) -> dict | None:
     """Atomically merge task fields without dropping another process's metadata."""
     with _task_lock(task_id):
-        task = load_task(task_id)
+        task = _load_task_unlocked(task_id)
         if task is None:
             return None
         if updates:
@@ -221,7 +243,7 @@ def _finalize_build_task(
 ) -> dict | None:
     """Commit a build result against the latest cancellation state."""
     with _task_lock(task_id):
-        task = load_task(task_id)
+        task = _load_task_unlocked(task_id)
         if task is None:
             return None
 
@@ -261,7 +283,7 @@ def reconcile_task_cancellation(task_id: str, killed_pids: list[int]) -> dict | 
     """Reconcile a task after a later process scan kills prior survivors."""
     killed_set = set(killed_pids)
     with _task_lock(task_id):
-        task = load_task(task_id)
+        task = _load_task_unlocked(task_id)
         if task is None:
             return None
         cancel_result = dict(task.get("cancel_result", {}))
@@ -288,9 +310,11 @@ def iter_tasks() -> list[dict]:
     tasks: list[dict] = []
     for path in _task_root().glob("*.json"):
         try:
-            tasks.append(json.loads(path.read_text(encoding="utf-8")))
+            task = load_task(path.stem)
         except (OSError, json.JSONDecodeError):
             continue
+        if task is not None:
+            tasks.append(task)
     tasks.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
     return tasks
 
@@ -365,20 +389,42 @@ def spawn_worker(task_id: str) -> int:
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(cmd, **kwargs)
-    update_task_fields(task_id, worker_pid=proc.pid)
+    try:
+        update_task_fields(task_id, worker_pid=proc.pid)
+    except PermissionError:
+        # The worker is already alive and will persist its own PID/status. Do
+        # not tell the caller launch failed while that task still exists.
+        if not _task_path(task_id).exists():
+            raise
     return proc.pid
 
 
 def submit_task(command: str, payload: dict) -> dict:
     task = create_task(command, payload)
-    spawn_worker(task["task_id"])
-    return load_task(task["task_id"]) or task
+    worker_pid = spawn_worker(task["task_id"])
+    try:
+        latest = load_task(task["task_id"])
+    except PermissionError:
+        if not _task_path(task["task_id"]).exists():
+            raise
+        latest = None
+    submitted = latest or task
+    submitted.setdefault("worker_pid", worker_pid)
+    return submitted
 
 
 def wait_for_task(task_id: str, timeout: int | None) -> dict | None:
     deadline = None if timeout is None else time.time() + timeout
     while True:
-        task = load_task(task_id)
+        try:
+            task = load_task(task_id)
+        except PermissionError:
+            if not _task_path(task_id).exists():
+                raise
+            if deadline is not None and time.time() >= deadline:
+                return None
+            time.sleep(0.5)
+            continue
         if task is None:
             return None
         if task.get("status") in FINAL_TASK_STATUSES:

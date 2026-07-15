@@ -1481,6 +1481,108 @@ class TestBuildStopAndDetect:
 
         assert load_task(task["task_id"])["status"] == "submitted"
 
+    def test_save_task_retries_transient_windows_replace_permission_error(
+        self, tmp_path, monkeypatch
+    ):
+        """Windows sharing violations must not turn a live task into INTERNAL_ERROR."""
+        from contextlib import nullcontext
+
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task("editor.launch", {"project_path": "P.uproject"})
+        original_replace = tasks.os.replace
+        attempts = []
+
+        def sharing_violation_then_replace(source, destination):
+            attempts.append((source, destination))
+            if len(attempts) < 3:
+                raise PermissionError(13, "Permission denied", str(destination))
+            return original_replace(source, destination)
+
+        task["status"] = "running"
+        with patch.object(tasks.sys, "platform", "win32"), patch.object(
+            tasks,
+            "_task_lock",
+            side_effect=lambda task_id: nullcontext(),
+        ), patch.object(
+            tasks.os,
+            "replace",
+            side_effect=sharing_violation_then_replace,
+        ), patch.object(tasks.time, "sleep") as sleep:
+            tasks.save_task(task)
+
+        assert len(attempts) == 3
+        assert sleep.call_count == 2
+        assert tasks.load_task(task["task_id"])["status"] == "running"
+
+    def test_load_task_uses_task_lock(self, tmp_path, monkeypatch):
+        """Readers must share the writer lock so os.replace is safe on Windows."""
+        from contextlib import contextmanager
+
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task("editor.launch", {"project_path": "P.uproject"})
+        lock_events = []
+
+        @contextmanager
+        def recording_lock(task_id):
+            lock_events.append(("enter", task_id))
+            yield
+            lock_events.append(("exit", task_id))
+
+        with patch.object(tasks, "_task_lock", side_effect=recording_lock):
+            loaded = tasks.load_task(task["task_id"])
+
+        assert loaded["task_id"] == task["task_id"]
+        assert lock_events == [
+            ("enter", task["task_id"]),
+            ("exit", task["task_id"]),
+        ]
+
+    def test_submit_task_keeps_live_worker_after_task_record_permission_error(
+        self, tmp_path, monkeypatch
+    ):
+        """A started worker remains valid if its PID write is briefly blocked."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        worker = MagicMock(pid=41652)
+        with patch.object(tasks.subprocess, "Popen", return_value=worker), patch.object(
+            tasks,
+            "update_task_fields",
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            task = tasks.submit_task(
+                "editor.launch",
+                {"project_path": "P.uproject"},
+            )
+
+        assert task["status"] == "submitted"
+        assert task["worker_pid"] == 41652
+        assert tasks.load_task(task["task_id"])["task_id"] == task["task_id"]
+
+    def test_wait_for_task_keeps_polling_after_task_record_permission_error(
+        self, tmp_path, monkeypatch
+    ):
+        """Foreground wait must continue while an existing worker task is updating."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task("editor.launch", {"project_path": "P.uproject"})
+        completed = dict(task, status="completed", result={"status": "online"})
+
+        with patch.object(
+            tasks,
+            "load_task",
+            side_effect=[PermissionError(13, "Permission denied"), completed],
+        ), patch.object(tasks.time, "sleep") as sleep:
+            result = tasks.wait_for_task(task["task_id"], timeout=5)
+
+        assert result == completed
+        sleep.assert_called_once_with(0.5)
+
     def test_create_task_normalizes_project_path_for_cross_cwd_stop(
         self, temp_project, tmp_path, monkeypatch
     ):

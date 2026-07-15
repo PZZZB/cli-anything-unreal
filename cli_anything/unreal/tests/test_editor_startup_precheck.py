@@ -1442,6 +1442,49 @@ def test_editor_launch_without_timeout_uses_bounded_foreground_wait(mini_project
     assert captured["wait_timeout"] <= 120
 
 
+def test_editor_launch_returns_progress_when_final_task_read_is_blocked(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    submitted_task = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "submitted",
+        "worker_pid": 41652,
+        "suggested_poll_interval_seconds": 5,
+    }
+
+    with patch(
+        "cli_anything.unreal.commands.editor.submit_task",
+        return_value=submitted_task,
+    ), patch(
+        "cli_anything.unreal.commands.editor.wait_for_task",
+        return_value=None,
+    ), patch(
+        "cli_anything.unreal.commands.editor.load_task",
+        side_effect=PermissionError(13, "Permission denied"),
+    ), patch(
+        "cli_anything.unreal.commands.editor._check_already_running",
+        return_value=None,
+    ), patch(
+        "cli_anything.unreal.commands.editor._scan_editor_status_instances",
+        return_value=[],
+    ):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--timeout", "1",
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["result"]["status"] == "launching"
+    assert data["result"]["task_id"] == "launch-task"
+    assert data["result"]["worker_pid"] == 41652
+    assert data["result"]["next_command"] == (
+        f'ue-cli --project "{mini_project}" editor status launch-task'
+    )
+
+
 def test_editor_launch_returns_online_when_task_wait_times_out_but_editor_is_online(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
