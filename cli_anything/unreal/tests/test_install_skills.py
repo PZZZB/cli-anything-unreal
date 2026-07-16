@@ -23,6 +23,18 @@ class TestInstallSkills:
         assert "name: ue-cli" in skill_md
         assert evals["skill_name"] == "ue-cli"
 
+    def test_viewport_realtime_guidance_is_reflection_aware(self):
+        """Bundled editor workflows query the engine before choosing a fallback."""
+        references_dir = Path(__file__).parent.parent / "skills" / "references"
+
+        for filename in ("workflows-editor.md", "workflows-editor.original.md"):
+            workflow = (references_dir / filename).read_text(encoding="utf-8")
+            assert "editor api-discover LevelEditorSubsystem -q realtime" in workflow
+            assert "EditorSetViewportRealtime" in workflow
+            assert "editor_set_viewport_realtime(True)" in workflow
+            assert "viewport realtime -> not exposed to Python" not in workflow
+            assert "viewport realtime → not exposed to Python" not in workflow
+
     def test_install_to_custom_target(self, tmp_path):
         """--target writes the full skill tree to the given dir.
 

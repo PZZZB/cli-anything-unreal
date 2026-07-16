@@ -295,7 +295,7 @@ UE Python functions live on Library/Subsystem helpers, not usually objects thems
 - `create_material` -> `get_asset_tools().create_asset()`, not `MaterialEditingLibrary`
 - `set_material(slot, mat)` -> call on `MeshComponent`, not `StaticMesh` asset
 - `set_location` -> `Actor.set_actor_location(vector)`; UE uses `set_actor_*`
-- viewport realtime -> not exposed to Python; use CVars via `editor exec`
+- viewport realtime -> exposure varies by engine version. Run `editor api-discover LevelEditorSubsystem -q realtime`; when it lists `EditorSetViewportRealtime` / `editor_set_viewport_realtime`, call `unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_set_viewport_realtime(True)`. Fall back to console/CVars only when reflection confirms the function is unavailable.
 
 **When you can't find the class**: pass live actor/asset path:
 ```bash
