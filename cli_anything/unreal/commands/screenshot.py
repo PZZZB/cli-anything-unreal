@@ -53,6 +53,7 @@ def screenshot_static(state: AppState, output_path, filename, no_compress):
         api, filename,
         project_dir=state.session.project_dir,
         output_path=output_path,
+        jpeg_for_llm=not no_compress,
     )
     _raise_capture_error(result)
 

@@ -239,8 +239,62 @@ class TestScreenshot:
 
         assert result.exit_code == 0
         assert mock_capture.call_args.kwargs["output_path"] == str(target)
+        assert mock_capture.call_args.kwargs["jpeg_for_llm"] is False
         data = json.loads(result.output)
         assert data["result"]["default_path"] == str(target)
+
+    def test_capture_no_compress_forwards_to_core(self, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        target = tmp_path / "custom" / "shot.png"
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.screenshot.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.screenshot.take_screenshot") as mock_capture:
+            mock_editor.return_value = MagicMock()
+            mock_capture.return_value = {
+                "status": "ok",
+                "path_raw": str(target),
+                "read_this": str(target),
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "screenshot", "capture",
+                "--no-compress",
+            ])
+
+        assert result.exit_code == 0
+        assert mock_capture.call_args.kwargs["output_path"] is None
+        assert mock_capture.call_args.kwargs["jpeg_for_llm"] is False
+        data = json.loads(result.output)
+        assert data["result"]["default_path"] == str(target)
+
+    def test_take_screenshot_no_compress_skips_jpeg(self, tmp_path):
+        from cli_anything.unreal.core.screenshot import take_screenshot
+
+        raw_path = tmp_path / "shot.png"
+        raw_path.write_bytes(b"png")
+        raw_result = {
+            "status": "ok",
+            "path_raw": str(raw_path),
+            "size_raw": raw_path.stat().st_size,
+            "capture_mode": "bridge_active_viewport",
+            "refresh": {},
+        }
+
+        with patch(
+            "cli_anything.unreal.core.screenshot._capture_viewport_png_raw",
+            return_value=raw_result,
+        ), patch("cli_anything.unreal.core.screenshot.compress_for_agent") as compress:
+            result = take_screenshot(MagicMock(), jpeg_for_llm=False)
+
+        compress.assert_not_called()
+        assert result["read_this"] == str(raw_path)
+        assert result["path_raw"] == str(raw_path)
+        assert "compressed" not in result
+        assert "size_compressed" not in result
+        assert "compress_hint" not in result
 
     def test_capture_replaces_stale_output_with_new_native_frame(self, tmp_path):
         from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw

@@ -341,6 +341,7 @@ def take_screenshot(
     res_y: int = 1080,
     delay: float = _DEFAULT_RENDER_DELAY,
     output_path: str | None = None,
+    jpeg_for_llm: bool = True,
 ) -> dict:
     """Capture the active Level Viewport to PNG (then optional JPEG for agents).
 
@@ -353,6 +354,7 @@ def take_screenshot(
         res_y: Reserved for API compatibility; capture uses the live viewport height.
         delay: Seconds for viewport to render before capture.
         output_path: Optional full path for the requested PNG/JPG output.
+        jpeg_for_llm: Whether to create and select a compressed JPEG result.
 
     Returns:
         {"path": str, "size": int} or {"error": str}
@@ -369,7 +371,11 @@ def take_screenshot(
             if requested_path and requested_path.suffix.lower() in {".jpg", ".jpeg"}
             else None
         )
-        compressed = compress_for_agent(screenshot_path, output_path=compressed_target)
+        compressed = (
+            compress_for_agent(screenshot_path, output_path=compressed_target)
+            if jpeg_for_llm
+            else None
+        )
         response = {
             "status": "ok",
             "read_this": compressed or screenshot_path,
@@ -384,14 +390,15 @@ def take_screenshot(
             response["warning"] = raw["warning"]
         if requested_path:
             response["requested_path"] = str(requested_path)
-        if compressed:
-            response["compressed"] = compressed
-            response["size_compressed"] = Path(compressed).stat().st_size
-        else:
-            response["compress_hint"] = (
-                "Auto-compress unavailable (Pillow not installed). "
-                "Returning raw PNG. Install with: pip install Pillow"
-            )
+        if jpeg_for_llm:
+            if compressed:
+                response["compressed"] = compressed
+                response["size_compressed"] = Path(compressed).stat().st_size
+            else:
+                response["compress_hint"] = (
+                    "Auto-compress unavailable (Pillow not installed). "
+                    "Returning raw PNG. Install with: pip install Pillow"
+                )
         return response
     return raw
 
