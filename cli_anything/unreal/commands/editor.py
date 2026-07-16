@@ -2075,13 +2075,33 @@ def _read_log_delta(
     return "\n".join(lines).strip()
 
 
+def _is_live_coding_compile(command: str) -> bool:
+    """Return whether *command* starts UE's out-of-process Live Coding compile."""
+    return bool(re.fullmatch(r"\s*LiveCoding\.Compile\s*", command, re.IGNORECASE))
+
+
+def _deterministic_compile_commands(state: AppState) -> list[str]:
+    project_path = getattr(state.session, "project_path", None)
+    project_arg = f'"{project_path}"' if project_path else "<path-to-.uproject>"
+    prefix = f"ue-cli --project {project_arg}"
+    return [
+        f"{prefix} editor close",
+        f"{prefix} build compile",
+    ]
+
+
 @editor_group.command("exec")
-@click.option("--timeout", default=15, type=int, help="Max seconds to wait for captured log output.")
+@click.option(
+    "--timeout",
+    default=15,
+    type=int,
+    help="Max seconds to wait for synchronous command dispatch and captured output.",
+)
 @click.option(
     "--log-wait",
     default=1.0,
     type=float,
-    help="Max seconds to collect Output Log lines; Automation waits for Queue Empty.",
+    help="Max seconds to collect project Output Log lines; cannot observe separate-process logs.",
 )
 @click.argument("command")
 @handle_error
@@ -2094,6 +2114,7 @@ def editor_exec(state: AppState, timeout, log_wait, command):
     or ``editor run-script -`` for stdin.
     """
     api = require_editor(state)
+    live_coding_compile = _is_live_coding_compile(command)
     log_file = _resolve_editor_log_file(state)
     log_start = log_file.stat().st_size if log_file and log_file.exists() else 0
 
@@ -2185,6 +2206,29 @@ def editor_exec(state: AppState, timeout, log_wait, command):
                     "powershell -NoProfile -Command "
                     f"\"Get-Content -LiteralPath '{escaped_log}' -Tail 200\""
                 )
+
+    if live_coding_compile and not result.get("error"):
+        next_commands = _deterministic_compile_commands(state)
+        result.update({
+            "status": "submitted",
+            "completion_observable": False,
+            "completion_status": "unknown",
+            "log_capture_status": "unobservable",
+            "log_wait_seconds": log_wait,
+            "next_commands": next_commands,
+        })
+        raise AppError(
+            "LIVECODING_RESULT_UNOBSERVABLE",
+            "LiveCoding.Compile was submitted, but editor exec cannot observe the "
+            "asynchronous LiveCodingConsole completion result; compile success is unknown.",
+            exit_code=3,
+            suggestion=(
+                "Do not treat this command as a successful compile. For a deterministic "
+                f"result, run `{next_commands[0]}` and then `{next_commands[1]}`; otherwise "
+                "inspect the separate LiveCodingConsole manually."
+            ),
+            details=result,
+        )
 
     output(result, state)
 

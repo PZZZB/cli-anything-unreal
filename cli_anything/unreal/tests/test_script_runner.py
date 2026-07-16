@@ -2036,6 +2036,52 @@ result = {'status': 'live_editor_ok'}
         assert "longer wait" in data["suggestion"]
 
 
+    def test_editor_exec_reports_live_coding_result_as_unobservable(self, tmp_path):
+        import re
+
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        log_file = tmp_path / "RXGame.log"
+        log_file.write_text("before\n", encoding="utf-8")
+
+        def fake_exec_python_ex(script, *, timeout=None):
+            begin = re.search(r'_begin = "([^"]+)"', script).group(1)
+            end = re.search(r'_end = "([^"]+)"', script).group(1)
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"{begin}\n")
+                handle.write("LogLiveCoding: Starting Live Coding compile.\n")
+                handle.write(f"{end}\n")
+            return {"ReturnValue": True, "LogOutput": []}
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.commands.editor._resolve_editor_log_file", return_value=log_file):
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.side_effect = fake_exec_python_ex
+            mock_editor.return_value = mock_api
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec",
+                "--log-wait", "0", "livecoding.compile",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "LIVECODING_RESULT_UNOBSERVABLE"
+        assert "LiveCodingConsole" in data["message"]
+        assert "build compile" in data["suggestion"]
+        assert data["details"]["status"] == "submitted"
+        assert data["details"]["completion_observable"] is False
+        assert data["details"]["completion_status"] == "unknown"
+        assert data["details"]["log_capture_status"] == "unobservable"
+        assert "Starting Live Coding compile" in data["details"]["log_text"]
+        assert data["details"]["next_commands"] == [
+            "ue-cli --project <path-to-.uproject> editor close",
+            "ue-cli --project <path-to-.uproject> build compile",
+        ]
+
+
     def test_editor_run_script_cli(self, tmp_path):
         """``editor run-script`` should call run_python_script."""
         from click.testing import CliRunner
@@ -2207,4 +2253,3 @@ result = {'status': 'live_editor_ok'}
 # ═══════════════════════════════════════════════════════════════════════
 #  Test scene.py (mocked API)
 # ═══════════════════════════════════════════════════════════════════════
-
