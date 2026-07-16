@@ -713,6 +713,7 @@ def test_editor_close_kills_matching_zombie_project_process(mini_project):
     runner = CliRunner()
     other_project = str(Path(mini_project).with_name("Other.uproject"))
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+         patch("cli_anything.unreal.commands.editor._discover_online_editor_port", return_value=None), \
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 1234, "project": mini_project},
              {"pid": 5678, "project": other_project},
@@ -730,6 +731,93 @@ def test_editor_close_kills_matching_zombie_project_process(mini_project):
     assert data["result"]["status"] == "closed"
     assert data["result"]["method"] == "process_tree_kill"
     assert data["result"]["closed_processes"] == [{"pid": 1234, "project": mini_project}]
+
+
+def test_editor_close_recovers_unique_live_port_before_reporting_offline():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    offline_api = MagicMock()
+    offline_api.is_alive.return_value = False
+    live_api = MagicMock()
+    live_api.is_alive.side_effect = [True, False]
+
+    def create_api(port):
+        if port == 30010:
+            return offline_api
+        if port == 30011:
+            return live_api
+        raise AssertionError(f"Unexpected editor port: {port}")
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", side_effect=create_api) as api_cls, \
+         patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
+             "status": "online",
+             "pid": 24356,
+             "port": 30011,
+             "project_path": r"F:\RXGame_2\RXGame.uproject",
+         }]) as scan_status:
+        result = CliRunner().invoke(cli, [
+            "--output", "json",
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert [call.kwargs["port"] for call in api_cls.call_args_list] == [30010, 30011]
+    scan_status.assert_called_once()
+    assert scan_status.call_args.args[1] == "30010-30020"
+    assert scan_status.call_args.kwargs == {"include_bridge_status": False}
+    offline_api.exec_console.assert_not_called()
+    live_api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
+    data = json.loads(result.output)
+    assert data["result"] == {"status": "closed", "port": 30011}
+
+
+def test_editor_close_rejects_ambiguous_live_ports():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    offline_api = MagicMock()
+    offline_api.is_alive.return_value = False
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=offline_api), \
+         patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[
+             {"status": "online", "pid": 111, "port": 30011, "project_path": r"F:\One\One.uproject"},
+             {"status": "online", "pid": 222, "port": 30012, "project_path": r"F:\Two\Two.uproject"},
+         ]):
+        result = CliRunner().invoke(cli, [
+            "--output", "json",
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 3
+    offline_api.exec_console.assert_not_called()
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_TARGET_AMBIGUOUS"
+    assert "--project" in data["suggestion"]
+    assert "--port" in data["suggestion"]
+    assert [item["port"] for item in data["details"]["live_editors"]] == [30011, 30012]
+
+
+def test_editor_close_does_not_override_explicit_stale_port():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    offline_api = MagicMock()
+    offline_api.is_alive.return_value = False
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=offline_api), \
+         patch("cli_anything.unreal.commands.editor._scan_editor_status_instances") as scan_status:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--port", "30010",
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    scan_status.assert_not_called()
+    data = json.loads(result.output)
+    assert data["result"] == {
+        "status": "offline",
+        "port": 30010,
+        "message": "No editor running on this port.",
+    }
 
 
 def test_kill_matching_project_editors_skips_reused_pid(mini_project):

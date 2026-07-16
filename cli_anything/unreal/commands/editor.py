@@ -14,7 +14,15 @@ from pathlib import Path
 
 import click
 
-from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_editor, require_project
+from cli_anything.unreal.commands import (
+    AppError,
+    AppState,
+    _discover_online_editor_port,
+    handle_error,
+    output,
+    require_editor,
+    require_project,
+)
 from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, cancel_task, iter_tasks, load_task, save_task, submit_task, task_data_path, task_progress, wait_for_task
 
 
@@ -1772,12 +1780,23 @@ def editor_close(state: AppState):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     api = UEEditorAPI(port=state.session.port)
-    output(_close_editor_for_project(api, state), state)
+    api_alive = api.is_alive()
+    if not api_alive:
+        live_port = _discover_online_editor_port(state, fail_if_ambiguous=True)
+        if live_port is not None:
+            live_api = UEEditorAPI(port=live_port)
+            if live_api.is_alive():
+                state.session.port = live_port
+                api = live_api
+                api_alive = True
+    output(_close_editor_for_project(api, state, api_alive=api_alive), state)
 
 
-def _close_editor_for_project(api, state: AppState) -> dict:
+def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = None) -> dict:
     """Close the targeted editor using the same robust path for all callers."""
-    if not api.is_alive():
+    if api_alive is None:
+        api_alive = api.is_alive()
+    if not api_alive:
         kill_result = _kill_matching_project_editors(
             state.session.project_path,
             state.session.port,

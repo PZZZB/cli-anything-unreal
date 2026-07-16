@@ -248,7 +248,11 @@ def _guard_editor_project(state: AppState, api_cls) -> None:
         )
 
 
-def _discover_online_editor_port(state: AppState) -> int | None:
+def _discover_online_editor_port(
+    state: AppState,
+    *,
+    fail_if_ambiguous: bool = False,
+) -> int | None:
     """Return one unambiguous live editor port when the selected port is stale."""
     if state.port_is_explicit:
         return None
@@ -264,7 +268,7 @@ def _discover_online_editor_port(state: AppState) -> int | None:
     except Exception:
         return None
 
-    ports: set[int] = set()
+    online_by_port: dict[int, dict] = {}
     for instance in instances:
         if instance.get("status") != "online" or instance.get("port") is None:
             continue
@@ -274,11 +278,35 @@ def _discover_online_editor_port(state: AppState) -> int | None:
         ):
             continue
         try:
-            ports.add(int(instance["port"]))
+            port = int(instance["port"])
         except (TypeError, ValueError):
             continue
-    if len(ports) == 1:
-        return ports.pop()
+        online_by_port.setdefault(port, instance)
+    if len(online_by_port) == 1:
+        return next(iter(online_by_port))
+    if fail_if_ambiguous and len(online_by_port) > 1:
+        live_editors = []
+        for port, instance in sorted(online_by_port.items()):
+            live_editors.append({
+                "pid": instance.get("pid"),
+                "port": port,
+                "project_path": instance.get("project_path"),
+            })
+        if state.session.project_path:
+            suggestion = 'Pass --port <port> before "editor close" to select one matching editor.'
+        else:
+            suggestion = 'Pass --project <path-to.uproject> or --port <port> before "editor close".'
+        raise AppError(
+            "EDITOR_TARGET_AMBIGUOUS",
+            f"Multiple live editors match while selected port {state.session.port} is offline.",
+            exit_code=3,
+            suggestion=suggestion,
+            details={
+                "selected_port": state.session.port,
+                "project": state.session.project_path,
+                "live_editors": live_editors,
+            },
+        )
     return None
 
 
