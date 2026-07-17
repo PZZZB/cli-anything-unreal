@@ -30,6 +30,8 @@ DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 110
 DEFAULT_EDITOR_LAUNCH_WORKER_TIMEOUT_SECONDS = 300
 REMOTE_UNREACHABLE_GRACE_SECONDS = 60
 REMOTE_UNREACHABLE_CACHE_TTL_SECONDS = 7200
+EDITOR_LOG_CAPTURE_LIMIT_BYTES = 2 * 1024 * 1024
+EDITOR_LOG_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _read_stdin_python_code(stream=None) -> str:
@@ -2017,17 +2019,45 @@ def _read_log_delta(
     data = b""
     last_size: int | None = None
     stable_since: float | None = None
+    scan_pos = start_pos
+    marker_overlap = b""
     completion_bytes = tuple(
         marker.encode("utf-8").lower()
         for marker in completion_markers
     )
+    max_completion_bytes = max((len(marker) for marker in completion_bytes), default=0)
+    marker_overlap_size = max(max_completion_bytes - 1, 0)
     while True:
+        completion_found = False
         try:
             size = log_file.stat().st_size
-            offset = start_pos if size >= start_pos else 0
-            with log_file.open("rb") as fh:
-                fh.seek(offset)
-                data = fh.read(2 * 1024 * 1024)
+            if completion_bytes:
+                if size < scan_pos:
+                    scan_pos = 0
+                    data = b""
+                    marker_overlap = b""
+
+                with log_file.open("rb") as fh:
+                    fh.seek(scan_pos)
+                    while True:
+                        chunk = fh.read(EDITOR_LOG_READ_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        scan_pos += len(chunk)
+                        data = (data + chunk)[-EDITOR_LOG_CAPTURE_LIMIT_BYTES:]
+
+                        lowered = marker_overlap + chunk.lower()
+                        completion_found = any(marker in lowered for marker in completion_bytes)
+                        marker_overlap = (
+                            lowered[-marker_overlap_size:] if marker_overlap_size else b""
+                        )
+                        if completion_found:
+                            break
+            else:
+                offset = start_pos if size >= start_pos else 0
+                with log_file.open("rb") as fh:
+                    fh.seek(offset)
+                    data = fh.read(EDITOR_LOG_CAPTURE_LIMIT_BYTES)
         except Exception:
             data = b""
             size = 0
@@ -2035,8 +2065,7 @@ def _read_log_delta(
         now = time.time()
         if data:
             if completion_bytes:
-                lowered_data = data.lower()
-                if any(marker in lowered_data for marker in completion_bytes):
+                if completion_found:
                     break
             else:
                 if size == last_size:

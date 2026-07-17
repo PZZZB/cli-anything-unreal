@@ -1999,6 +1999,29 @@ result = {'status': 'live_editor_ok'}
         assert any("Result={Success}" in item["Output"] for item in data["log_output"])
         assert any("Queue Empty" in item["Output"] for item in data["log_output"])
 
+    def test_editor_exec_log_wait_scans_past_capture_limit(self, tmp_path):
+        from cli_anything.unreal.commands.editor import (
+            EDITOR_LOG_CAPTURE_LIMIT_BYTES,
+            _read_log_delta,
+        )
+
+        completion = (
+            b"LogAutomationCommandLine: Automation Test Queue Empty "
+            b"1 tests performed.\n"
+        )
+        log_file = tmp_path / "RXGame.log"
+        log_file.write_bytes(b"x" * (EDITOR_LOG_CAPTURE_LIMIT_BYTES + 1) + completion)
+
+        log_text = _read_log_delta(
+            log_file,
+            0,
+            wait_seconds=0,
+            completion_markers=("Automation Test Queue Empty",),
+        )
+
+        assert "Automation Test Queue Empty 1 tests performed" in log_text
+        assert len(log_text.encode("utf-8")) <= EDITOR_LOG_CAPTURE_LIMIT_BYTES
+
 
     def test_editor_exec_log_wait_reports_automation_timeout(self, tmp_path):
         import re
