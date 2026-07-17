@@ -473,7 +473,17 @@ def build_cancel(state: AppState, task_id):
     task = cancel_task(task_id)
     if task is None:
         raise AppError("TASK_NOT_FOUND", f"Task not found: {task_id}", exit_code=3)
-    output(task_progress(task), state)
+    progress = task_progress(task)
+    error = progress.get("error", {})
+    if error.get("code") == "TASK_CANCEL_FAILED":
+        raise AppError(
+            "TASK_CANCEL_FAILED",
+            error.get("message", "Build task cancellation failed."),
+            exit_code=4,
+            suggestion="Retry cancellation after inspecting the remaining process diagnostics.",
+            details=progress,
+        )
+    output(progress, state)
 
 
 @build_group.command("stop")
@@ -485,7 +495,16 @@ def build_stop(state: AppState, project_path):
 
     _load_command_project(state, project_path)
     require_project(state)
-    output(stop_build(state.session.project_path), state)
+    result = stop_build(state.session.project_path)
+    if result.get("status") == "partial" or result.get("remaining"):
+        raise AppError(
+            "TASK_CANCEL_FAILED",
+            "Build cancellation did not terminate every project-owned process.",
+            exit_code=4,
+            suggestion="Retry cancellation after inspecting the remaining process diagnostics.",
+            details=result,
+        )
+    output(result, state)
 
 
 @build_group.command("is-building")

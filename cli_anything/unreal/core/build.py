@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from cli_anything.unreal.utils.ue_backend import (
+    BuildProcessProbeError,
     _build_output_encoding,
     find_engine_root,
     find_generate_project_files,
@@ -860,16 +861,52 @@ def stop_build(uproject_path: str) -> dict:
         if cancelled is None:
             continue
         cancel_result = cancelled.get("cancel_result", {})
-        task_results.append({
+        task_result = {
             "task_id": cancelled["task_id"],
             "status": cancelled.get("status"),
             "pid": cancelled.get("pid"),
             "worker_pid": cancelled.get("worker_pid"),
             "killed": cancel_result.get("killed", []),
             "remaining": cancel_result.get("remaining", []),
-        })
+        }
+        if cancel_result.get("processes"):
+            task_result["processes"] = cancel_result["processes"]
+        if cancelled.get("error"):
+            task_result["error"] = cancelled["error"]
+        task_results.append(task_result)
 
-    result = kill_build_processes(uproject_path)
+    tracked_tasks_cancelled = bool(task_results) and all(
+        task["status"] in FINAL_TASK_STATUSES and not task["remaining"]
+        for task in task_results
+    )
+    if tracked_tasks_cancelled:
+        result = {
+            "status": "skipped",
+            "killed": [],
+            "remaining": [],
+            "process_probe": {
+                "status": "skipped",
+                "reason": "tracked_tasks_cancelled",
+            },
+        }
+    else:
+        try:
+            result = kill_build_processes(
+                uproject_path,
+                query_timeout=_BUILD_STATE_PROCESS_PROBE_TIMEOUT_SECONDS,
+                fail_on_probe_error=True,
+            )
+        except BuildProcessProbeError as exc:
+            result = {
+                "status": "partial",
+                "killed": [],
+                "remaining": [],
+                "process_probe": {
+                    "status": "failed",
+                    "message": str(exc),
+                    "details": exc.details,
+                },
+            }
     final_scan_killed = result.get("killed", [])
     for task in task_results:
         reconciled = reconcile_task_cancellation(task["task_id"], final_scan_killed)
@@ -881,6 +918,14 @@ def stop_build(uproject_path: str) -> dict:
             "killed": cancel_result.get("killed", []),
             "remaining": cancel_result.get("remaining", []),
         })
+        if cancel_result.get("processes"):
+            task["processes"] = cancel_result["processes"]
+        else:
+            task.pop("processes", None)
+        if reconciled.get("error"):
+            task["error"] = reconciled["error"]
+        else:
+            task.pop("error", None)
 
     killed = list(result.get("killed", []))
     remaining = list(result.get("remaining", []))
@@ -894,7 +939,7 @@ def stop_build(uproject_path: str) -> dict:
         if pid not in killed_set
     ]
 
-    if remaining or any(
+    if result.get("status") == "partial" or remaining or any(
         task["status"] not in FINAL_TASK_STATUSES for task in task_results
     ):
         status = "partial"
@@ -910,6 +955,8 @@ def stop_build(uproject_path: str) -> dict:
     }
     if task_results:
         response["tasks"] = task_results
+    if "process_probe" in result:
+        response["process_probe"] = result["process_probe"]
     return response
 
 

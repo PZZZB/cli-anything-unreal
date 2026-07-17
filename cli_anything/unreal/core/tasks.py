@@ -16,6 +16,7 @@ from pathlib import Path
 FINAL_TASK_STATUSES = {"completed", "failed", "timeout", "cancelled"}
 BUILD_TASK_COMMANDS = {"build.compile", "build.cook", "build.package"}
 _WINDOWS_TASK_IO_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
+_WINDOWS_PROCESS_IDENTITY_QUERY_TIMEOUT_SECONDS = 3
 
 
 def _task_root() -> Path:
@@ -114,7 +115,7 @@ def _query_process_info(pid: int) -> dict:
             ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_WINDOWS_PROCESS_IDENTITY_QUERY_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         return {"query_ok": False, "found": False, "pid": pid, "error": str(exc)}
@@ -153,6 +154,87 @@ def _same_process_identity(before: dict, after: dict) -> bool:
         before.get(key) == after.get(key)
         for key in ("parent_pid", "name", "cmdline")
     )
+
+
+def _capture_windows_process_identity(pid: int) -> dict | None:
+    """Capture a compact identity that can be checked without CIM later."""
+    if sys.platform != "win32":
+        return None
+
+    from cli_anything.unreal.utils.ue_backend import _windows_process_identity
+
+    identity = _windows_process_identity(pid)
+    if (
+        not identity.get("query_ok")
+        or not identity.get("found")
+        or identity.get("creation_time") is None
+    ):
+        return None
+    return {
+        key: identity[key]
+        for key in ("pid", "creation_time", "image_path", "identity_source")
+        if key in identity
+    }
+
+
+def _recorded_process_identity_matches(recorded: dict, current: dict) -> bool:
+    if int(recorded.get("pid") or 0) != int(current.get("pid") or 0):
+        return False
+    if recorded.get("creation_time") != current.get("creation_time"):
+        return False
+
+    recorded_image = str(recorded.get("image_path") or "")
+    current_image = str(current.get("image_path") or "")
+    if recorded_image and current_image:
+        recorded_image = recorded_image.replace("/", "\\").casefold()
+        current_image = current_image.replace("/", "\\").casefold()
+        return recorded_image == current_image
+    return True
+
+
+def _query_owned_task_process(
+    role: str,
+    pid: int,
+    *,
+    task_id: str,
+    worker_pid: int | None,
+    worker_owned: bool,
+    recorded_identity: dict | None,
+) -> tuple[dict, bool]:
+    """Query one task process, preferring its recorded kernel identity."""
+    native_info = None
+    if recorded_identity:
+        from cli_anything.unreal.utils.ue_backend import _windows_process_identity
+
+        native_info = _windows_process_identity(pid)
+        native_info["recorded_identity_available"] = True
+        if native_info.get("query_ok"):
+            matches = bool(
+                native_info.get("found")
+                and _recorded_process_identity_matches(recorded_identity, native_info)
+            )
+            native_info["identity_matches"] = matches
+            return native_info, matches
+
+    process_info = _query_process_info(pid)
+    if native_info is not None:
+        process_info["native_identity_query"] = native_info
+    if role == "worker":
+        owned = bool(
+            process_info.get("query_ok")
+            and process_info.get("found")
+            and "_task-worker" in process_info.get("cmdline", "")
+            and task_id in process_info.get("cmdline", "")
+        )
+    else:
+        owned = bool(
+            worker_owned
+            and process_info.get("query_ok")
+            and process_info.get("found")
+            and process_info.get("parent_pid") == worker_pid
+        )
+    return process_info, owned
+
 
 def new_task_id() -> str:
     return f"t-{uuid.uuid4().hex[:12]}"
@@ -389,8 +471,12 @@ def spawn_worker(task_id: str) -> int:
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(cmd, **kwargs)
+    updates = {"worker_pid": proc.pid}
+    worker_identity = _capture_windows_process_identity(proc.pid)
+    if worker_identity:
+        updates["worker_process_identity"] = worker_identity
     try:
-        update_task_fields(task_id, worker_pid=proc.pid)
+        update_task_fields(task_id, updates)
     except PermissionError:
         # The worker is already alive and will persist its own PID/status. Do
         # not tell the caller launch failed while that task still exists.
@@ -458,58 +544,70 @@ def cancel_task(task_id: str) -> dict | None:
         build_pid = int(task["pid"]) if task.get("pid") else None
 
         if sys.platform == "win32":
-            worker_info = _query_process_info(worker_pid) if worker_pid else None
-            build_info = _query_process_info(build_pid) if build_pid else None
-            worker_owned = bool(
-                worker_info
-                and worker_info.get("query_ok")
-                and worker_info.get("found")
-                and "_task-worker" in worker_info.get("cmdline", "")
-                and task_id in worker_info.get("cmdline", "")
+            worker_identity = task.get("worker_process_identity")
+            build_identity = task.get("build_process_identity")
+            worker_info, worker_owned = (
+                _query_owned_task_process(
+                    "worker",
+                    worker_pid,
+                    task_id=task_id,
+                    worker_pid=worker_pid,
+                    worker_owned=True,
+                    recorded_identity=worker_identity,
+                )
+                if worker_pid
+                else (None, False)
             )
-            build_owned = bool(
-                worker_owned
-                and build_info
-                and build_info.get("query_ok")
-                and build_info.get("found")
-                and build_info.get("parent_pid") == worker_pid
+            build_info, build_owned = (
+                _query_owned_task_process(
+                    "build",
+                    build_pid,
+                    task_id=task_id,
+                    worker_pid=worker_pid,
+                    worker_owned=worker_owned,
+                    recorded_identity=build_identity,
+                )
+                if build_pid
+                else (None, False)
             )
             process_specs = (
-                ("worker", worker_pid, worker_info, worker_owned),
-                ("build", build_pid, build_info, build_owned),
+                ("worker", worker_pid, worker_info, worker_owned, worker_identity),
+                ("build", build_pid, build_info, build_owned, build_identity),
             )
         else:
             process_specs = (
-                ("worker", worker_pid, None, True),
-                ("build", build_pid, None, True),
+                ("worker", worker_pid, None, True, None),
+                ("build", build_pid, None, True, None),
             )
 
         seen_pids = set()
+        process_context = {}
         worker_still_owned = worker_owned if sys.platform == "win32" else True
-        for role, pid, process_info, owned in process_specs:
+        for role, pid, process_info, owned, recorded_identity in process_specs:
             if not pid or pid in seen_pids:
                 continue
             seen_pids.add(pid)
+            process_context[pid] = (role, recorded_identity)
             if (
                 sys.platform == "win32"
                 and process_info is not None
                 and owned
             ):
-                if role == "build":
-                    owned = worker_still_owned
-                current_info = _query_process_info(pid)
-                if (
-                    current_info.get("query_ok")
-                    and current_info.get("found")
-                    and (
-                        not _same_process_identity(process_info, current_info)
-                        or (
-                            role == "build"
-                            and current_info.get("parent_pid") != worker_pid
-                        )
+                current_info, current_owned = _query_owned_task_process(
+                    role,
+                    pid,
+                    task_id=task_id,
+                    worker_pid=worker_pid,
+                    worker_owned=worker_still_owned,
+                    recorded_identity=recorded_identity,
+                )
+                if recorded_identity:
+                    owned = current_owned
+                else:
+                    owned = bool(
+                        current_owned
+                        and _same_process_identity(process_info, current_info)
                     )
-                ):
-                    owned = False
                 process_info = current_info
             if role == "worker" and sys.platform == "win32":
                 worker_still_owned = bool(
@@ -551,11 +649,34 @@ def cancel_task(task_id: str) -> dict | None:
             kill_results.append(kill_result)
 
         project_path = payload.get("project_path")
-        stop_result = (
-            kill_build_processes(project_path)
-            if project_path
-            else {"status": "none", "killed": [], "remaining": []}
+        recorded_identity_coverage = bool(seen_pids) and all(
+            recorded_identity
+            for _, pid, _, _, recorded_identity in process_specs
+            if pid
         )
+        direct_kill_failed = any(
+            not result.get("ok")
+            and not result.get("identity_query_failed")
+            for result in kill_results
+        )
+        if project_path and (
+            not seen_pids
+            or (direct_kill_failed and not recorded_identity_coverage)
+        ):
+            stop_result = kill_build_processes(project_path)
+        elif seen_pids:
+            stop_result = {
+                "status": "skipped",
+                "reason": (
+                    "tracked_process_identities"
+                    if recorded_identity_coverage
+                    else "tracked_processes_handled_directly"
+                ),
+                "killed": [],
+                "remaining": [],
+            }
+        else:
+            stop_result = {"status": "none", "killed": [], "remaining": []}
         scan_killed = set(stop_result.get("killed", []))
         killed = [
             result["pid"]
@@ -569,15 +690,32 @@ def cancel_task(task_id: str) -> dict | None:
         for result in kill_results:
             if result.get("ok") or result["pid"] in scan_killed:
                 continue
+            if result.get("identity_query_failed"):
+                # Repeating the same stalled CIM call only delays the error
+                # payload.  Without a trustworthy identity snapshot, retain
+                # the PID conservatively and return its first query failure.
+                remaining.append(result["pid"])
+                continue
             if sys.platform == "win32":
-                final_info = _query_process_info(result["pid"])
+                role, recorded_identity = process_context[result["pid"]]
+                final_info, final_owned = _query_owned_task_process(
+                    role,
+                    result["pid"],
+                    task_id=task_id,
+                    worker_pid=worker_pid,
+                    worker_owned=True,
+                    recorded_identity=recorded_identity,
+                )
                 result["final_process"] = final_info
                 if final_info.get("query_ok"):
                     if not final_info.get("found"):
                         continue
+                    if not final_owned:
+                        continue
                     original_info = result.get("process")
                     if (
-                        original_info is not None
+                        not recorded_identity
+                        and original_info is not None
                         and original_info.get("query_ok")
                         and original_info.get("found")
                         and not _same_process_identity(original_info, final_info)
@@ -646,11 +784,15 @@ def run_task_worker(task_id: str) -> dict:
             remove=("error",),
         ) or task
 
-    task = update_task_fields(
-        task_id,
-        status="running",
-        started_at=time.time(),
-    ) or task
+    worker_updates = {
+        "status": "running",
+        "started_at": time.time(),
+        "worker_pid": os.getpid(),
+    }
+    worker_identity = _capture_windows_process_identity(os.getpid())
+    if worker_identity:
+        worker_updates["worker_process_identity"] = worker_identity
+    task = update_task_fields(task_id, worker_updates) or task
 
     command = task.get("command")
     if command == "build.compile":
@@ -670,12 +812,15 @@ def _run_build_task(task: dict, func_name: str, *, estimated_total_seconds: int)
     payload = task["payload"]
 
     def _on_start(proc):
-        update_task_fields(
-            task["task_id"],
-            status="running",
-            pid=proc.pid,
-            estimated_total_seconds=estimated_total_seconds,
-        )
+        updates = {
+            "status": "running",
+            "pid": proc.pid,
+            "estimated_total_seconds": estimated_total_seconds,
+        }
+        build_identity = _capture_windows_process_identity(proc.pid)
+        if build_identity:
+            updates["build_process_identity"] = build_identity
+        update_task_fields(task["task_id"], updates)
 
     kwargs = {
         "uproject_path": payload["project_path"],

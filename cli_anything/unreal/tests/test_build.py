@@ -1318,6 +1318,30 @@ class TestBuildStopAndDetect:
             assert result["status"] == "partial"
             assert 9999 in result["remaining"]
 
+    def test_stop_build_probe_timeout_is_explicit_partial_result(
+        self, temp_project
+    ):
+        """An inconclusive final scan must not look like no processes exist."""
+        from cli_anything.unreal.core.build import stop_build
+        from cli_anything.unreal.utils.ue_backend import BuildProcessProbeError
+
+        failure = BuildProcessProbeError(
+            "Windows build-process query timed out after 3 seconds.",
+            details={"reason": "timeout", "timeout_seconds": 3},
+        )
+        with patch(
+            "cli_anything.unreal.core.build.kill_build_processes",
+            side_effect=failure,
+        ):
+            result = stop_build(temp_project["uproject"])
+
+        assert result["status"] == "partial"
+        assert result["process_probe"] == {
+            "status": "failed",
+            "message": "Windows build-process query timed out after 3 seconds.",
+            "details": {"reason": "timeout", "timeout_seconds": 3},
+        }
+
     def test_stop_build_cancels_matching_async_task(
         self, temp_project, tmp_path, monkeypatch
     ):
@@ -1589,6 +1613,72 @@ class TestBuildStopAndDetect:
         assert task["status"] == "submitted"
         assert task["worker_pid"] == 41652
         assert tasks.load_task(task["task_id"])["task_id"] == task["task_id"]
+
+    def test_spawn_worker_persists_native_process_identity(
+        self, tmp_path, monkeypatch
+    ):
+        """Cancellation can verify the worker later without querying CIM."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task("build.compile", {"project_path": "P.uproject"})
+        worker = MagicMock(pid=41653)
+        identity = {
+            "pid": 41653,
+            "creation_time": 123456789,
+            "image_path": r"D:\Python\python.exe",
+            "identity_source": "win32_process_times",
+        }
+        with patch.object(tasks.subprocess, "Popen", return_value=worker), patch.object(
+            tasks,
+            "_capture_windows_process_identity",
+            return_value=identity,
+        ):
+            tasks.spawn_worker(task["task_id"])
+
+        saved = tasks.load_task(task["task_id"])
+        assert saved["worker_pid"] == 41653
+        assert saved["worker_process_identity"] == identity
+
+    def test_build_task_persists_native_root_process_identity(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """The build root gets its own PID-reuse-safe creation token."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task(
+            "build.compile",
+            {"project_path": temp_project["uproject"]},
+        )
+        identity = {
+            "pid": 41654,
+            "creation_time": 987654321,
+            "image_path": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "identity_source": "win32_process_times",
+        }
+
+        def fake_compile(**kwargs):
+            kwargs["on_start"](MagicMock(pid=41654))
+            return {"status": "ok", "log_file": "build.log"}
+
+        with patch(
+            "cli_anything.unreal.core.build.compile_project",
+            side_effect=fake_compile,
+        ), patch.object(
+            tasks,
+            "_capture_windows_process_identity",
+            return_value=identity,
+        ):
+            tasks._run_build_task(
+                task,
+                "compile_project",
+                estimated_total_seconds=600,
+            )
+
+        saved = tasks.load_task(task["task_id"])
+        assert saved["pid"] == 41654
+        assert saved["build_process_identity"] == identity
 
     def test_wait_for_task_keeps_polling_after_task_record_permission_error(
         self, tmp_path, monkeypatch
@@ -1915,6 +2005,213 @@ class TestBuildStopAndDetect:
         assert result["cancelled"] is False
         assert result["cancel_result"]["remaining"] == [43501]
 
+    def test_cancel_task_uses_recorded_identity_without_cim(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """A matching creation token is sufficient for safe direct termination."""
+        from cli_anything.unreal.core.tasks import cancel_task, create_task, save_task
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task(
+            "build.compile",
+            {"project_path": temp_project["uproject"]},
+        )
+        task.update({
+            "status": "running",
+            "worker_pid": 43601,
+            "pid": 43602,
+            "worker_process_identity": {
+                "pid": 43601,
+                "creation_time": 1001,
+            },
+            "build_process_identity": {
+                "pid": 43602,
+                "creation_time": 1002,
+            },
+        })
+        save_task(task)
+
+        def native_identity(pid):
+            return {
+                "query_ok": True,
+                "found": True,
+                "pid": pid,
+                "creation_time": 1001 if pid == 43601 else 1002,
+                "identity_source": "win32_process_times",
+            }
+
+        with patch(
+            "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+            side_effect=native_identity,
+        ), patch(
+            "cli_anything.unreal.core.tasks._query_process_info",
+        ) as cim_query, patch(
+            "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+            side_effect=lambda pid: {"ok": True, "pid": pid},
+        ) as kill, patch(
+            "cli_anything.unreal.utils.ue_backend.kill_build_processes",
+        ) as process_scan:
+            result = cancel_task(task["task_id"])
+
+        assert result["status"] == "cancelled"
+        assert result["cancel_result"]["remaining"] == []
+        assert result["stop_result"]["reason"] == "tracked_process_identities"
+        assert [call.args[0] for call in kill.call_args_list] == [43601, 43602]
+        cim_query.assert_not_called()
+        process_scan.assert_not_called()
+
+    def test_cancel_task_reports_native_kill_failure_without_cim_scan(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """A failed taskkill returns diagnostics promptly even if CIM is unusable."""
+        from cli_anything.unreal.core.tasks import cancel_task, create_task, save_task
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task(
+            "build.package",
+            {"project_path": temp_project["uproject"]},
+        )
+        task.update({
+            "status": "running",
+            "worker_pid": 43611,
+            "worker_process_identity": {
+                "pid": 43611,
+                "creation_time": 1011,
+            },
+        })
+        save_task(task)
+        native_identity = {
+            "query_ok": True,
+            "found": True,
+            "pid": 43611,
+            "creation_time": 1011,
+            "identity_source": "win32_process_times",
+        }
+        failed_kill = {
+            "ok": False,
+            "pid": 43611,
+            "method": "taskkill",
+            "timeout": True,
+            "error": "taskkill timed out",
+        }
+
+        with patch(
+            "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+            return_value=native_identity,
+        ), patch(
+            "cli_anything.unreal.core.tasks._query_process_info",
+        ) as cim_query, patch(
+            "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+            return_value=failed_kill,
+        ), patch(
+            "cli_anything.unreal.utils.ue_backend.kill_build_processes",
+        ) as process_scan:
+            result = cancel_task(task["task_id"])
+
+        assert result["status"] == "running"
+        assert result["error"]["code"] == "TASK_CANCEL_FAILED"
+        assert result["cancel_result"]["remaining"] == [43611]
+        assert result["cancel_result"]["processes"][0]["error"] == "taskkill timed out"
+        cim_query.assert_not_called()
+        process_scan.assert_not_called()
+
+    def test_cancel_task_skips_reused_pid_with_recorded_identity(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """A changed creation token prevents termination of an unrelated PID."""
+        from cli_anything.unreal.core.tasks import cancel_task, create_task, save_task
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task(
+            "build.compile",
+            {"project_path": temp_project["uproject"]},
+        )
+        task.update({
+            "status": "running",
+            "worker_pid": 43701,
+            "worker_process_identity": {
+                "pid": 43701,
+                "creation_time": 2001,
+            },
+        })
+        save_task(task)
+        reused = {
+            "query_ok": True,
+            "found": True,
+            "pid": 43701,
+            "creation_time": 9999,
+            "identity_source": "win32_process_times",
+        }
+
+        with patch(
+            "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+            return_value=reused,
+        ), patch(
+            "cli_anything.unreal.core.tasks._query_process_info",
+        ) as cim_query, patch(
+            "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+        ) as kill:
+            result = cancel_task(task["task_id"])
+
+        assert result["status"] == "cancelled"
+        process = result["cancel_result"]["processes"][0]
+        assert process["ownership_mismatch"] is True
+        assert process["process"]["identity_matches"] is False
+        cim_query.assert_not_called()
+        kill.assert_not_called()
+
+    def test_cancel_task_falls_back_to_cim_when_native_identity_fails(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """Legacy CIM verification remains available if Win32 access fails."""
+        from cli_anything.unreal.core.tasks import cancel_task, create_task, save_task
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task(
+            "build.compile",
+            {"project_path": temp_project["uproject"]},
+        )
+        task.update({
+            "status": "running",
+            "worker_pid": 43801,
+            "worker_process_identity": {
+                "pid": 43801,
+                "creation_time": 3001,
+            },
+        })
+        save_task(task)
+        native_failure = {
+            "query_ok": False,
+            "found": True,
+            "pid": 43801,
+            "error": "access denied",
+        }
+        cim_identity = {
+            "query_ok": True,
+            "found": True,
+            "pid": 43801,
+            "parent_pid": 1,
+            "name": "python.exe",
+            "cmdline": f"python _task-worker run {task['task_id']}",
+            "creation_date": "worker-created",
+        }
+
+        with patch(
+            "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+            return_value=native_failure,
+        ), patch(
+            "cli_anything.unreal.core.tasks._query_process_info",
+            return_value=cim_identity,
+        ) as cim_query, patch(
+            "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+            return_value={"ok": True, "pid": 43801},
+        ) as kill:
+            result = cancel_task(task["task_id"])
+
+        assert result["status"] == "cancelled"
+        assert cim_query.call_count == 2
+        kill.assert_called_once_with(43801)
+
     def test_update_task_fields_preserves_concurrent_metadata(
         self, tmp_path, monkeypatch
     ):
@@ -2207,7 +2504,10 @@ class TestBuildStopAndDetect:
         """Stopping the task worker must release its kill-on-close Job Object."""
         from cli_anything.unreal.core.build import stop_build
         from cli_anything.unreal.core.tasks import create_task, save_task
-        from cli_anything.unreal.utils.ue_backend import _kill_process_tree
+        from cli_anything.unreal.utils.ue_backend import (
+            _kill_process_tree,
+            _windows_process_identity,
+        )
 
         monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
         task = create_task(
@@ -2248,7 +2548,7 @@ class TestBuildStopAndDetect:
         )
         child_pid = None
         try:
-            deadline = time.time() + 10
+            deadline = time.time() + 30
             while time.time() < deadline and not (
                 child_pid_file.exists() and root_pid_file.exists()
             ):
@@ -2262,6 +2562,8 @@ class TestBuildStopAndDetect:
                 "status": "running",
                 "worker_pid": worker.pid,
                 "pid": root_pid,
+                "worker_process_identity": _windows_process_identity(worker.pid),
+                "build_process_identity": _windows_process_identity(root_pid),
             })
             save_task(task)
 
@@ -2271,13 +2573,7 @@ class TestBuildStopAndDetect:
             assert result["status"] == "ok"
             assert result["remaining"] == []
             assert result["tasks"][0]["status"] == "cancelled"
-            probe = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            assert f'"{child_pid}"' not in probe.stdout
+            assert _windows_process_identity(child_pid)["found"] is False
         finally:
             if worker.poll() is None:
                 _kill_process_tree(worker.pid)
@@ -3454,6 +3750,108 @@ class TestBuildCLI:
             assert data["result"]["status"] == "ok"
             assert 1234 in data["result"]["killed"]
 
+    def test_build_cancel_failure_is_structured_nonzero_json(self):
+        """A surviving tracked PID must be visible to automation immediately."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        failed_task = {
+            "task_id": "t-cancel-failed",
+            "command": "build.package",
+            "status": "running",
+            "worker_pid": 51001,
+            "pid": 51002,
+            "error": {
+                "code": "TASK_CANCEL_FAILED",
+                "message": "Build task cancellation left processes running.",
+            },
+            "cancel_result": {
+                "killed": [],
+                "remaining": [51001, 51002],
+                "processes": [
+                    {"ok": False, "pid": 51001, "error": "taskkill timed out"},
+                ],
+            },
+        }
+        with patch(
+            "cli_anything.unreal.core.tasks.cancel_task",
+            return_value=failed_task,
+        ):
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "build", "cancel", "t-cancel-failed",
+            ])
+
+        assert result.exit_code == 4
+        data = self._parse_json_output(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "TASK_CANCEL_FAILED"
+        assert data["details"]["cancel_result"]["remaining"] == [51001, 51002]
+        assert data["details"]["cancel_result"]["processes"][0]["error"] == "taskkill timed out"
+
+    def test_build_stop_partial_is_structured_nonzero_json(self, temp_project):
+        """Project stop propagates task/process diagnostics instead of success."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        partial = {
+            "status": "partial",
+            "killed": [52001],
+            "remaining": [52002],
+            "tasks": [{
+                "task_id": "t-stop-failed",
+                "status": "running",
+                "remaining": [52002],
+                "processes": [{"pid": 52002, "error": "access denied"}],
+            }],
+        }
+        with patch(
+            "cli_anything.unreal.core.build.stop_build",
+            return_value=partial,
+        ):
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "build", "stop",
+            ])
+
+        assert result.exit_code == 4
+        data = self._parse_json_output(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "TASK_CANCEL_FAILED"
+        assert data["details"] == partial
+
+    def test_generic_task_cancel_failure_is_structured_nonzero_json(self):
+        """The shared task-cancel surface follows the same failure contract."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        failed_task = {
+            "task_id": "t-generic-failed",
+            "command": "build.compile",
+            "status": "running",
+            "error": {
+                "code": "TASK_CANCEL_FAILED",
+                "message": "Build task cancellation left processes running.",
+            },
+            "cancel_result": {
+                "killed": [],
+                "remaining": [53001],
+                "processes": [{"pid": 53001, "error": "query failed"}],
+            },
+        }
+        with patch(
+            "cli_anything.unreal.unreal_cli.cancel_task",
+            return_value=failed_task,
+        ):
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "task", "cancel", "t-generic-failed",
+            ])
+
+        assert result.exit_code == 4
+        data = self._parse_json_output(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "TASK_CANCEL_FAILED"
+        assert data["details"]["cancel_result"]["remaining"] == [53001]
+
     def test_build_compile_no_wait_then_stop_cancels_task(
         self, temp_project, tmp_path, monkeypatch
     ):
@@ -3714,7 +4112,7 @@ class TestBuildE2E:
         assert isinstance(filtered, list)
 
     def test_build_stop_cli_real(self):
-        """build stop CLI against real project (should report none)."""
+        """Real stop returns success or an explicit host/process failure."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
@@ -3723,6 +4121,15 @@ class TestBuildE2E:
             "--output", "json", "--project", TEST574_UPROJECT,
             "build", "stop",
         ])
-        assert result.exit_code == 0
         data = self._parse_json_output(result.output)
-        assert data["result"]["status"] in ("none", "ok", "partial")
+        if result.exit_code == 0:
+            assert data["status"] == "success"
+            assert data["result"]["status"] in ("none", "ok")
+        else:
+            assert result.exit_code == 4
+            assert data["status"] == "error"
+            assert data["code"] == "TASK_CANCEL_FAILED"
+            assert data["details"]["status"] == "partial"
+            assert data["details"].get("remaining") or (
+                data["details"].get("process_probe", {}).get("status") == "failed"
+            )

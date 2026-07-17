@@ -530,6 +530,44 @@ class TestSession:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows kernel identity only")
+def test_windows_process_identity_is_stable_for_current_process():
+    from cli_anything.unreal.utils.ue_backend import _windows_process_identity
+
+    first = _windows_process_identity(os.getpid())
+    second = _windows_process_identity(os.getpid())
+
+    assert first["query_ok"] is True
+    assert first["found"] is True
+    assert first["creation_time"] > 0
+    assert first["creation_time"] == second["creation_time"]
+    assert Path(first["image_path"]).name.lower().startswith("python")
+
+
+def test_kill_process_tree_uses_native_fallback_after_taskkill_timeout():
+    from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
+
+    native_result = {
+        "ok": True,
+        "pid": 49273,
+        "method": "TerminateProcess",
+    }
+    with patch(
+        "cli_anything.unreal.utils.ue_backend.subprocess.run",
+        side_effect=subprocess.TimeoutExpired("taskkill", 10),
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend._terminate_windows_process_result",
+        return_value=native_result,
+    ) as native_fallback:
+        result = _kill_process_tree_result(49273)
+
+    assert result["ok"] is True
+    assert result["taskkill_timeout"] is True
+    assert result["native_fallback"] == native_result
+    assert result["retry_suggested"] is False
+    native_fallback.assert_called_once_with(49273)
+
+
 def test_kill_process_tree_result_reports_access_denied():
     from cli_anything.unreal.utils import ue_backend
     from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result

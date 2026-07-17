@@ -354,7 +354,17 @@ def task_cancel_cmd(task_id):
     if task is None:
         emit_json(error_payload("TASK_NOT_FOUND", f"Task not found: {task_id}"))
         raise SystemExit(3)
-    emit_json(task_progress(task))
+    progress = task_progress(task)
+    error = progress.get("error", {})
+    if error.get("code") == "TASK_CANCEL_FAILED":
+        emit_json(error_payload(
+            "TASK_CANCEL_FAILED",
+            error.get("message", "Build task cancellation failed."),
+            suggestion="Retry cancellation after inspecting the remaining process diagnostics.",
+            details=progress,
+        ))
+        raise SystemExit(4)
+    emit_json(progress)
 
 
 register_commands(cli)

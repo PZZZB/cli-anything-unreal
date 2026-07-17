@@ -512,6 +512,226 @@ def _windows_process_exists(pid: int) -> bool | None:
         return None
 
 
+def _windows_process_identity(pid: int) -> dict:
+    """Return a fast, PID-reuse-safe identity from the Windows kernel.
+
+    Unlike the richer ``Win32_Process`` CIM query, this uses process handles
+    directly and remains responsive when WMI/CIM is overloaded.  The process
+    creation timestamp is stable for the lifetime of a PID and therefore lets
+    callers verify that persisted task metadata still refers to the same
+    process before terminating it.
+    """
+    identity = {
+        "query_ok": False,
+        "found": False,
+        "pid": int(pid),
+        "identity_source": "win32_process_times",
+    }
+    if sys.platform != "win32":
+        identity["error"] = "Windows process identity is unavailable on this platform."
+        return identity
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        synchronize = 0x00100000
+        wait_object_0 = 0x00000000
+        wait_timeout = 0x00000102
+        error_invalid_parameter = 87
+
+        class FileTime(ctypes.Structure):
+            _fields_ = [
+                ("dwLowDateTime", wintypes.DWORD),
+                ("dwHighDateTime", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        wait_for_single_object = kernel32.WaitForSingleObject
+        wait_for_single_object.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        wait_for_single_object.restype = wintypes.DWORD
+        get_process_times = kernel32.GetProcessTimes
+        get_process_times.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+        ]
+        get_process_times.restype = wintypes.BOOL
+        query_image_name = kernel32.QueryFullProcessImageNameW
+        query_image_name.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        query_image_name.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        access = process_query_limited_information | synchronize
+        handle = open_process(access, False, int(pid))
+        if not handle:
+            error_code = ctypes.get_last_error()
+            if error_code == error_invalid_parameter:
+                identity.update(query_ok=True, found=False)
+            else:
+                identity.update(
+                    error_code=error_code,
+                    error=ctypes.FormatError(error_code).strip(),
+                )
+            return identity
+
+        try:
+            wait_result = wait_for_single_object(handle, 0)
+            if wait_result == wait_object_0:
+                identity.update(query_ok=True, found=False)
+                return identity
+            if wait_result != wait_timeout:
+                identity["error"] = f"WaitForSingleObject returned {wait_result}."
+                return identity
+
+            created = FileTime()
+            exited = FileTime()
+            kernel_time = FileTime()
+            user_time = FileTime()
+            if not get_process_times(
+                handle,
+                ctypes.byref(created),
+                ctypes.byref(exited),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            ):
+                error_code = ctypes.get_last_error()
+                identity.update(
+                    found=True,
+                    error_code=error_code,
+                    error=ctypes.FormatError(error_code).strip(),
+                )
+                return identity
+
+            creation_time = (
+                int(created.dwHighDateTime) << 32
+            ) | int(created.dwLowDateTime)
+            identity.update(
+                query_ok=True,
+                found=True,
+                creation_time=creation_time,
+            )
+
+            image_buffer = ctypes.create_unicode_buffer(32768)
+            image_size = wintypes.DWORD(len(image_buffer))
+            if query_image_name(
+                handle,
+                0,
+                image_buffer,
+                ctypes.byref(image_size),
+            ):
+                identity["image_path"] = image_buffer.value
+            return identity
+        finally:
+            close_handle(handle)
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        identity["error"] = str(exc)
+        return identity
+
+
+def _terminate_windows_process_result(pid: int, *, wait_timeout_ms: int = 3000) -> dict:
+    """Terminate one verified Windows process without WMI/CIM or taskkill."""
+    result = {
+        "ok": False,
+        "pid": int(pid),
+        "method": "TerminateProcess",
+    }
+    if sys.platform != "win32":
+        result["error"] = "TerminateProcess is unavailable on this platform."
+        return result
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        process_terminate = 0x0001
+        synchronize = 0x00100000
+        wait_object_0 = 0x00000000
+        wait_timeout = 0x00000102
+        error_invalid_parameter = 87
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        terminate_process = kernel32.TerminateProcess
+        terminate_process.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        terminate_process.restype = wintypes.BOOL
+        wait_for_single_object = kernel32.WaitForSingleObject
+        wait_for_single_object.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        wait_for_single_object.restype = wintypes.DWORD
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        handle = open_process(process_terminate | synchronize, False, int(pid))
+        if not handle:
+            error_code = ctypes.get_last_error()
+            if error_code == error_invalid_parameter:
+                result.update(
+                    ok=True,
+                    already_exited=True,
+                    suggestion="Process already exited before native termination.",
+                )
+            else:
+                result.update(
+                    error_code=error_code,
+                    error=ctypes.FormatError(error_code).strip(),
+                )
+            return result
+
+        try:
+            if wait_for_single_object(handle, 0) == wait_object_0:
+                result.update(
+                    ok=True,
+                    already_exited=True,
+                    suggestion="Process already exited before native termination.",
+                )
+                return result
+
+            if not terminate_process(handle, 1):
+                error_code = ctypes.get_last_error()
+                result.update(
+                    error_code=error_code,
+                    error=ctypes.FormatError(error_code).strip(),
+                )
+                return result
+
+            wait_result = wait_for_single_object(handle, int(wait_timeout_ms))
+            result["wait_result"] = int(wait_result)
+            if wait_result == wait_object_0:
+                result.update(
+                    ok=True,
+                    suggestion="Native process-handle termination succeeded.",
+                )
+            elif wait_result == wait_timeout:
+                result.update(
+                    timeout=True,
+                    error=f"Process did not exit within {wait_timeout_ms} ms.",
+                )
+            else:
+                result["error"] = f"WaitForSingleObject returned {wait_result}."
+            return result
+        finally:
+            close_handle(handle)
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        result["error"] = str(exc)
+        return result
+
+
 def _classify_kill_result(result: dict) -> dict:
     text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
     access_denied = any(token in text for token in ("access is denied", "拒绝访问", "存取被拒"))
@@ -609,7 +829,7 @@ def _kill_process_tree_result(pid: int) -> dict:
             cmd,
             capture_output=True,
             text=False,
-            timeout=10,
+            timeout=3,
         )
         result = {
             "ok": proc.returncode == 0,
@@ -635,15 +855,22 @@ def _kill_process_tree_result(pid: int) -> dict:
             result["post_taskkill_confirmation_seconds"] = confirmation_attempts * 0.2
         return _classify_kill_result(result)
     except subprocess.TimeoutExpired as exc:
+        fallback = _terminate_windows_process_result(pid)
         return {
-            "ok": False,
+            "ok": bool(fallback.get("ok")),
             "pid": pid,
-            "method": "taskkill",
+            "method": "taskkill_then_TerminateProcess",
             "command": cmd,
-            "error": str(exc),
-            "timeout": True,
-            "retry_suggested": True,
-            "suggestion": "Taskkill timed out. Retry editor close; if it repeats, close UnrealEditor.exe manually.",
+            "taskkill_error": str(exc),
+            "taskkill_timeout": True,
+            "native_fallback": fallback,
+            "already_exited": bool(fallback.get("already_exited")),
+            "retry_suggested": not fallback.get("ok"),
+            "suggestion": (
+                "Taskkill timed out; native process-handle termination succeeded."
+                if fallback.get("ok")
+                else "Taskkill and native process-handle termination both failed."
+            ),
         }
     except Exception as exc:
         return {
@@ -2440,7 +2667,12 @@ def find_running_build_processes(
     return processes
 
 
-def kill_build_processes(uproject_path: str | None = None) -> dict:
+def kill_build_processes(
+    uproject_path: str | None = None,
+    *,
+    query_timeout: float = 15,
+    fail_on_probe_error: bool = False,
+) -> dict:
     """Kill all build processes for a project (or all build processes).
 
     Finds running build processes via find_running_build_processes(),
@@ -2449,11 +2681,18 @@ def kill_build_processes(uproject_path: str | None = None) -> dict:
     Args:
         uproject_path: If given, only kill processes for this project.
             If None, kill all build processes.
+        query_timeout: Maximum seconds for each Windows process scan.
+        fail_on_probe_error: Raise ``BuildProcessProbeError`` when a scan is
+            inconclusive instead of treating it as an empty process list.
 
     Returns:
         {"killed": [pid, ...], "remaining": [pid, ...], "status": "ok"|"partial"|"none"}
     """
-    processes = find_running_build_processes(uproject_path)
+    processes = find_running_build_processes(
+        uproject_path,
+        query_timeout=query_timeout,
+        fail_on_error=fail_on_probe_error,
+    )
 
     if not processes:
         return {"killed": [], "remaining": [], "status": "none"}
@@ -2472,7 +2711,11 @@ def kill_build_processes(uproject_path: str | None = None) -> dict:
     time.sleep(3)
 
     # Re-check: some processes may have spawned new children
-    remaining_procs = find_running_build_processes(uproject_path)
+    remaining_procs = find_running_build_processes(
+        uproject_path,
+        query_timeout=query_timeout,
+        fail_on_error=fail_on_probe_error,
+    )
     remaining_pids = [p["pid"] for p in remaining_procs if p["pid"] not in killed]
 
     # Second pass: kill any remaining
@@ -2482,7 +2725,11 @@ def kill_build_processes(uproject_path: str | None = None) -> dict:
             _kill_process_tree(pid)
         time.sleep(3)
         # Final check
-        final_procs = find_running_build_processes(uproject_path)
+        final_procs = find_running_build_processes(
+            uproject_path,
+            query_timeout=query_timeout,
+            fail_on_error=fail_on_probe_error,
+        )
         remaining_pids = [p["pid"] for p in final_procs]
 
     status = "ok"
