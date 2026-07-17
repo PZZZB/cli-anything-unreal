@@ -668,7 +668,7 @@ def _filter_editor_status_instances(instances: list[dict], project_path: str | N
 
 def _launch_wait_timeouts(timeout: int | None) -> tuple[int, int]:
     if timeout is not None:
-        return timeout, timeout
+        return min(timeout, DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS), timeout
     return DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS, DEFAULT_EDITOR_LAUNCH_WORKER_TIMEOUT_SECONDS
 
 
@@ -1684,7 +1684,12 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
     help="Rooted level package path (/Game/...) or absolute .umap under project Content.",
 )
 @click.option("--no-wait", is_flag=True, default=False)
-@click.option("--timeout", default=None, type=int, help="Max seconds to wait for editor startup")
+@click.option(
+    "--timeout",
+    default=None,
+    type=int,
+    help="Max seconds allotted to background editor startup; foreground wait remains bounded.",
+)
 @click.option(
     "--extra-arg",
     "extra_args",

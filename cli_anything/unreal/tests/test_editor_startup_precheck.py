@@ -1530,6 +1530,59 @@ def test_editor_launch_without_timeout_uses_bounded_foreground_wait(mini_project
     assert captured["wait_timeout"] <= 120
 
 
+def test_editor_launch_with_long_timeout_returns_pollable_progress(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    captured = {}
+    running_task = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "running",
+        "suggested_poll_interval_seconds": 5,
+    }
+
+    def fake_submit_task(command, payload):
+        captured["payload"] = payload
+        return {"task_id": "launch-task", "command": command, "payload": payload}
+
+    def fake_wait_for_task(task_id, timeout):
+        captured["wait_timeout"] = timeout
+        return None
+
+    with patch(
+        "cli_anything.unreal.commands.editor.submit_task",
+        side_effect=fake_submit_task,
+    ), patch(
+        "cli_anything.unreal.commands.editor.wait_for_task",
+        side_effect=fake_wait_for_task,
+    ), patch(
+        "cli_anything.unreal.commands.editor.load_task",
+        return_value=running_task,
+    ), patch(
+        "cli_anything.unreal.commands.editor._check_already_running",
+        return_value=None,
+    ), patch(
+        "cli_anything.unreal.commands.editor._scan_editor_status_instances",
+        return_value=[],
+    ):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--timeout", "600",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["payload"]["timeout"] == 600
+    assert captured["wait_timeout"] == 110
+    data = json.loads(result.output)
+    assert data["result"]["status"] == "launching"
+    assert data["result"]["task_id"] == "launch-task"
+    assert data["result"]["foreground_wait_timeout_seconds"] == 110
+    assert data["result"]["next_command"] == (
+        f'ue-cli --project "{mini_project}" editor status launch-task'
+    )
+
+
 def test_editor_launch_returns_progress_when_final_task_read_is_blocked(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
