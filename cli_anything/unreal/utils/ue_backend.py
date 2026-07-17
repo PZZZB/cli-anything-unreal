@@ -2269,9 +2269,20 @@ _BUILD_PROCESS_NAMES = [
 ]
 
 
+class BuildProcessProbeError(RuntimeError):
+    """Raised when a caller requires a conclusive build-process probe."""
+
+    def __init__(self, message: str, *, details: dict):
+        super().__init__(message)
+        self.details = details
+
+
 def find_running_build_processes(
     uproject_path: str | None = None,
     include_cmdline: bool = True,
+    *,
+    query_timeout: float = 15,
+    fail_on_error: bool = False,
 ) -> list[dict]:
     """Find running build processes (MSBuild, UBT, cl.exe, etc.).
 
@@ -2285,6 +2296,9 @@ def find_running_build_processes(
             is omitted entirely — useful for AI callers who only need
             {pid, name, project} and would otherwise pay a large token
             cost for every cl.exe's multi-KB compile command line.
+        query_timeout: Maximum seconds to wait for the Windows process query.
+        fail_on_error: Raise ``BuildProcessProbeError`` instead of treating a
+            failed or timed-out query as an empty process list.
 
     Returns a list of dicts:
         include_cmdline=True:  [{"pid", "name", "cmdline", "project"}, ...]
@@ -2306,9 +2320,21 @@ def find_running_build_processes(
         )
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=query_timeout,
         )
-        if result.returncode == 0 and result.stdout.strip():
+        if result.returncode != 0:
+            if fail_on_error:
+                stderr = (result.stderr or "").strip()
+                raise BuildProcessProbeError(
+                    "Windows build-process query failed.",
+                    details={
+                        "reason": "query_failed",
+                        "returncode": result.returncode,
+                        "stderr": stderr[-2000:],
+                    },
+                )
+            return processes
+        if result.stdout.strip():
             data = json.loads(result.stdout)
             if isinstance(data, dict):
                 data = [data]
@@ -2389,8 +2415,27 @@ def find_running_build_processes(
                     for p in processes
                 ]
             return processes
-    except Exception:
-        pass
+    except subprocess.TimeoutExpired as exc:
+        if fail_on_error:
+            raise BuildProcessProbeError(
+                f"Windows build-process query timed out after {query_timeout:g} seconds.",
+                details={
+                    "reason": "timeout",
+                    "timeout_seconds": query_timeout,
+                },
+            ) from exc
+    except BuildProcessProbeError:
+        raise
+    except Exception as exc:
+        if fail_on_error:
+            raise BuildProcessProbeError(
+                "Windows build-process query returned an invalid result.",
+                details={
+                    "reason": "invalid_result",
+                    "exception_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            ) from exc
 
     return processes
 

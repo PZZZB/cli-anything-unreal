@@ -30,6 +30,7 @@ _MODULE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PE_BUILD_PRODUCT_TYPES = frozenset({"dynamiclibrary", "executable"})
 _PE_BUILD_PRODUCT_SUFFIXES = frozenset({".dll", ".exe"})
 _MAX_REPORTED_INVALID_BUILD_PRODUCTS = 20
+_BUILD_STATE_PROCESS_PROBE_TIMEOUT_SECONDS = 3
 
 _TARGET_LEXICAL_NOISE_PATTERN = re.compile(
     r"//[^\r\n]*|/\*.*?\*/|"
@@ -915,12 +916,6 @@ def stop_build(uproject_path: str) -> dict:
 def is_building(uproject_path: str) -> dict:
     from cli_anything.unreal.core.tasks import active_build_tasks
 
-    processes = find_running_build_processes(uproject_path, include_cmdline=False)
-    kinds: dict[str, int] = {}
-    for process in processes:
-        name = process.get("name", "")
-        kinds[name] = kinds.get(name, 0) + 1
-
     tasks = []
     for task in active_build_tasks(uproject_path):
         evidence = {
@@ -937,6 +932,28 @@ def is_building(uproject_path: str) -> dict:
         }
         tasks.append(evidence)
 
+    # A non-final ue-cli task already answers the busy-state question. Avoid
+    # delaying its JSON response on the much slower Windows CIM process scan.
+    if tasks:
+        processes = []
+        process_probe = {
+            "status": "skipped",
+            "reason": "active_task_state",
+        }
+    else:
+        processes = find_running_build_processes(
+            uproject_path,
+            include_cmdline=False,
+            query_timeout=_BUILD_STATE_PROCESS_PROBE_TIMEOUT_SECONDS,
+            fail_on_error=True,
+        )
+        process_probe = {"status": "ok"}
+
+    kinds: dict[str, int] = {}
+    for process in processes:
+        name = process.get("name", "")
+        kinds[name] = kinds.get(name, 0) + 1
+
     result = {
         "building": bool(processes or tasks),
         "count": len(processes),
@@ -944,6 +961,7 @@ def is_building(uproject_path: str) -> dict:
         "processes": processes,
         "active_task_count": len(tasks),
         "active_tasks": tasks,
+        "process_probe": process_probe,
     }
 
     saved_logs = Path(uproject_path).parent / "Saved" / "Logs"

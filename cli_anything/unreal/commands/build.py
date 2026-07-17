@@ -494,7 +494,18 @@ def build_stop(state: AppState, project_path):
 @click.pass_obj
 def build_is_building(state: AppState, project_path):
     from cli_anything.unreal.core.build import is_building
+    from cli_anything.unreal.utils.ue_backend import BuildProcessProbeError
 
     _load_command_project(state, project_path)
     require_project(state)
-    output(is_building(state.session.project_path), state)
+    try:
+        result = is_building(state.session.project_path)
+    except BuildProcessProbeError as exc:
+        raise AppError(
+            "BUILD_STATE_PROBE_FAILED",
+            str(exc),
+            exit_code=4,
+            suggestion="Retry the state query after Windows process discovery recovers.",
+            details=exc.details,
+        ) from exc
+    output(result, state)

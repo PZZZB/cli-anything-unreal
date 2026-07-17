@@ -1203,8 +1203,7 @@ class TestBuildStopAndDetect:
         }
         with patch(
             "cli_anything.unreal.core.build.find_running_build_processes",
-            return_value=[],
-        ), patch(
+        ) as process_probe, patch(
             "cli_anything.unreal.core.tasks.active_build_tasks",
             return_value=[active_task],
         ):
@@ -1221,6 +1220,34 @@ class TestBuildStopAndDetect:
             "pid": 55856,
             "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
         }]
+        assert result["process_probe"] == {
+            "status": "skipped",
+            "reason": "active_task_state",
+        }
+        process_probe.assert_not_called()
+
+    def test_is_building_requires_conclusive_process_probe_without_tasks(
+        self, temp_project
+    ):
+        from cli_anything.unreal.core.build import is_building
+
+        with patch(
+            "cli_anything.unreal.core.tasks.active_build_tasks",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ) as process_probe:
+            result = is_building(temp_project["uproject"])
+
+        assert result["building"] is False
+        assert result["process_probe"] == {"status": "ok"}
+        process_probe.assert_called_once_with(
+            temp_project["uproject"],
+            include_cmdline=False,
+            query_timeout=3,
+            fail_on_error=True,
+        )
 
     def test_compile_rejects_if_already_building(self, temp_project):
         """compile_project returns error when a build is already running."""
@@ -2337,6 +2364,29 @@ class TestBuildStopAndDetect:
             mock_run.return_value = MagicMock(returncode=0, stdout="")
             result = find_running_build_processes("F:/Test/Test.uproject")
             assert result == []
+
+    def test_find_running_build_processes_strict_timeout_is_not_empty_success(self):
+        """A conclusive probe must expose a CIM timeout to its caller."""
+        from cli_anything.unreal.utils.ue_backend import (
+            BuildProcessProbeError,
+            find_running_build_processes,
+        )
+
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired("powershell", 5),
+        ):
+            with pytest.raises(BuildProcessProbeError) as exc_info:
+                find_running_build_processes(
+                    "F:/Test/Test.uproject",
+                    query_timeout=5,
+                    fail_on_error=True,
+                )
+
+        assert exc_info.value.details == {
+            "reason": "timeout",
+            "timeout_seconds": 5,
+        }
 
     def test_find_running_build_processes_with_match(self):
         """find_running_build_processes parses PowerShell JSON output."""
@@ -3517,6 +3567,40 @@ class TestBuildCLI:
             data = self._parse_json_output(result.output)
             assert data["result"]["building"] is True
 
+    def test_build_is_building_cli_probe_timeout_is_structured_error(
+        self, temp_project
+    ):
+        """A timed-out state probe must emit JSON and exit non-zero."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+        from cli_anything.unreal.utils.ue_backend import BuildProcessProbeError
+
+        error = BuildProcessProbeError(
+            "Windows build-process query timed out after 5 seconds.",
+            details={"reason": "timeout", "timeout_seconds": 5},
+        )
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.core.tasks.active_build_tasks",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            side_effect=error,
+        ):
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "build", "is-building",
+            ])
+
+        assert result.exit_code == 4
+        data = self._parse_json_output(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "BUILD_STATE_PROBE_FAILED"
+        assert data["details"] == {
+            "reason": "timeout",
+            "timeout_seconds": 5,
+        }
+
     def test_build_stop_none_running(self, temp_project):
         """build stop when nothing is running returns status=none."""
         from click.testing import CliRunner
@@ -3559,13 +3643,21 @@ class TestBuildE2E:
         assert "platforms" in result
 
     def test_is_building_real(self):
-        """is_building against real project (should return False)."""
+        """is_building returns state or an explicit host probe failure."""
         from cli_anything.unreal.core.build import is_building
+        from cli_anything.unreal.utils.ue_backend import BuildProcessProbeError
 
-        result = is_building(TEST574_UPROJECT)
+        try:
+            result = is_building(TEST574_UPROJECT)
+        except BuildProcessProbeError as exc:
+            assert exc.details["reason"] in {
+                "timeout",
+                "query_failed",
+                "invalid_result",
+            }
+            return
         assert "building" in result
         assert "processes" in result
-        # Most likely not building right now
         assert isinstance(result["building"], bool)
 
     @staticmethod
@@ -3585,9 +3677,14 @@ class TestBuildE2E:
             "--output", "json", "--project", TEST574_UPROJECT,
             "build", "is-building",
         ])
-        assert result.exit_code == 0
         data = self._parse_json_output(result.output)
-        assert "building" in data["result"]
+        if result.exit_code == 0:
+            assert data["status"] == "success"
+            assert "building" in data["result"]
+        else:
+            assert result.exit_code == 4
+            assert data["status"] == "error"
+            assert data["code"] == "BUILD_STATE_PROBE_FAILED"
 
     def test_build_status_cli_real(self):
         """build status CLI against real project."""
