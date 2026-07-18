@@ -895,39 +895,115 @@ def _find_matching_project_editors(project_path: str | None) -> tuple[list[dict]
     return running, matches
 
 
-def _project_process_exit_evidence(
-    project_path: str,
-    target_pids: list[int],
-) -> tuple[bool, dict]:
-    from cli_anything.unreal.utils.ue_backend import _windows_process_exists
+def _same_windows_process_identity(expected: dict, current: dict) -> bool:
+    if int(expected.get("pid") or 0) != int(current.get("pid") or 0):
+        return False
+    if expected.get("creation_time") != current.get("creation_time"):
+        return False
 
-    pid_evidence = [
-        {
-            "pid": pid,
-            "project_match": False,
-            "exists": _windows_process_exists(pid),
-        }
-        for pid in target_pids
-    ]
-    if target_pids and all(item["exists"] is False for item in pid_evidence):
-        return True, {"matching_pids": [], "pids": pid_evidence}
+    expected_image = str(expected.get("image_path") or "")
+    current_image = str(current.get("image_path") or "")
+    if expected_image and current_image:
+        return (
+            expected_image.replace("/", "\\").casefold()
+            == current_image.replace("/", "\\").casefold()
+        )
+    return True
 
-    _, matches = _find_matching_project_editors(project_path)
-    matching_pids = set()
+
+def _capture_project_editor_targets(matches: list[dict]) -> list[dict]:
+    """Keep PID-reuse-safe identities after CIM project metadata disappears."""
+    from cli_anything.unreal.utils.ue_backend import _windows_process_identity
+
+    targets = []
     for proc in matches:
         try:
-            matching_pids.add(int(proc.get("pid", 0)))
+            pid = int(proc.get("pid", 0))
         except (TypeError, ValueError):
+            pid = 0
+        if not pid:
             continue
+
+        target = {"pid": pid, "project": proc.get("project", "")}
+        identity = _windows_process_identity(pid)
+        if (
+            identity.get("query_ok")
+            and identity.get("found")
+            and identity.get("creation_time") is not None
+        ):
+            target["process_identity"] = {
+                key: identity[key]
+                for key in ("pid", "creation_time", "image_path", "identity_source")
+                if key in identity
+            }
+        targets.append(target)
+    return targets
+
+
+def _project_process_exit_evidence(
+    project_path: str,
+    targets: list[dict],
+) -> tuple[bool, dict]:
+    from cli_anything.unreal.utils.ue_backend import (
+        _windows_process_exists,
+        _windows_process_identity,
+    )
+
+    pid_evidence = []
+    needs_project_scan = False
+    for target in targets:
+        pid = int(target["pid"])
+        item = {"pid": pid, "project_match": False}
+        expected_identity = target.get("process_identity")
+        if expected_identity:
+            current_identity = _windows_process_identity(pid)
+            item["identity_query_ok"] = bool(current_identity.get("query_ok"))
+            if current_identity.get("query_ok"):
+                item["exists"] = bool(current_identity.get("found"))
+                item["identity_matches"] = bool(
+                    current_identity.get("found")
+                    and _same_windows_process_identity(expected_identity, current_identity)
+                )
+                if current_identity.get("found") and not item["identity_matches"]:
+                    item["pid_reused"] = True
+                item["target_exited"] = not item["identity_matches"]
+                pid_evidence.append(item)
+                continue
+            item["identity_error"] = current_identity.get("error")
+
+        item["exists"] = _windows_process_exists(pid)
+        item["target_exited"] = item["exists"] is False
+        needs_project_scan = needs_project_scan or not item["target_exited"]
+        pid_evidence.append(item)
+
+    if targets and all(item["target_exited"] for item in pid_evidence):
+        public_evidence = [
+            {key: value for key, value in item.items() if key != "target_exited"}
+            for item in pid_evidence
+        ]
+        return True, {"matching_pids": [], "pids": public_evidence}
+
+    matching_pids = set()
+    if needs_project_scan:
+        _, matches = _find_matching_project_editors(project_path)
+        for proc in matches:
+            try:
+                matching_pids.add(int(proc.get("pid", 0)))
+            except (TypeError, ValueError):
+                continue
 
     for item in pid_evidence:
         if item["pid"] in matching_pids:
             item["project_match"] = True
             item["exists"] = True
 
+    public_evidence = [
+        {key: value for key, value in item.items() if key != "target_exited"}
+        for item in pid_evidence
+    ]
     return False, {
         "matching_pids": sorted(matching_pids),
-        "pids": pid_evidence,
+        "pids": public_evidence,
     }
 
 
@@ -937,6 +1013,7 @@ def _kill_matching_project_editors(
     *,
     success_message: str,
     failure_message: str,
+    expected_targets: list[dict] | None = None,
 ) -> dict | None:
     if not project_path:
         return None
@@ -944,29 +1021,59 @@ def _kill_matching_project_editors(
     from cli_anything.unreal.utils.ue_backend import (
         _kill_process_tree_result,
         _windows_process_exists,
+        _windows_process_identity,
     )
 
-    _, matches = _find_matching_project_editors(project_path)
-    if not matches:
+    if expected_targets is not None:
+        candidates = [dict(target) for target in expected_targets]
+    else:
+        _, matches = _find_matching_project_editors(project_path)
+        candidates = _capture_project_editor_targets(matches)
+    if not candidates:
         return None
 
     closed = []
     failed = []
-    for proc in matches:
+    for proc in candidates:
         try:
             pid = int(proc.get("pid", 0))
         except (TypeError, ValueError):
             pid = 0
         entry = {"pid": pid, "project": proc.get("project", "")}
         if pid:
-            _, current_matches = _find_matching_project_editors(project_path)
-            current_pids = set()
-            for current in current_matches:
-                try:
-                    current_pids.add(int(current.get("pid", 0)))
-                except (TypeError, ValueError):
+            expected_identity = proc.get("process_identity")
+            if expected_identity:
+                current_identity = _windows_process_identity(pid)
+                if current_identity.get("query_ok"):
+                    if not current_identity.get("found"):
+                        entry.update({"already_exited": True, "skipped": True})
+                        closed.append(entry)
+                        continue
+                    if not _same_windows_process_identity(expected_identity, current_identity):
+                        entry.update({"already_exited": True, "pid_reused": True, "skipped": True})
+                        closed.append(entry)
+                        continue
+                else:
+                    entry["kill_result"] = {
+                        "ok": False,
+                        "error": "Unable to verify the original editor process identity before termination.",
+                        "identity_query": current_identity,
+                        "retry_suggested": True,
+                        "suggestion": (
+                            "Retry editor close; do not kill this PID until its original process identity can be verified."
+                        ),
+                    }
+                    failed.append(entry)
                     continue
-            if pid not in current_pids:
+            else:
+                _, current_matches = _find_matching_project_editors(project_path)
+                current_pids = set()
+                for current in current_matches:
+                    try:
+                        current_pids.add(int(current.get("pid", 0)))
+                    except (TypeError, ValueError):
+                        continue
+            if not expected_identity and pid not in current_pids:
                 process_exists = _windows_process_exists(pid)
                 if process_exists is False:
                     entry.update({"already_exited": True, "skipped": True})
@@ -994,30 +1101,70 @@ def _kill_matching_project_editors(
             "error": "Missing process id.",
             "retry_suggested": False,
         }
+        expected_identity = proc.get("process_identity")
+        if kill_result.get("ok") and expected_identity:
+            identity_confirmation_attempts = 0
+            while True:
+                identity_confirmation_attempts += 1
+                current_identity = _windows_process_identity(pid)
+                identity_still_running = bool(
+                    current_identity.get("query_ok")
+                    and current_identity.get("found")
+                    and _same_windows_process_identity(expected_identity, current_identity)
+                )
+                if not identity_still_running or identity_confirmation_attempts >= 15:
+                    break
+                time.sleep(0.2)
+            if identity_still_running:
+                kill_result = dict(kill_result)
+                kill_result.update({
+                    "ok": False,
+                    "error": "Termination returned success, but the original editor process identity is still running.",
+                    "identity_still_running": True,
+                    "target_identity_verification": current_identity,
+                    "identity_confirmation_attempts": identity_confirmation_attempts,
+                    "identity_confirmation_seconds": round(
+                        (identity_confirmation_attempts - 1) * 0.2,
+                        1,
+                    ),
+                    "retry_suggested": True,
+                    "suggestion": "Retry editor close or terminate the reported UnrealEditor PID manually.",
+                })
+            elif not current_identity.get("query_ok") and (
+                kill_result.get("process_exists_after_taskkill") is not False
+                and not kill_result.get("already_exited")
+            ):
+                kill_result = dict(kill_result)
+                kill_result.update({
+                    "ok": False,
+                    "error": "Termination returned success, but final editor process identity verification failed.",
+                    "target_identity_verification": current_identity,
+                    "retry_suggested": True,
+                    "suggestion": "Retry editor close; success requires verified exit of the original editor PID.",
+                })
         if kill_result.get("ok"):
             closed.append(entry)
         else:
             entry["kill_result"] = kill_result
             failed.append(entry)
 
-    if closed:
+    if failed:
         result = {
+            "status": "failed",
+            "port": port,
+            "message": failure_message,
+            "failed_processes": failed,
+        }
+        if closed:
+            result["closed_processes"] = closed
+    else:
+        return {
             "status": "closed",
             "port": port,
             "method": "process_tree_kill",
             "message": success_message,
             "closed_processes": closed,
         }
-        if failed:
-            result["failed_processes"] = failed
-        return result
-
-    result = {
-        "status": "failed",
-        "port": port,
-        "message": failure_message,
-        "failed_processes": failed,
-    }
     suggestions = [
         item.get("kill_result", {}).get("suggestion")
         for item in failed
@@ -1138,13 +1285,35 @@ def _remove_tree_with_retries(path: Path, *, attempts: int = 30, delay: float = 
     raise last_error
 
 
-def _wait_for_project_editor_exit(project_path: str | None, port: int, *, timeout: float = 60.0) -> dict | None:
+def _wait_for_project_editor_exit(
+    project_path: str | None,
+    port: int,
+    *,
+    timeout: float = 60.0,
+    targets: list[dict] | None = None,
+) -> dict | None:
     """Wait for same-project UnrealEditor processes to exit, then kill stale lock holders."""
     if not project_path or sys.platform != "win32":
         return None
 
     deadline = time.time() + timeout
+    last_process_evidence = None
     while time.time() < deadline:
+        if targets:
+            confirmed_exit, process_evidence = _project_process_exit_evidence(
+                project_path,
+                targets,
+            )
+            last_process_evidence = process_evidence
+            if confirmed_exit:
+                return {
+                    "status": "closed",
+                    "method": "process_exit",
+                    "target_pids": sorted(int(target["pid"]) for target in targets),
+                    "pid_evidence": process_evidence["pids"],
+                }
+            time.sleep(1)
+            continue
         _, matches = _find_matching_project_editors(project_path)
         if not matches:
             return {"status": "closed", "method": "process_exit"}
@@ -1155,11 +1324,32 @@ def _wait_for_project_editor_exit(project_path: str | None, port: int, *, timeou
         port,
         success_message="Editor API closed but UnrealEditor process still held project DLLs; terminated matching process before compile.",
         failure_message="Editor API closed but UnrealEditor process still held project DLLs and could not be terminated.",
+        expected_targets=targets,
     )
     if kill_result:
         return kill_result
 
     # The process can exit between the timeout loop and the kill scan.
+    if targets:
+        confirmed_exit, process_evidence = _project_process_exit_evidence(
+            project_path,
+            targets,
+        )
+        if confirmed_exit:
+            return {
+                "status": "closed",
+                "method": "process_exit_after_timeout_race",
+                "target_pids": sorted(int(target["pid"]) for target in targets),
+                "pid_evidence": process_evidence["pids"],
+            }
+        return {
+            "status": "timeout",
+            "port": port,
+            "message": "Timed out waiting for the original UnrealEditor process to exit before compile.",
+            "target_pids": sorted(int(target["pid"]) for target in targets),
+            "last_process_evidence": process_evidence or last_process_evidence,
+        }
+
     _, final_matches = _find_matching_project_editors(project_path)
     if not final_matches:
         return {
@@ -1817,6 +2007,7 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
 
         return {"status": "offline", "port": state.session.port, "message": "No editor running on this port."}
 
+    targets = []
     target_pids = []
     if state.session.project_path and sys.platform == "win32":
         running, matches = _find_matching_project_editors(state.session.project_path)
@@ -1834,12 +2025,8 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
                     ],
                 },
             )
-        for editor in matches:
-            try:
-                target_pids.append(int(editor.get("pid", 0)))
-            except (TypeError, ValueError):
-                continue
-        target_pids = sorted(pid for pid in set(target_pids) if pid)
+        targets = _capture_project_editor_targets(matches)
+        target_pids = sorted({int(target["pid"]) for target in targets})
 
     try:
         api.call_function(
@@ -1859,7 +2046,12 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
     last_process_evidence = None
     while time.time() < deadline:
         if not api.is_alive():
-            drain_result = _wait_for_project_editor_exit(state.session.project_path, state.session.port, timeout=60)
+            drain_result = _wait_for_project_editor_exit(
+                state.session.project_path,
+                state.session.port,
+                timeout=60,
+                targets=targets,
+            )
             if drain_result is None:
                 return {"status": "closed", "port": state.session.port}
             if drain_result.get("status") == "closed":
@@ -1876,7 +2068,7 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
         if target_pids:
             confirmed_exit, process_evidence = _project_process_exit_evidence(
                 state.session.project_path,
-                target_pids,
+                targets,
             )
             last_process_evidence = process_evidence
             if confirmed_exit:
@@ -1894,6 +2086,7 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
         state.session.port,
         success_message="Editor did not close gracefully within 30s; terminated matching UnrealEditor process.",
         failure_message="Editor did not close within 30s and matching UnrealEditor process could not be terminated.",
+        expected_targets=targets,
     )
     if kill_result and kill_result.get("status") == "closed":
         return kill_result
