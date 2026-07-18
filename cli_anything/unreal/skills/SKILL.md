@@ -1,4 +1,4 @@
----
+﻿---
 name: ue-cli
 description: |
   Control Unreal Engine 5 editor via `ue-cli`.

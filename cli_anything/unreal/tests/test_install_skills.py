@@ -23,6 +23,17 @@ class TestInstallSkills:
         assert "name: ue-cli" in skill_md
         assert evals["skill_name"] == "ue-cli"
 
+    def test_bundled_skill_encoding_preserves_chinese_triggers(self):
+        """Windows PowerShell 5.1 can detect UTF-8 and render trigger text."""
+        skill_path = Path(__file__).parent.parent / "skills" / "SKILL.md"
+        skill_bytes = skill_path.read_bytes()
+
+        assert skill_bytes.startswith(b"\xef\xbb\xbf")
+        skill_md = skill_bytes.decode("utf-8-sig")
+        assert "Chinese: 虚幻引擎, 材质, 蓝图, 关卡" in skill_md
+        assert "铏氬够寮曟搸" not in skill_md
+        assert "鏉愯川" not in skill_md
+
     def test_viewport_realtime_guidance_is_reflection_aware(self):
         """Bundled editor workflows query the engine before choosing a fallback."""
         references_dir = Path(__file__).parent.parent / "skills" / "references"
