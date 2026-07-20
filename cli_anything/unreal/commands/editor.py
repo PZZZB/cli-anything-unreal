@@ -1421,9 +1421,11 @@ def _deploy_bridge(session, state) -> dict:
 
 
 def _build_launch_cmd(editor_exe, project_path, map_path, extra_args=None) -> list:
-    cmd = [editor_exe, project_path, "-nosplash", "-unattended"]
+    cmd = [editor_exe, project_path]
     if map_path:
+        # Unreal parses maps as URL parameters only before command-line flags.
         cmd.append(map_path)
+    cmd.extend(["-nosplash", "-unattended"])
     if extra_args:
         cmd.extend(str(arg) for arg in extra_args if arg is not None and str(arg) != "")
     return cmd

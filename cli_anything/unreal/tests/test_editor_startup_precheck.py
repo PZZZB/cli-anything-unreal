@@ -1379,7 +1379,7 @@ def test_build_launch_cmd_with_map():
     from cli_anything.unreal.commands.editor import _build_launch_cmd
 
     cmd = _build_launch_cmd("UnrealEditor.exe", "MyProject.uproject", "/Game/Maps/Main")
-    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-unattended", "/Game/Maps/Main"]
+    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "/Game/Maps/Main", "-nosplash", "-unattended"]
 
 
 def test_build_launch_cmd_with_extra_args():
@@ -1414,9 +1414,9 @@ def test_build_launch_cmd_with_map_and_extra_args():
     assert cmd == [
         "UnrealEditor.exe",
         "MyProject.uproject",
+        "/Game/Maps/Main",
         "-nosplash",
         "-unattended",
-        "/Game/Maps/Main",
         "-vulkan",
     ]
 
