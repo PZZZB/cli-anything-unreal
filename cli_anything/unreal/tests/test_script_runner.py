@@ -1416,6 +1416,31 @@ class TestScriptRunner:
             assert data["result"]["actors"] == 42
             mock_run.assert_called_once()
 
+    def test_editor_run_script_no_save_does_not_probe_bridge_version(self):
+        """Remote Control Python execution must stay usable across bridge mismatches."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run, \
+             patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version") as mock_loaded, \
+             patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version") as mock_bundled:
+            mock_editor.return_value = MagicMock()
+            mock_run.return_value = {"status": "ok", "validated": True}
+            mock_loaded.return_value = "1.18"
+            mock_bundled.return_value = "1.19"
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script", "--no-save", "-",
+            ], input="result = {'validated': True}\n")
+
+        assert result.exit_code == 0
+        assert json.loads(result.output)["result"]["validated"] is True
+        assert mock_run.call_args.kwargs["save"] is False
+        mock_loaded.assert_not_called()
+        mock_bundled.assert_not_called()
+
     def test_editor_run_script_stdin_code(self):
         """``editor run-script -`` should read multiline Python from stdin."""
         from click.testing import CliRunner

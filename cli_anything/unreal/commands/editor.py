@@ -458,31 +458,52 @@ def _add_online_bridge_status(entry: dict) -> None:
         entry["bridge_status"] = "missing_or_unversioned"
         entry["degraded_mode"] = "remote_control_only"
         entry["read_only_commands_available"] = True
+        entry["remote_control_commands_available"] = True
+        entry["run_script_no_save_available"] = True
         entry["bridge_commands_available"] = False
         entry["message"] = (
             "Editor is online via Remote Control, but CliAnythingBridge is missing or does not expose a version. "
-            "Bridge-only commands may fail until the plugin is upgraded and the editor is restarted."
+            "Remote Control commands remain available without a restart; bridge-only commands may fail until "
+            "the plugin is upgraded and the editor is restarted."
         )
         entry["suggestion"] = (
-            "Non-bridge read-only commands can still run in remote-control-only mode. "
+            "For a non-mutating validation script, editor run-script --no-save can still run in "
+            "remote-control-only mode. --no-save skips ue-cli's automatic save; it does not sandbox script side effects. "
             "Schedule editor plugin-upgrade when bridge commands are needed and a restart is acceptable."
         )
         if project_path:
+            entry["no_restart_command"] = (
+                f'ue-cli --output json --project "{project_path}" editor run-script --no-save -'
+            )
             entry["upgrade_command"] = f'ue-cli --project "{project_path}" editor plugin-upgrade'
         return
 
     entry["plugin_match"] = bundled is not None and loaded == bundled
-    if not entry["plugin_match"] and project_path:
+    if not entry["plugin_match"]:
         entry["restart_required"] = True
+        entry["restart_scope"] = "bridge_commands_only"
         entry["bridge_status"] = "version_mismatch"
+        entry["degraded_mode"] = "remote_control_only"
+        entry["read_only_commands_available"] = True
+        entry["remote_control_commands_available"] = True
+        entry["run_script_no_save_available"] = True
         entry["bridge_commands_available"] = False
         entry["message"] = (
             f"running editor loaded CliAnythingBridge {loaded}, "
             f"but ue-cli bundles {bundled or 'unknown'}. UE cannot hot-reload this C++ bridge safely; "
-            "run editor plugin-upgrade to deploy, compile, restart, then retry bridge commands."
+            "Remote Control remains available, including editor run-script --no-save. "
+            "Bridge-backed commands require editor plugin-upgrade before use."
         )
-        entry["suggestion"] = "CliAnythingBridge plugin is version-mismatched. Run editor plugin-upgrade; it will restart the editor when needed."
-        entry["next_command"] = f'ue-cli --project "{project_path}" editor plugin-upgrade'
+        entry["suggestion"] = (
+            "For a non-mutating validation script, use editor run-script --no-save without restarting. "
+            "--no-save skips ue-cli's automatic save; it does not sandbox script side effects. "
+            "Schedule editor plugin-upgrade only when bridge-backed commands are needed and a restart is acceptable."
+        )
+        if project_path:
+            entry["no_restart_command"] = (
+                f'ue-cli --output json --project "{project_path}" editor run-script --no-save -'
+            )
+            entry["upgrade_command"] = f'ue-cli --project "{project_path}" editor plugin-upgrade'
 
 
 def _add_online_bridge_statuses(entries: list[dict]) -> None:

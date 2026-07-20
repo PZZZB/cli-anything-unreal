@@ -8,7 +8,7 @@ Workflow examples live in sibling workflow docs.
 
 | Command | Description | Requires Editor |
 |---------|-------------|:-:|
-| `editor status [--project PATH] [--all] [--scan-range START-END] [TASK_ID]` | No TASK_ID: list Unreal Editor processes/result array. `--project` is accepted here or as top-level `ue-cli --project PATH editor status`; it filters to that project unless `--all` is set. Online entries include bridge plugin version fields; mismatch entries include `next_command` when project is known. Offline entries include recovery hints. With TASK_ID: async progress | - |
+| `editor status [--project PATH] [--all] [--scan-range START-END] [TASK_ID]` | No TASK_ID: list Unreal Editor processes/result array. `--project` is accepted here or as top-level `ue-cli --project PATH editor status`; it filters to that project unless `--all` is set. Online entries include bridge plugin version fields; mismatch entries include `no_restart_command` for Remote Control Python validation and `upgrade_command` for bridge-backed features when project is known. Offline entries include recovery hints. With TASK_ID: async progress | - |
 | `preflight` / `editor preflight` | Read-only editor-startup check for engine, project, Remote Control, and bridge readiness. It never modifies project files and is not required before `build cook` or `build package` | No |
 | `editor launch [--map /Game/PATH] [--no-wait] [--timeout N]` | Prepare Remote Control/bridge project files when needed, then launch editor; waits until ready and kills zombies. Map package paths must include their mount root; bare names such as `Oregon_Main` are rejected. Foreground wait is always bounded so shells do not kill the command; if the editor is still starting, the command returns a pollable `launching` task while `--timeout` remains the background startup deadline. | No |
 | `editor close` | Gracefully close editor, then waits for same-project UnrealEditor process exit (kills stale lock holder if needed) | No |
@@ -260,13 +260,19 @@ ue-cli --port 30010 editor status
 ue-cli --port 30011 material list
 ```
 
-Online bridge mismatch and offline result items have `next_command`. For stale editor process:
+Offline result items can have `next_command`. For stale editor process:
 
 ```bash
 ue-cli --project "F:\MyGame\MyGame.uproject" editor launch
 ```
 
-For online bridge mismatch:
+For online bridge mismatch, Remote Control commands remain available. A non-mutating validation can run without restart:
+
+```bash
+ue-cli --output json --project "F:\MyGame\MyGame.uproject" editor run-script --no-save -
+```
+
+`--no-save` skips ue-cli's automatic dirty-package save; it does not sandbox script side effects. Upgrade only when bridge-backed commands are needed:
 
 ```bash
 ue-cli --project "F:\MyGame\MyGame.uproject" editor plugin-upgrade

@@ -284,7 +284,7 @@ def test_editor_status_online_includes_matching_bridge_versions(mini_project):
     assert "next_command" not in item
 
 
-def test_editor_status_online_suggests_plugin_upgrade_on_bridge_mismatch(mini_project):
+def test_editor_status_online_reports_no_restart_path_on_bridge_mismatch(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
@@ -296,8 +296,8 @@ def test_editor_status_online_suggests_plugin_upgrade_on_bridge_mismatch(mini_pr
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 1234, "project": mini_project},
          ]), \
-         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.14"), \
-         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.13"):
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.19"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.18"):
         result = runner.invoke(cli, [
             "--output", "json",
             "editor", "status",
@@ -306,13 +306,24 @@ def test_editor_status_online_suggests_plugin_upgrade_on_bridge_mismatch(mini_pr
     assert result.exit_code == 0
     data = json.loads(result.output)
     item = data["result"][0]
-    assert item["bridge_version"] == "1.13"
-    assert item["bundled_version"] == "1.14"
+    assert item["bridge_version"] == "1.18"
+    assert item["bundled_version"] == "1.19"
     assert item["plugin_match"] is False
-    assert item["next_command"] == f'ue-cli --project "{mini_project}" editor plugin-upgrade'
+    assert item["bridge_status"] == "version_mismatch"
+    assert item["degraded_mode"] == "remote_control_only"
+    assert item["remote_control_commands_available"] is True
+    assert item["run_script_no_save_available"] is True
+    assert item["bridge_commands_available"] is False
+    assert "next_command" not in item
+    assert item["upgrade_command"] == f'ue-cli --project "{mini_project}" editor plugin-upgrade'
+    assert item["no_restart_command"] == (
+        f'ue-cli --output json --project "{mini_project}" editor run-script --no-save -'
+    )
     assert item["restart_required"] is True
+    assert item["restart_scope"] == "bridge_commands_only"
     assert "running editor loaded" in item["message"]
-    assert "restart" in item["message"]
+    assert "Remote Control remains available" in item["message"]
+    assert "does not sandbox" in item["suggestion"]
     assert "plugin-upgrade" in item["suggestion"]
 
 
@@ -342,11 +353,14 @@ def test_editor_status_online_missing_bridge_reports_remote_control_only_mode(mi
     assert item["bridge_status"] == "missing_or_unversioned"
     assert item["degraded_mode"] == "remote_control_only"
     assert item["read_only_commands_available"] is True
+    assert item["remote_control_commands_available"] is True
+    assert item["run_script_no_save_available"] is True
     assert item["bridge_commands_available"] is False
     assert "restart_required" not in item
     assert "next_command" not in item
     assert "upgrade_command" in item
-    assert "Non-bridge read-only" in item["suggestion"]
+    assert "editor run-script --no-save" in item["suggestion"]
+    assert "does not sandbox" in item["suggestion"]
 
 
 def test_editor_status_online_without_project_still_includes_bridge_versions():

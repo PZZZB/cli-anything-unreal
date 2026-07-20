@@ -75,11 +75,11 @@ ue-cli task cancel <task_id>
 - `port`: Remote Control port
 - `project_path`: uproject path
 - `bridge_version` / `bundled_version` / `plugin_match`: online bridge plugin health. `plugin_match` can be `null` if the version probe timed out or the editor is busy.
-- `message` / `suggestion` / `next_command`: recovery hints. For `unreachable`, retry status; for `launching`, poll the task; for stale `offline`, relaunch/close guidance may be provided; for online bridge mismatches, run plugin-upgrade when shown
+- `message` / `suggestion` / command hints: recovery guidance. For `unreachable`, retry status; for `launching`, poll the task; for stale `offline`, relaunch/close guidance may be provided. Online bridge mismatches expose `no_restart_command` for Remote Control Python validation and `upgrade_command` for bridge-backed commands.
 
 With top-level `--project`, `editor status` filters to that project by default. Use `editor status --all` only when you need to inspect editors for other projects too.
 
-If an online item has `plugin_match: false` and `next_command`, run it (`editor plugin-upgrade`). Do not force recompile before every launch; `editor launch` deploys bridge source and recompiles only when plugin load failure requires it.
+If an online item has `plugin_match: false`, inspect its capability fields. `degraded_mode=remote_control_only`, `remote_control_commands_available=true`, and `run_script_no_save_available=true` mean Remote Control Python execution remains available without a restart. Run `upgrade_command` only when a bridge-backed command is needed and restarting is acceptable. Do not force recompile before every launch; `editor launch` deploys bridge source and recompiles only when plugin load failure requires it.
 
 `editor status <task_id>` returns async task progress. After a launch timeout, it also reconciles the task to completed only when the same project/PID is online and any requested map matches; use the returned `next_command` instead of relaunching blindly.
 
@@ -314,4 +314,12 @@ ue-cli editor api-discover "/Game/Maps/L.L:PersistentLevel.MyActor_0"
 
 ## Bridge Version Mismatch
 
-If `editor status` reports `plugin_match=false`, the editor has already loaded an older or missing `CliAnythingBridge` DLL. UE cannot safely hot-reload that C++ bridge. Run the reported `editor plugin-upgrade` command so ue-cli can deploy, recompile, restart the editor, then retry bridge-backed commands.
+If `editor status` reports `plugin_match=false`, the editor has already loaded an older or missing `CliAnythingBridge` DLL. UE cannot safely hot-reload that C++ bridge. This blocks bridge-backed features, not Remote Control itself.
+
+For a validation script that does not mutate editor state, use the reported `no_restart_command` or run:
+
+```powershell
+ue-cli --output json --project "F:\MyGame\MyGame.uproject" editor run-script --no-save -
+```
+
+`editor run-script` uses Remote Control Python execution and does not require the bundled and loaded bridge versions to match. `--no-save` only disables ue-cli's automatic dirty-package save; it does not sandbox the script or prevent explicit mutations/saves. Run `upgrade_command` later when bridge-backed commands are needed and restarting is acceptable.
