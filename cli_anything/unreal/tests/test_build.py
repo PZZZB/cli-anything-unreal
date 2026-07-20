@@ -408,6 +408,22 @@ class TestBuildSuccessPaths:
     def test_compile_win64_modules_uses_build_bat_editor_target(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
 
+        project_dir = Path(temp_project["dir"])
+        products = []
+        for module in ("Renderer", "RHI"):
+            product = (
+                project_dir
+                / "Binaries"
+                / "Win64"
+                / f"UnrealEditor-{module}.dll"
+            )
+            product.write_bytes(self._minimal_pe_image())
+            products.append({
+                "Path": f"$(ProjectDir)/Binaries/Win64/UnrealEditor-{module}.dll",
+                "Type": "DynamicLibrary",
+            })
+        self._write_editor_receipt(project_dir, products)
+
         build_result = {
             "returncode": 0,
             "log_file": r"F:\Test\Saved\Logs\cli_compile.log",
@@ -447,6 +463,122 @@ class TestBuildSuccessPaths:
         )
         mock_run_uat.assert_not_called()
         assert result["status"] == "ok"
+
+    def test_compile_module_preserves_existing_hot_reload_state(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        product = project_dir / "Binaries" / "Win64" / "UnrealEditor-Renderer.dll"
+        product.write_bytes(self._minimal_pe_image())
+        self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(ProjectDir)/Binaries/Win64/UnrealEditor-Renderer.dll",
+                "Type": "DynamicLibrary",
+            }],
+        )
+        state_file = (
+            project_dir
+            / "Intermediate"
+            / "Build"
+            / "Win64"
+            / "x64"
+            / "TestProjectEditor"
+            / "Development"
+            / "HotReloadState.bin"
+        )
+        state_file.parent.mkdir(parents=True)
+        state_file.write_bytes(b"synthetic state")
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ) as mock_run_build:
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+                modules=("Renderer",),
+            )
+
+        assert result["status"] == "ok"
+        assert mock_run_build.call_args.kwargs["extra_args"] == [
+            f'-Project={temp_project["uproject"]}',
+            "-ForceHotReload",
+            "-Module=Renderer",
+            "-WaitMutex",
+        ]
+
+    def test_compile_module_rejects_missing_editor_receipt(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+                modules=("Renderer",),
+            )
+
+        assert result["status"] == "error"
+        assert result["code"] == "INVALID_BUILD_OUTPUT"
+        assert result["failure_kind"] == "missing_editor_target_receipt"
+
+    def test_compile_module_rejects_missing_module_manifest(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        product = project_dir / "Binaries" / "Win64" / "UnrealEditor-Renderer.dll"
+        product.write_bytes(self._minimal_pe_image())
+        missing_manifest = (
+            project_dir
+            / "Plugins"
+            / "Example"
+            / "Binaries"
+            / "Win64"
+            / "UnrealEditor.modules"
+        )
+        self._write_editor_receipt(
+            project_dir,
+            [
+                {
+                    "Path": "$(ProjectDir)/Binaries/Win64/UnrealEditor-Renderer.dll",
+                    "Type": "DynamicLibrary",
+                },
+                {
+                    "Path": (
+                        "$(ProjectDir)/Plugins/Example/Binaries/Win64/"
+                        "UnrealEditor.modules"
+                    ),
+                    "Type": "RequiredResource",
+                },
+            ],
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ):
+            result = compile_project(
+                temp_project["uproject"],
+                engine_root=self._mock_engine_root(),
+                modules=("Renderer",),
+            )
+
+        assert result["status"] == "error"
+        assert result["code"] == "INVALID_BUILD_OUTPUT"
+        assert result["failure_kind"] == "missing_editor_module_manifests"
+        assert result["missing_module_manifests"] == [str(missing_manifest)]
 
     def test_compile_module_ignores_unrelated_invalid_target_product(
         self, temp_project

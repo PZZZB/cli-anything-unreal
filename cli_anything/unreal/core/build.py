@@ -174,6 +174,30 @@ def validate_module_name(value: str) -> str:
     return value
 
 
+def _find_module_hot_reload_state_files(
+    uproject_path: str,
+    target: str,
+    platform: str,
+    config: str,
+) -> list[Path]:
+    """Find UBT state that a module-only build must preserve."""
+    build_root = Path(uproject_path).parent / "Intermediate" / "Build" / platform
+    if not build_root.is_dir():
+        return []
+
+    matches = []
+    for state_file in build_root.rglob("HotReloadState.bin"):
+        relative_parts = state_file.relative_to(build_root).parts
+        if len(relative_parts) < 3:
+            continue
+        if (
+            relative_parts[-3].casefold() == target.casefold()
+            and relative_parts[-2].casefold() == config.casefold()
+        ):
+            matches.append(state_file)
+    return sorted(matches)
+
+
 def _check_already_building(uproject_path: str) -> dict | None:
     processes = find_running_build_processes(uproject_path)
     if not processes:
@@ -432,6 +456,18 @@ def _validate_win64_editor_build_products(
     if receipt_error:
         return receipt_error
     if receipt_path is None or receipt is None:
+        if modules:
+            return {
+                "status": "error",
+                "code": "INVALID_BUILD_OUTPUT",
+                "failure_kind": "missing_editor_target_receipt",
+                "expected_receipt_directory": str(project_dir / "Binaries" / "Win64"),
+                "error": (
+                    "Compile exited 0, but the module-targeted build left no "
+                    "Editor target receipt. The target may not be launchable; "
+                    "run a full build compile to restore launch metadata."
+                ),
+            }
         return {}
 
     products = receipt.get("BuildProducts")
@@ -442,6 +478,7 @@ def _validate_win64_editor_build_products(
         )
 
     invalid_products = []
+    missing_module_manifests = []
     validated_count = 0
     engine_path = Path(engine_root)
     requested_modules = {module.casefold() for module in (modules or ())}
@@ -453,6 +490,24 @@ def _validate_win64_editor_build_products(
             )
         product_type = str(product.get("Type", ""))
         raw_path = str(product.get("Path", ""))
+        if (
+            requested_modules
+            and product_type.casefold() == "requiredresource"
+            and Path(raw_path).suffix.casefold() == ".modules"
+        ):
+            path = _resolve_receipt_product_path(
+                raw_path,
+                project_dir=project_dir,
+                engine_root=engine_path,
+            )
+            if path is None:
+                return _invalid_build_receipt(
+                    receipt_path,
+                    f"unsupported path macro in BuildProducts[{index}]: {raw_path}",
+                )
+            if not path.is_file():
+                missing_module_manifests.append(str(path))
+            continue
         if product_type.casefold() not in _PE_BUILD_PRODUCT_TYPES:
             continue
         if Path(raw_path).suffix.casefold() not in _PE_BUILD_PRODUCT_SUFFIXES:
@@ -480,6 +535,24 @@ def _validate_win64_editor_build_products(
                 "type": product_type,
                 "reason": reason,
             })
+
+    if missing_module_manifests:
+        missing_count = len(missing_module_manifests)
+        return {
+            "status": "error",
+            "code": "INVALID_BUILD_OUTPUT",
+            "failure_kind": "missing_editor_module_manifests",
+            "receipt_file": str(receipt_path),
+            "missing_module_manifest_count": missing_count,
+            "missing_module_manifests": missing_module_manifests[
+                :_MAX_REPORTED_INVALID_BUILD_PRODUCTS
+            ],
+            "error": (
+                f"Compile exited 0, but {missing_count} Editor module manifest(s) "
+                "declared by the target receipt are missing. The target is not "
+                "launchable; run a full build compile to restore launch metadata."
+            ),
+        }
 
     if validated_count == 0:
         if requested_modules:
@@ -570,16 +643,36 @@ def compile_project(
         target, target_error = _resolve_editor_target(uproject_path)
         if target_error:
             return {"status": "error", "error": target_error}
+        try:
+            hot_reload_state_files = _find_module_hot_reload_state_files(
+                uproject_path,
+                target,
+                platform,
+                config,
+            )
+        except OSError as exc:
+            return {
+                "status": "error",
+                "code": "HOT_RELOAD_STATE_PROBE_FAILED",
+                "error": (
+                    "Could not inspect existing UBT hot-reload state before the "
+                    f"module-targeted build: {exc}"
+                ),
+            }
+        extra_args = [f"-Project={uproject_path}"]
+        if hot_reload_state_files:
+            # UBT's disabled-hot-reload setup deletes previous temporary metadata
+            # before -Module filters output actions. Keeping hot reload enabled
+            # reapplies that state and rewrites the affected manifests instead.
+            extra_args.append("-ForceHotReload")
+        extra_args.extend(f"-Module={module}" for module in modules)
+        extra_args.append("-WaitMutex")
         result = run_build(
             engine_root,
             target,
             platform,
             config,
-            extra_args=[
-                f"-Project={uproject_path}",
-                *(f"-Module={module}" for module in modules),
-                "-WaitMutex",
-            ],
+            extra_args=extra_args,
             log_file=log_file,
             log_label="compile",
             project_dir=str(Path(uproject_path).parent),
