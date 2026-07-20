@@ -2325,6 +2325,34 @@ def _read_log_delta(
     return "\n".join(lines).strip()
 
 
+def _is_python_console_command(command: str) -> bool:
+    """Return whether *command* runs Python through UE's ``py`` console command."""
+    return bool(re.match(r"\s*py(?:\s|$)", command, re.IGNORECASE))
+
+
+def _python_console_error_lines(command: str, result: dict) -> list[str]:
+    """Collect synchronous Python errors captured for one console command."""
+    if not _is_python_console_command(command):
+        return []
+
+    errors: list[str] = []
+    file_error_pattern = re.compile(
+        r"^\s*(?:\[[^\]\r\n]*\]\s*)*LogPython:\s*Error(?:\s*:|$)",
+        re.IGNORECASE,
+    )
+    for item in result.get("log_output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        line = str(item.get("Output", "")).strip()
+        if not line:
+            continue
+        is_error_entry = str(item.get("Type", "")).lower() == "error"
+        is_python_file_error = bool(file_error_pattern.match(line))
+        if (is_error_entry or is_python_file_error) and line not in errors:
+            errors.append(line)
+    return errors
+
+
 def _is_live_coding_compile(command: str) -> bool:
     """Return whether *command* starts UE's out-of-process Live Coding compile."""
     return bool(re.fullmatch(r"\s*LiveCoding\.Compile\s*", command, re.IGNORECASE))
@@ -2456,6 +2484,21 @@ def editor_exec(state: AppState, timeout, log_wait, command):
                     "powershell -NoProfile -Command "
                     f"\"Get-Content -LiteralPath '{escaped_log}' -Tail 200\""
                 )
+
+    python_errors = _python_console_error_lines(command, result)
+    if python_errors:
+        result["status"] = "failed"
+        result["python_error"] = "\n".join(python_errors)
+        raise AppError(
+            "PYTHON_EXEC_FAILED",
+            "Unreal Python command raised a synchronous exception.",
+            exit_code=3,
+            suggestion=(
+                "Fix the Python error and retry. For structured Python execution, use "
+                "`editor run-script -c \"...\"`."
+            ),
+            details=result,
+        )
 
     if live_coding_compile and not result.get("error"):
         next_commands = _deterministic_compile_commands(state)

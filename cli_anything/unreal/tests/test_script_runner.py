@@ -1891,6 +1891,87 @@ result = {'status': 'live_editor_ok'}
             mock_api.exec_python_ex.assert_called_once()
             mock_api.exec_console.assert_not_called()
 
+    def test_editor_exec_reports_synchronous_python_exception(self):
+        """A failing ``py`` statement must not be reported as executed."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.return_value = {
+                "ReturnValue": True,
+                "LogOutput": [
+                    {"Type": "Info", "Output": "__ue_cli_exec_begin__:abc"},
+                    {"Type": "Error", "Output": "Traceback (most recent call last):"},
+                    {"Type": "Error", "Output": '  File "<string>", line 1, in <module>'},
+                    {"Type": "Error", "Output": "RuntimeError: sentinel"},
+                    {"Type": "Info", "Output": "__ue_cli_exec_end__:abc"},
+                ],
+            }
+            mock_editor.return_value = mock_api
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec",
+                "py raise RuntimeError('sentinel')",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "PYTHON_EXEC_FAILED"
+        assert data["details"]["status"] == "failed"
+        assert data["details"]["command"] == "py raise RuntimeError('sentinel')"
+        assert "Traceback (most recent call last):" in data["details"]["python_error"]
+        assert "RuntimeError: sentinel" in data["details"]["python_error"]
+        mock_api.exec_console.assert_not_called()
+
+    def test_editor_exec_reports_python_exception_from_editor_log(self, tmp_path):
+        """Project-log fallback must also surface synchronous Python failures."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        log_file = tmp_path / "RXGame.log"
+        log_file.write_text("before\n", encoding="utf-8")
+
+        def fake_exec_python_ex(script, *, timeout=None):
+            import re
+
+            begin = re.search(r'_begin = "([^"]+)"', script).group(1)
+            end = re.search(r'_end = "([^"]+)"', script).group(1)
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"{begin}\n")
+                handle.write(
+                    "[2026.07.20-21.29.58:425][332]LogPython: Error: "
+                    "|PyUtil.cpp:1701|Traceback (most recent call last):\n"
+                )
+                handle.write(
+                    "[2026.07.20-21.29.58:425][332]LogPython: Error: "
+                    "|PyUtil.cpp:1701|RuntimeError: sentinel\n"
+                )
+                handle.write(f"{end}\n")
+            return {"ReturnValue": True, "LogOutput": []}
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch(
+                 "cli_anything.unreal.commands.editor._resolve_editor_log_file",
+                 return_value=log_file,
+             ):
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.side_effect = fake_exec_python_ex
+            mock_editor.return_value = mock_api
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec",
+                "py raise RuntimeError('sentinel')",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "PYTHON_EXEC_FAILED"
+        assert data["details"]["capture_mode"] == "editor_log_file"
+        assert "RuntimeError: sentinel" in data["details"]["python_error"]
+
     def test_editor_exec_falls_back_to_remote_console(self):
         """If Python log capture is unavailable, keep old remote-console behavior."""
         from click.testing import CliRunner
