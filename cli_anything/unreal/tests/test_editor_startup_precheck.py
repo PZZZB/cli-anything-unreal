@@ -1093,6 +1093,15 @@ def test_editor_close_rejects_false_kill_success_for_original_pid(mini_project):
     }
     mock_api = MagicMock()
     mock_api.is_alive.side_effect = [True, False]
+    kill_result = {
+        "ok": True,
+        "pid": 55364,
+        "method": "taskkill_already_exited",
+        "returncode": 255,
+        "process_exists_after_taskkill": True,
+        "already_exited": True,
+        "pid_state_race": True,
+    }
 
     with patch(
         "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
@@ -1104,8 +1113,11 @@ def test_editor_close_rejects_false_kill_success_for_original_pid(mini_project):
         "cli_anything.unreal.utils.ue_backend._windows_process_identity",
         return_value=live_identity,
     ), patch(
+        "cli_anything.unreal.utils.ue_backend._windows_process_exists",
+        return_value=True,
+    ) as process_exists, patch(
         "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
-        return_value={"ok": True, "pid": 55364, "method": "taskkill"},
+        return_value=kill_result,
     ), patch(
         "cli_anything.unreal.commands.editor.time.time",
         side_effect=[0, 0, 0, 0, 61],
@@ -1118,13 +1130,82 @@ def test_editor_close_rejects_false_kill_success_for_original_pid(mini_project):
         ])
 
     assert result.exit_code == 3
+    process_exists.assert_called_once_with(55364)
     data = json.loads(result.output)
     assert data["status"] == "error"
     assert data["code"] == "EDITOR_CLOSE_FAILED"
     failed = data["details"]["failed_processes"][0]
     assert failed["pid"] == 55364
-    assert failed["kill_result"]["identity_still_running"] is True
-    assert "still running" in failed["kill_result"]["error"]
+    failed_kill = failed["kill_result"]
+    assert failed_kill["identity_still_running"] is True
+    assert failed_kill["already_exited"] is False
+    assert failed_kill["process_exists_after_taskkill"] is True
+    assert failed_kill["taskkill_reported_missing"] is True
+    assert failed_kill["method"] == "taskkill"
+    assert "still running" in failed_kill["error"]
+
+
+def test_editor_close_accepts_taskkill_missing_race_after_final_exit_probe(
+    mini_project,
+):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    live_identity = {
+        "query_ok": True,
+        "found": True,
+        "pid": 55364,
+        "creation_time": 1001,
+        "image_path": r"F:\UE\Engine\Binaries\Win64\UnrealEditor.exe",
+        "identity_source": "win32_process_times",
+    }
+    mock_api = MagicMock()
+    mock_api.is_alive.side_effect = [True, False]
+    kill_result = {
+        "ok": True,
+        "pid": 55364,
+        "method": "taskkill_already_exited",
+        "returncode": 255,
+        "process_exists_after_taskkill": True,
+        "already_exited": True,
+        "pid_state_race": True,
+    }
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+        return_value=mock_api,
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend.find_running_editors",
+        return_value=[{"pid": 55364, "project": mini_project}],
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+        return_value=live_identity,
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend._windows_process_exists",
+        return_value=False,
+    ) as process_exists, patch(
+        "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+        return_value=kill_result,
+    ), patch(
+        "cli_anything.unreal.commands.editor.time.time",
+        side_effect=[0, 0, 0, 0, 61],
+    ), patch(
+        "cli_anything.unreal.commands.editor.time.sleep",
+    ):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    process_exists.assert_called_once_with(55364)
+    data = json.loads(result.output)
+    assert data["result"]["status"] == "closed"
+    assert data["result"]["method"] == "process_tree_kill"
+    assert data["result"]["closed_processes"] == [{
+        "pid": 55364,
+        "project": mini_project,
+    }]
 
 
 def test_editor_close_failure_reports_kill_diagnostics(mini_project):

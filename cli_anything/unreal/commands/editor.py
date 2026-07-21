@@ -1136,10 +1136,38 @@ def _kill_matching_project_editors(
                 if not identity_still_running or identity_confirmation_attempts >= 15:
                     break
                 time.sleep(0.2)
+            if (
+                identity_still_running
+                and kill_result.get("already_exited")
+                and kill_result.get("pid_state_race")
+            ):
+                # taskkill can report that the parent PID disappeared while an
+                # earlier identity sample still observed it. Resolve that
+                # narrow transition with one final native existence probe.
+                final_process_exists = _windows_process_exists(pid)
+                kill_result = dict(kill_result)
+                kill_result["final_process_exists_after_taskkill"] = final_process_exists
+                if final_process_exists is False:
+                    identity_still_running = False
+                    kill_result.update({
+                        "ok": True,
+                        "already_exited": True,
+                        "process_exists_after_taskkill": False,
+                        "identity_still_running": False,
+                        "retry_suggested": False,
+                        "suggestion": "Final process-existence probe confirmed that the editor exited.",
+                    })
             if identity_still_running:
                 kill_result = dict(kill_result)
+                if kill_result.get("already_exited"):
+                    kill_result["taskkill_reported_missing"] = True
+                method = str(kill_result.get("method") or "")
+                if method.endswith("_already_exited"):
+                    kill_result["method"] = method[:-len("_already_exited")]
                 kill_result.update({
                     "ok": False,
+                    "already_exited": False,
+                    "process_exists_after_taskkill": True,
                     "error": "Termination returned success, but the original editor process identity is still running.",
                     "identity_still_running": True,
                     "target_identity_verification": current_identity,
