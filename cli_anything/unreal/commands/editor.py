@@ -1448,12 +1448,21 @@ def _deploy_bridge(session, state) -> dict:
     return ensure_plugin_deployed(session.project_dir)
 
 
-def _build_launch_cmd(editor_exe, project_path, map_path, extra_args=None) -> list:
+def _build_launch_cmd(
+    editor_exe,
+    project_path,
+    map_path,
+    extra_args=None,
+    *,
+    unattended: bool = False,
+) -> list:
     cmd = [editor_exe, project_path]
     if map_path:
         # Unreal parses maps as URL parameters only before command-line flags.
         cmd.append(map_path)
-    cmd.extend(["-nosplash", "-unattended"])
+    cmd.append("-nosplash")
+    if unattended:
+        cmd.append("-unattended")
     if extra_args:
         cmd.extend(str(arg) for arg in extra_args if arg is not None and str(arg) != "")
     return cmd
@@ -1941,9 +1950,22 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
     help="Extra UE command-line argument forwarded verbatim to UnrealEditor.exe "
          "(repeat for multiple, e.g. --extra-arg -vulkan --extra-arg -ResX=1280).",
 )
+@click.option(
+    "--unattended/--no-unattended",
+    default=False,
+    help="Launch without interactive dialogs. Default: interactive editor.",
+)
 @handle_error
 @click.pass_obj
-def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, extra_args):
+def editor_launch(
+    state: AppState,
+    project_path,
+    map_path,
+    no_wait,
+    timeout,
+    extra_args,
+    unattended,
+):
     """Launch the controlled editor.
 
     May update .uproject, DefaultRemoteControl.ini, and project
@@ -1970,6 +1992,7 @@ def editor_launch(state: AppState, project_path, map_path, no_wait, timeout, ext
         "map_path": map_path,
         "timeout": worker_timeout,
         "extra_args": list(extra_args) if extra_args else [],
+        "unattended": unattended,
     }
     task = submit_task("editor.launch", payload)
     if no_wait:
@@ -2988,7 +3011,12 @@ def editor_plugin_upgrade(state: AppState):
         engine_root = state.session.engine_root
         editor_exe = find_editor_exe(engine_root) if engine_root else None
         if editor_exe:
-            cmd = _build_launch_cmd(editor_exe, state.session.project_path, None)
+            cmd = _build_launch_cmd(
+                editor_exe,
+                state.session.project_path,
+                None,
+                unattended=True,
+            )
             sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
             for _ in range(60):
                 time.sleep(2)

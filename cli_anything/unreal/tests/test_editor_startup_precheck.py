@@ -1453,14 +1453,26 @@ def test_build_launch_cmd_without_map():
     from cli_anything.unreal.commands.editor import _build_launch_cmd
 
     cmd = _build_launch_cmd("UnrealEditor.exe", "MyProject.uproject", None)
-    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-unattended"]
+    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash"]
 
 
 def test_build_launch_cmd_with_map():
     from cli_anything.unreal.commands.editor import _build_launch_cmd
 
     cmd = _build_launch_cmd("UnrealEditor.exe", "MyProject.uproject", "/Game/Maps/Main")
-    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "/Game/Maps/Main", "-nosplash", "-unattended"]
+    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "/Game/Maps/Main", "-nosplash"]
+
+
+def test_build_launch_cmd_with_unattended():
+    from cli_anything.unreal.commands.editor import _build_launch_cmd
+
+    cmd = _build_launch_cmd(
+        "UnrealEditor.exe",
+        "MyProject.uproject",
+        None,
+        unattended=True,
+    )
+    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-unattended"]
 
 
 def test_build_launch_cmd_with_extra_args():
@@ -1476,7 +1488,6 @@ def test_build_launch_cmd_with_extra_args():
         "UnrealEditor.exe",
         "MyProject.uproject",
         "-nosplash",
-        "-unattended",
         "-vulkan",
         "-ResX=1280",
         "-ResY=720",
@@ -1497,7 +1508,6 @@ def test_build_launch_cmd_with_map_and_extra_args():
         "MyProject.uproject",
         "/Game/Maps/Main",
         "-nosplash",
-        "-unattended",
         "-vulkan",
     ]
 
@@ -1506,7 +1516,7 @@ def test_build_launch_cmd_filters_empty_extra_args():
     from cli_anything.unreal.commands.editor import _build_launch_cmd
 
     cmd = _build_launch_cmd("UnrealEditor.exe", "MyProject.uproject", None, [None, "", "-server"])
-    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-unattended", "-server"]
+    assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-server"]
 
 
 def test_editor_launch_extra_args_propagate_to_payload(mini_project):
@@ -1538,6 +1548,51 @@ def test_editor_launch_extra_args_propagate_to_payload(mini_project):
     assert data["result"]["task_id"] == "task-xyz"
     assert captured["command"] == "editor.launch"
     assert captured["payload"]["extra_args"] == ["-vulkan", "-ResX=1280", "-ResY=720"]
+    assert captured["payload"]["unattended"] is False
+
+
+def test_editor_launch_unattended_propagates_to_payload(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["command"] = command
+        captured["payload"] = payload
+        return {"task_id": "task-unattended", "status": "submitted"}
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--unattended",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["command"] == "editor.launch"
+    assert captured["payload"]["unattended"] is True
+
+
+def test_editor_launch_no_unattended_propagates_to_payload(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["payload"] = payload
+        return {"task_id": "task-interactive", "status": "submitted"}
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--no-unattended",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["payload"]["unattended"] is False
 
 
 def test_editor_launch_normalizes_absolute_project_umap_to_package_path(mini_project):
@@ -1639,6 +1694,8 @@ def test_editor_launch_help_lists_command_level_project():
     assert "--project" in result.output
     assert "/Game/" in result.output
     assert "DefaultRemoteControl.ini" in result.output
+    assert "--unattended / --no-unattended" in result.output
+    assert "interactive editor" in result.output
 
 
 def test_editor_enable_remote_help_discloses_project_file_changes():
@@ -1672,6 +1729,7 @@ def test_editor_launch_no_extra_args_yields_empty_list(mini_project):
 
     assert result.exit_code == 0, result.output
     assert captured["payload"]["extra_args"] == []
+    assert captured["payload"]["unattended"] is False
 
 
 # 鈹€鈹€ plugin-upgrade relaunch uses _build_launch_cmd 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -2350,6 +2408,7 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
     task = create_task("editor.launch", {
         "project_path": str(uproject),
         "port": 30010,
+        "unattended": True,
     })
 
     with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
@@ -2371,7 +2430,7 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
              "message": "Bridge plugin binary is ready.",
          }), \
          patch("cli_anything.unreal.core.build.compile_project", return_value={"status": "ok"}) as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc) as mock_popen, \
          patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=[
              {"status": "error_dialog", "error": "Plugin 'CliAnythingBridge' failed to load because module 'CliAnythingBridge' could not be found."},
              {"status": "online"},
@@ -2379,6 +2438,8 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     mock_compile.assert_called_once()
+    assert mock_popen.call_count == 2
+    assert all("-unattended" in call.args[0] for call in mock_popen.call_args_list)
     assert result["status"] == "completed"
     assert result["result"].get("recompiled") is True
 
