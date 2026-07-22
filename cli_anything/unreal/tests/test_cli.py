@@ -861,6 +861,44 @@ class TestCLI:
         assert open_level.call_args.args[1] == "/Game/Maps/TestMap"
         assert open_level.call_args.args[0].port == 30011
 
+    def test_editor_command_rejects_ambiguous_live_ports(self):
+        """Shared editor commands require a selector when several editors are online."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        api = MagicMock()
+        api.is_alive.return_value = False
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=api), \
+             patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[
+                 {
+                     "status": "online",
+                     "pid": 111,
+                     "port": 30011,
+                     "project_path": r"F:\One\One.uproject",
+                 },
+                 {
+                     "status": "online",
+                     "pid": 222,
+                     "port": 30012,
+                     "project_path": r"F:\Two\Two.uproject",
+                 },
+             ]), \
+             patch("cli_anything.unreal.core.scene.open_level") as open_level:
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "open-level", "/Game/Maps/TestMap",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_TARGET_AMBIGUOUS"
+        assert "--project" in data["suggestion"]
+        assert "--port" in data["suggestion"]
+        assert "editor close" not in data["suggestion"]
+        assert [item["port"] for item in data["details"]["live_editors"]] == [30011, 30012]
+        open_level.assert_not_called()
+
     def test_editor_command_does_not_override_explicit_stale_port(self):
         """An explicit --port remains authoritative even when another editor is online."""
         from click.testing import CliRunner

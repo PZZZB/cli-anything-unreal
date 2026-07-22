@@ -293,9 +293,9 @@ def _discover_online_editor_port(
                 "project_path": instance.get("project_path"),
             })
         if state.session.project_path:
-            suggestion = 'Pass --port <port> before "editor close" to select one matching editor.'
+            suggestion = "Pass --port <port> to select one matching editor."
         else:
-            suggestion = 'Pass --project <path-to.uproject> or --port <port> before "editor close".'
+            suggestion = "Pass --project <path-to.uproject> or --port <port> to select one editor."
         raise AppError(
             "EDITOR_TARGET_AMBIGUOUS",
             f"Multiple live editors match while selected port {state.session.port} is offline.",
@@ -317,7 +317,7 @@ def require_editor(state: AppState):
     api.project_path = state.session.project_path
     api_alive = api.is_alive()
     if not api_alive:
-        live_port = _discover_online_editor_port(state)
+        live_port = _discover_online_editor_port(state, fail_if_ambiguous=True)
         if live_port is not None:
             live_api = UEEditorAPI(port=live_port)
             live_api.project_path = state.session.project_path
