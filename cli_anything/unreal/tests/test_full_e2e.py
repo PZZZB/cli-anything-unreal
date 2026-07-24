@@ -1613,6 +1613,34 @@ result = {{"status": "cleanup"}}
                 "scene", "property", comp_path, f"Intensity={original}",
             ])
 
+    def test_scene_property_reads_static_mesh_asset_reference(self, cli_runner, api_port, api):
+        """Private Remote Control properties fall back to read-only Unreal Python."""
+        from cli_anything.unreal.core.scene import get_actor_components, list_actors
+        from cli_anything.unreal.unreal_cli import cli
+
+        actors = list_actors(api, actor_class="StaticMeshActor").get("actors", [])
+        if not actors:
+            pytest.skip("No StaticMeshActor in level")
+
+        components = get_actor_components(api, actors[0]["path"]).get("components", [])
+        mesh_component = next(
+            (component for component in components if component["class"] == "StaticMeshComponent"),
+            None,
+        )
+        if mesh_component is None:
+            pytest.skip("No StaticMeshComponent on StaticMeshActor")
+
+        read_result = cli_runner.invoke(cli, [
+            "--output", "json", "--port", str(api_port),
+            "scene", "property", mesh_component["path"], "StaticMesh",
+        ])
+
+        assert read_result.exit_code == 0, read_result.output
+        payload = json.loads(read_result.output)
+        assert payload["status"] == "success"
+        assert payload["result"]["StaticMesh"].startswith("/")
+        assert payload["result"]["read_via"] == "unreal_python"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  E2E: Asset Management

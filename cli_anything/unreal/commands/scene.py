@@ -2,7 +2,7 @@
 
 import click
 
-from cli_anything.unreal.commands import AppState, handle_error, output, require_editor
+from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_editor
 from cli_anything.unreal.commands._parse_value import parse_property_value
 
 
@@ -81,8 +81,18 @@ def scene_property(state: AppState, object_path, expression):
     if "=" in expression:
         prop_name, raw_value = expression.split("=", 1)
         result = set_actor_property(api, object_path, prop_name, parse_property_value(raw_value))
+        error_code = "SCENE_PROPERTY_WRITE_FAILED"
     else:
         result = get_actor_property(api, object_path, expression)
+        error_code = "SCENE_PROPERTY_READ_FAILED"
+
+    if isinstance(result, dict) and result.get("error"):
+        raise AppError(
+            error_code,
+            str(result["error"]),
+            exit_code=3,
+            details=result,
+        )
 
     output(result, state)
 

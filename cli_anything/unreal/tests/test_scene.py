@@ -138,6 +138,41 @@ class TestScene:
         assert result["RelativeLocation"]["X"] == 100
         api.get_property.assert_called_once_with("/Game/Map:Actor_0", "RelativeLocation")
 
+    def test_get_actor_property_falls_back_to_python_for_remote_control_private_property(self):
+        from cli_anything.unreal.core.scene import get_actor_property
+
+        api = self._mock_api()
+        api.get_property.return_value = {
+            "error": "Property 'StaticMesh' is not accessible via Remote Control (likely private)."
+        }
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "StaticMesh": "/Engine/BasicShapes/Cube.Cube",
+                "read_via": "unreal_python",
+            }
+            result = get_actor_property(
+                api,
+                "/Game/Map:Actor_0.StaticMeshComponent0",
+                "StaticMesh",
+            )
+
+        assert result["StaticMesh"] == "/Engine/BasicShapes/Cube.Cube"
+        script = mock_run.call_args.args[1]
+        assert "_object.get_editor_property(_candidate)" in script
+        assert "return _value.get_path_name()" in script
+        mock_run.assert_called_once_with(api, script, save=False)
+
+    def test_get_actor_property_does_not_mask_other_remote_control_errors(self):
+        from cli_anything.unreal.core.scene import get_actor_property
+
+        api = self._mock_api()
+        api.get_property.return_value = {"error": "Remote Control request timed out"}
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            result = get_actor_property(api, "/Game/Map:Actor_0", "StaticMesh")
+
+        assert result == {"error": "Remote Control request timed out"}
+        mock_run.assert_not_called()
+
     def test_set_actor_property(self):
         from cli_anything.unreal.core.scene import set_actor_property
 
@@ -600,6 +635,48 @@ class TestSceneCLI:
             data = json.loads(result.output)
             assert data["status"] == "success"
             assert data["result"]["bHidden"] is False
+
+    def test_scene_property_get_cli_surfaces_read_failure(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.get_actor_property") as mock_get:
+            mock_editor.return_value = MagicMock()
+            mock_get.return_value = {"error": "Property cannot be read"}
+
+            result = runner.invoke(cli, [
+                "--output", "json", "scene", "property",
+                "/Game/Map:Actor_0", "StaticMesh",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "SCENE_PROPERTY_READ_FAILED"
+        assert data["message"] == "Property cannot be read"
+
+    def test_scene_property_set_cli_surfaces_write_failure(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.set_actor_property") as mock_set:
+            mock_editor.return_value = MagicMock()
+            mock_set.return_value = {"error": "Property cannot be written"}
+
+            result = runner.invoke(cli, [
+                "--output", "json", "scene", "property",
+                "/Game/Map:Actor_0", "bHidden=true",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "SCENE_PROPERTY_WRITE_FAILED"
+        assert data["message"] == "Property cannot be written"
 
     def test_scene_components_cli(self):
         from click.testing import CliRunner

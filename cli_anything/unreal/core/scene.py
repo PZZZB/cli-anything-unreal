@@ -167,7 +167,75 @@ def get_actor_property(api: UEEditorAPI, object_path: str, property_name: str) -
     Returns:
         Property value dict.
     """
-    return api.get_property(object_path, property_name)
+    result = api.get_property(object_path, property_name)
+    if "not accessible via Remote Control" not in str(result.get("error", "")):
+        return result
+
+    # Remote Control omits some useful reflected component properties,
+    # including StaticMesh. Unreal Python can still read those editor-exposed
+    # properties safely, so use it as a read-only fallback.
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    script = f'''\
+import re as _re
+import unreal as _u
+
+_object_path = {object_path!r}
+_property_name = {property_name!r}
+_object = _u.load_object(None, _object_path)
+
+def _cli_property_name(_name):
+    return _re.sub(r"(?<!^)(?=[A-Z])", "_", _name).lower()
+
+def _cli_serialize_property(_value):
+    if _value is None or isinstance(_value, (bool, int, float, str)):
+        return _value
+    if isinstance(_value, _u.Object):
+        return _value.get_path_name()
+    if isinstance(_value, (list, tuple)):
+        return [_cli_serialize_property(_item) for _item in _value]
+    if isinstance(_value, dict):
+        return {{
+            str(_key): _cli_serialize_property(_item)
+            for _key, _item in _value.items()
+        }}
+    return str(_value)
+
+if _object is None:
+    result = {{
+        "error": "Object not found: " + _object_path,
+        "object_path": _object_path,
+        "property": _property_name,
+    }}
+else:
+    _candidates = [_property_name]
+    _snake_name = _cli_property_name(_property_name)
+    if _snake_name not in _candidates:
+        _candidates.append(_snake_name)
+    _read_errors = []
+    _property_value = None
+    _property_read = False
+    for _candidate in _candidates:
+        try:
+            _property_value = _object.get_editor_property(_candidate)
+            _property_read = True
+            break
+        except Exception as _exc:
+            _read_errors.append({{"name": _candidate, "error": str(_exc)}})
+    if _property_read:
+        result = {{
+            _property_name: _cli_serialize_property(_property_value),
+            "read_via": "unreal_python",
+        }}
+    else:
+        result = {{
+            "error": "Property '" + _property_name + "' is not readable via Remote Control or Unreal Python.",
+            "object_path": _object_path,
+            "property": _property_name,
+            "attempts": _read_errors,
+        }}
+'''
+    return run_python_code(api, script, save=False)
 
 
 def set_actor_property(api: UEEditorAPI, object_path: str,
