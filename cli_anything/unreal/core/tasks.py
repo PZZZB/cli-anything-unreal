@@ -382,6 +382,137 @@ def reconcile_task_cancellation(task_id: str, killed_pids: list[int]) -> dict | 
         return _write_task_unlocked(task)
 
 
+def _probe_task_process(task: dict, role: str) -> dict:
+    """Return conservative liveness evidence for one persisted task PID."""
+    pid_key = "worker_pid" if role == "worker" else "pid"
+    identity_key = (
+        "worker_process_identity"
+        if role == "worker"
+        else "build_process_identity"
+    )
+    pid_value = task.get(pid_key)
+    if not pid_value:
+        return {"role": role, "state": "not_started"}
+
+    pid = int(pid_value)
+    recorded_identity = task.get(identity_key)
+    native_info = None
+    if sys.platform == "win32" and recorded_identity:
+        from cli_anything.unreal.utils.ue_backend import _windows_process_identity
+
+        native_info = _windows_process_identity(pid)
+        evidence = {
+            "role": role,
+            "pid": pid,
+            "state": "unknown",
+            "query": native_info,
+        }
+        if native_info.get("query_ok"):
+            if not native_info.get("found"):
+                evidence["state"] = "exited"
+                return evidence
+            if recorded_identity:
+                matches = _recorded_process_identity_matches(
+                    recorded_identity,
+                    native_info,
+                )
+                evidence["identity_matches"] = matches
+                evidence["state"] = "running" if matches else "pid_reused"
+                return evidence
+
+    # Legacy tasks may not have a native creation token. A command-line match
+    # can still distinguish their worker from a reused PID. If that richer
+    # query is unhealthy, retain unknown rather than declaring a false exit.
+    process_info = _query_process_info(pid)
+    evidence = {
+        "role": role,
+        "pid": pid,
+        "state": "unknown",
+        "query": process_info,
+    }
+    if native_info is not None:
+        evidence["native_query"] = native_info
+    if not process_info.get("query_ok"):
+        return evidence
+    if not process_info.get("found"):
+        evidence["state"] = "exited"
+        return evidence
+    if sys.platform == "win32" and role == "worker":
+        worker_owned = bool(
+            "_task-worker" in process_info.get("cmdline", "")
+            and task["task_id"] in process_info.get("cmdline", "")
+        )
+        evidence["state"] = "running" if worker_owned else "pid_reused"
+        evidence["identity_matches"] = worker_owned
+        return evidence
+    evidence["state"] = "running"
+    if sys.platform == "win32" and role == "build":
+        evidence["identity_verified"] = False
+    return evidence
+
+
+def reconcile_task_state(task_id: str) -> dict | None:
+    """Finalize a build task whose tracked worker/processes have exited."""
+    task = load_task(task_id)
+    if (
+        task is None
+        or task.get("command") not in BUILD_TASK_COMMANDS
+        or task.get("status") in FINAL_TASK_STATUSES
+        or not task.get("worker_pid")
+    ):
+        return task
+
+    worker_probe = _probe_task_process(task, "worker")
+    build_probe = _probe_task_process(task, "build")
+    worker_exited = worker_probe.get("state") in {"exited", "pid_reused"}
+    build_exited = build_probe.get("state") in {
+        "exited",
+        "pid_reused",
+        "not_started",
+    }
+    if not (worker_exited and build_exited):
+        return task
+
+    with _task_lock(task_id):
+        current = _load_task_unlocked(task_id)
+        if current is None:
+            return None
+        if (
+            current.get("command") not in BUILD_TASK_COMMANDS
+            or current.get("status") in FINAL_TASK_STATUSES
+            or current.get("worker_pid") != task.get("worker_pid")
+            or current.get("pid") != task.get("pid")
+        ):
+            return current
+
+        reconciliation = {
+            "reason": "tracked_processes_exited",
+            "processes": [worker_probe, build_probe],
+        }
+        if _task_cancel_requested(task_id) or current.get("cancel_requested"):
+            current.update(status="cancelled", cancelled=True)
+            cancel_result = dict(current.get("cancel_result", {}))
+            if cancel_result:
+                cancel_result["remaining"] = []
+                current["cancel_result"] = cancel_result
+            current.pop("error", None)
+            reconciliation["outcome"] = "cancelled"
+        else:
+            current.update(
+                status="failed",
+                error={
+                    "code": "TASK_WORKER_EXITED",
+                    "message": (
+                        "Background build worker exited before publishing "
+                        "a final task result."
+                    ),
+                },
+            )
+            reconciliation["outcome"] = "failed"
+        current["reconciliation"] = reconciliation
+        return _write_task_unlocked(current)
+
+
 def task_data_path(name: str) -> Path:
     """Return a small metadata path beside task JSON files."""
     return _task_root() / name
@@ -404,16 +535,21 @@ def iter_tasks() -> list[dict]:
 def active_build_tasks(project_path: str) -> list[dict]:
     """Return non-final build tasks owned by one project."""
     target = _normalize_project_path(project_path)
-    return [
-        task
-        for task in iter_tasks()
-        if task.get("command") in BUILD_TASK_COMMANDS
-        and task.get("status") not in FINAL_TASK_STATUSES
-        and _normalize_project_path(
-            str(task.get("payload", {}).get("project_path", ""))
-        )
-        == target
-    ]
+    active = []
+    for task in iter_tasks():
+        if (
+            task.get("command") not in BUILD_TASK_COMMANDS
+            or task.get("status") in FINAL_TASK_STATUSES
+            or _normalize_project_path(
+                str(task.get("payload", {}).get("project_path", ""))
+            )
+            != target
+        ):
+            continue
+        task = reconcile_task_state(task["task_id"]) or task
+        if task.get("status") not in FINAL_TASK_STATUSES:
+            active.append(task)
+    return active
 
 
 def task_progress(task: dict) -> dict:
@@ -437,6 +573,8 @@ def task_progress(task: dict) -> dict:
         result["error"] = task["error"]
     if "cancel_result" in task:
         result["cancel_result"] = task["cancel_result"]
+    if "reconciliation" in task:
+        result["reconciliation"] = task["reconciliation"]
     return result
 
 
@@ -504,6 +642,13 @@ def wait_for_task(task_id: str, timeout: int | None) -> dict | None:
     while True:
         try:
             task = load_task(task_id)
+            if (
+                task is not None
+                and task.get("command") in BUILD_TASK_COMMANDS
+                and task.get("status") not in FINAL_TASK_STATUSES
+                and task.get("worker_pid")
+            ):
+                task = reconcile_task_state(task_id) or task
         except PermissionError:
             if not _task_path(task_id).exists():
                 raise

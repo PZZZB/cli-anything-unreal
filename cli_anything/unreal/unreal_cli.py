@@ -17,7 +17,15 @@ import click
 from cli_anything.unreal._version import __version__
 from cli_anything.unreal.commands import AppError, AppState, emit_json, error_payload, register_commands
 from cli_anything.unreal.core.plugin_bridge import get_bundled_version
-from cli_anything.unreal.core.tasks import cancel_task, load_task, run_task_worker, submit_task, task_progress, wait_for_task
+from cli_anything.unreal.core.tasks import (
+    cancel_task,
+    load_task,
+    reconcile_task_state,
+    run_task_worker,
+    submit_task,
+    task_progress,
+    wait_for_task,
+)
 
 
 _BRIDGE_VERSION = get_bundled_version() or "unknown"
@@ -340,7 +348,7 @@ def task_group():
 @task_group.command("status")
 @click.argument("task_id")
 def task_status_cmd(task_id):
-    task = load_task(task_id)
+    task = reconcile_task_state(task_id)
     if task is None:
         emit_json(error_payload("TASK_NOT_FOUND", f"Task not found: {task_id}"))
         raise SystemExit(3)

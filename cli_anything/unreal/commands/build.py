@@ -17,7 +17,13 @@ from cli_anything.unreal.core.build import (
     validate_package_uat_value,
 )
 from cli_anything.unreal.commands import AppError, AppState, _same_project_path, handle_error, output, require_project
-from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, load_task, submit_task, task_progress
+from cli_anything.unreal.core.tasks import (
+    FINAL_TASK_STATUSES,
+    load_task,
+    reconcile_task_state,
+    submit_task,
+    task_progress,
+)
 from cli_anything.unreal.utils.ue_backend import _allocate_log_path, _build_output_encoding, find_running_editors
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
@@ -251,6 +257,13 @@ def _wait_for_task_with_log_stream(task_id: str, timeout: int | None, log_file: 
                 warning_folder=warning_folder,
             )
             task = load_task(task_id)
+            if (
+                task is not None
+                and task.get("command", "").startswith("build.")
+                and task.get("status") not in FINAL_TASK_STATUSES
+                and task.get("worker_pid")
+            ):
+                task = reconcile_task_state(task_id) or task
             if task is None:
                 return None
             if task.get("status") in FINAL_TASK_STATUSES:
@@ -452,7 +465,7 @@ def build_status_cmd(state: AppState, project_path, task_id):
     _load_command_project(state, project_path)
     require_project(state)
     if task_id:
-        task = load_task(task_id)
+        task = reconcile_task_state(task_id)
         if task is None:
             raise AppError("TASK_NOT_FOUND", f"Task not found: {task_id}", exit_code=3)
         output(task_progress(task), state)

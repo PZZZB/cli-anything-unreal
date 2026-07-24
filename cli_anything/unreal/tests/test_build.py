@@ -1381,6 +1381,137 @@ class TestBuildStopAndDetect:
             fail_on_error=True,
         )
 
+    def test_reconcile_task_state_fails_when_tracked_processes_exited(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """A dead worker/build pair must not leave a task permanently running."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task(
+            "build.compile",
+            {"project_path": temp_project["uproject"]},
+        )
+        task.update(status="running", worker_pid=62224, pid=107964)
+        tasks.save_task(task)
+
+        with patch.object(
+            tasks,
+            "_query_process_info",
+            side_effect=lambda pid: {
+                "query_ok": True,
+                "found": False,
+                "pid": pid,
+            },
+        ) as process_query:
+            result = tasks.reconcile_task_state(task["task_id"])
+
+        assert result["status"] == "failed"
+        assert result["error"]["code"] == "TASK_WORKER_EXITED"
+        assert result["reconciliation"]["outcome"] == "failed"
+        assert [
+            item["state"] for item in result["reconciliation"]["processes"]
+        ] == ["exited", "exited"]
+        assert tasks.task_progress(result)["reconciliation"] == result["reconciliation"]
+        assert [call.args[0] for call in process_query.call_args_list] == [
+            62224,
+            107964,
+        ]
+
+    def test_reconcile_task_state_keeps_unknown_worker_active(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """An inconclusive worker probe must never become a false failure."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task(
+            "build.compile",
+            {"project_path": temp_project["uproject"]},
+        )
+        task.update(status="running", worker_pid=62225, pid=107965)
+        tasks.save_task(task)
+        with patch.object(
+            tasks,
+            "_query_process_info",
+            side_effect=lambda pid: (
+                {
+                    "query_ok": False,
+                    "found": False,
+                    "pid": pid,
+                    "error": "CIM timed out",
+                }
+                if pid == 62225
+                else {"query_ok": True, "found": False, "pid": pid}
+            ),
+        ):
+            result = tasks.reconcile_task_state(task["task_id"])
+
+        assert result["status"] == "running"
+        assert "reconciliation" not in result
+
+    def test_active_build_tasks_reconciles_dead_task(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """Busy-state lookup removes a stale task and persists its failure."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task(
+            "build.package",
+            {"project_path": temp_project["uproject"]},
+        )
+        task.update(status="running", worker_pid=62226, pid=107966)
+        tasks.save_task(task)
+        with patch.object(
+            tasks,
+            "_query_process_info",
+            side_effect=lambda pid: {
+                "query_ok": True,
+                "found": False,
+                "pid": pid,
+            },
+        ):
+            active = tasks.active_build_tasks(temp_project["uproject"])
+
+        assert active == []
+        saved = tasks.load_task(task["task_id"])
+        assert saved["status"] == "failed"
+        assert saved["error"]["code"] == "TASK_WORKER_EXITED"
+
+    def test_is_building_rechecks_processes_after_stale_task_reconciliation(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        """A reconciled task no longer blocks a conclusive idle result."""
+        from cli_anything.unreal.core import tasks
+        from cli_anything.unreal.core.build import is_building
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task(
+            "build.compile",
+            {"project_path": temp_project["uproject"]},
+        )
+        task.update(status="running", worker_pid=62227, pid=107967)
+        tasks.save_task(task)
+        with patch.object(
+            tasks,
+            "_query_process_info",
+            side_effect=lambda pid: {
+                "query_ok": True,
+                "found": False,
+                "pid": pid,
+            },
+        ), patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ) as process_probe:
+            result = is_building(temp_project["uproject"])
+
+        assert result["building"] is False
+        assert result["active_task_count"] == 0
+        assert result["process_probe"] == {"status": "ok"}
+        process_probe.assert_called_once()
+
     def test_compile_rejects_if_already_building(self, temp_project):
         """compile_project returns error when a build is already running."""
         from cli_anything.unreal.core.build import compile_project
@@ -3983,6 +4114,71 @@ class TestBuildCLI:
         assert data["status"] == "error"
         assert data["code"] == "TASK_CANCEL_FAILED"
         assert data["details"]["cancel_result"]["remaining"] == [53001]
+
+    def test_task_status_reports_reconciled_worker_exit(self):
+        """Generic task status must observe the reconciled terminal record."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        failed_task = {
+            "task_id": "t-stale-build",
+            "command": "build.compile",
+            "status": "failed",
+            "worker_pid": 62224,
+            "pid": 107964,
+            "error": {
+                "code": "TASK_WORKER_EXITED",
+                "message": "Background build worker exited.",
+            },
+            "reconciliation": {
+                "reason": "tracked_processes_exited",
+                "outcome": "failed",
+                "processes": [],
+            },
+        }
+        with patch(
+            "cli_anything.unreal.unreal_cli.reconcile_task_state",
+            return_value=failed_task,
+        ) as reconcile:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "task", "status", "t-stale-build",
+            ])
+
+        assert result.exit_code == 0
+        data = self._parse_json_output(result.output)
+        assert data["status"] == "failed"
+        assert data["error"]["code"] == "TASK_WORKER_EXITED"
+        assert data["reconciliation"]["outcome"] == "failed"
+        reconcile.assert_called_once_with("t-stale-build")
+
+    def test_build_status_reports_reconciled_worker_exit(self, temp_project):
+        """Project build status by task ID uses the same reconciliation."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        failed_task = {
+            "task_id": "t-stale-build",
+            "command": "build.compile",
+            "status": "failed",
+            "error": {
+                "code": "TASK_WORKER_EXITED",
+                "message": "Background build worker exited.",
+            },
+        }
+        with patch(
+            "cli_anything.unreal.commands.build.reconcile_task_state",
+            return_value=failed_task,
+        ) as reconcile:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "build", "status", "t-stale-build",
+            ])
+
+        assert result.exit_code == 0
+        data = self._parse_json_output(result.output)
+        assert data["result"]["status"] == "failed"
+        assert data["result"]["error"]["code"] == "TASK_WORKER_EXITED"
+        reconcile.assert_called_once_with("t-stale-build")
 
     def test_build_compile_no_wait_then_stop_cancels_task(
         self, temp_project, tmp_path, monkeypatch
