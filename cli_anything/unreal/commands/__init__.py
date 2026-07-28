@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -310,18 +311,35 @@ def _discover_online_editor_port(
     return None
 
 
-def require_editor(state: AppState):
+def require_editor(
+    state: AppState,
+    *,
+    timeout: int | float | None = None,
+):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def remaining_timeout() -> float | None:
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
+
+    def is_alive(api) -> bool:
+        remaining = remaining_timeout()
+        if remaining is None:
+            return api.is_alive()
+        return api.is_alive(timeout=remaining)
 
     api = UEEditorAPI(port=state.session.port)
     api.project_path = state.session.project_path
-    api_alive = api.is_alive()
+    api_alive = is_alive(api)
     if not api_alive:
         live_port = _discover_online_editor_port(state, fail_if_ambiguous=True)
         if live_port is not None:
             live_api = UEEditorAPI(port=live_port)
             live_api.project_path = state.session.project_path
-            if live_api.is_alive():
+            if is_alive(live_api):
                 state.session.port = live_port
                 api = live_api
                 api_alive = True

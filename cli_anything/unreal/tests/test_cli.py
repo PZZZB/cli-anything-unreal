@@ -601,6 +601,73 @@ class TestCLI:
         assert data["result"]["value"] == ""
         assert data["result"]["exists"] is True
 
+    def test_cvar_get_returns_structured_timeout_without_second_wait(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            api = MagicMock()
+            api.get_cvar_info.return_value = {
+                "name": "r.SDOC.Enable",
+                "value": "",
+                "exists": None,
+                "verification": "request_failed",
+                "error": (
+                    "HTTPConnectionPool(host='localhost', port=30010): "
+                    "Read timed out. (read timeout=2)"
+                ),
+                "request_stage": "bridge_metadata",
+            }
+            mock_editor.return_value = api
+
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "cvar", "get",
+                "r.SDOC.Enable",
+                "--timeout", "2",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "CVAR_GET_TIMEOUT"
+        assert data["details"]["timeout_seconds"] == 2
+        assert data["details"]["request_stage"] == "bridge_metadata"
+        mock_editor.assert_called_once()
+        assert mock_editor.call_args.kwargs["timeout"] == 2
+        request_timeout = api.get_cvar_info.call_args.kwargs["timeout"]
+        assert 0 < request_timeout <= 2
+
+    def test_cvar_get_timeout_includes_editor_readiness(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.commands import AppError
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.editor.time.monotonic",
+            side_effect=[100.0, 102.0],
+        ), patch(
+            "cli_anything.unreal.commands.editor.require_editor",
+            side_effect=AppError(
+                "EDITOR_UNREACHABLE",
+                "Editor HTTP API not responding.",
+                exit_code=4,
+            ),
+        ):
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "cvar", "get",
+                "r.SDOC.Enable",
+                "--timeout", "2",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "CVAR_GET_TIMEOUT"
+        assert data["details"]["request_stage"] == "editor_readiness"
+
     def test_viewport_bookmark_jump_cli(self, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli

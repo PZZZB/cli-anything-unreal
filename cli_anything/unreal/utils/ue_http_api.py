@@ -190,12 +190,25 @@ class UEEditorAPI:
 
     # ── Connection ──────────────────────────────────────────────────────
 
-    def is_alive(self) -> bool:
-        """Check whether the editor can execute Remote Control requests."""
+    def is_alive(self, *, timeout: int | float | None = None) -> bool:
+        """Check Remote Control readiness within an optional total timeout."""
+        deadline = time.monotonic() + timeout if timeout is not None else None
+
+        def bounded_timeout(limit: float) -> float | None:
+            if deadline is None:
+                return limit
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            return min(limit, remaining)
+
+        request_timeout = bounded_timeout(3)
+        if request_timeout is None:
+            return False
         try:
             resp = requests.get(
                 self._url("/remote/info"),
-                timeout=3,
+                timeout=request_timeout,
             )
             if resp.status_code == 200:
                 return True
@@ -205,10 +218,13 @@ class UEEditorAPI:
         # During map loads or a busy game thread, /remote/info can time out
         # while object-call requests still work. Avoid a false offline result,
         # but only probe the functional route when this port has a listener.
+        connect_timeout = bounded_timeout(0.5)
+        if connect_timeout is None:
+            return False
         try:
             with socket.create_connection(
                 (self.host, self.port),
-                timeout=0.5,
+                timeout=connect_timeout,
             ):
                 pass
         except (OSError, TimeoutError):
@@ -220,11 +236,14 @@ class UEEditorAPI:
             "parameters": {"VariableName": "t.MaxFPS"},
             "generateTransaction": False,
         }
+        probe_timeout = bounded_timeout(10)
+        if probe_timeout is None:
+            return False
         try:
             resp = requests.put(
                 self._url("/remote/object/call"),
                 json=probe,
-                timeout=10,
+                timeout=probe_timeout,
             )
             return resp.status_code == 200
         except Exception:
@@ -477,26 +496,63 @@ class UEEditorAPI:
 
     # ── CVars ───────────────────────────────────────────────────────────
 
-    def get_cvar(self, name: str) -> str:
+    def _get_cvar_response(
+        self,
+        name: str,
+        *,
+        timeout: int | float | None = None,
+    ) -> dict:
+        return self.call_function(
+            "/Script/Engine.Default__KismetSystemLibrary",
+            "GetConsoleVariableStringValue",
+            {"VariableName": name},
+            timeout=timeout,
+        )
+
+    def get_cvar(
+        self,
+        name: str,
+        *,
+        timeout: int | float | None = None,
+    ) -> str:
         """Get the value of a console variable.
 
         Args:
             name: CVar name (e.g., "r.Shadow.Virtual.Enable").
+            timeout: HTTP request timeout override.
 
         Returns:
             CVar value as string.
         """
-        result = self.call_function(
-            "/Script/Engine.Default__KismetSystemLibrary",
-            "GetConsoleVariableStringValue",
-            {"VariableName": name},
-        )
+        result = self._get_cvar_response(name, timeout=timeout)
         if "ReturnValue" in result:
             return str(result["ReturnValue"])
         return str(result)
 
     def get_cvar_info(self, name: str, *, timeout: int | float | None = None) -> dict:
-        """Get a console variable value plus best-effort existence metadata."""
+        """Get CVar metadata within one total request deadline."""
+        deadline = time.monotonic() + timeout if timeout is not None else None
+
+        def remaining_timeout() -> float | None:
+            if deadline is None:
+                return None
+            return max(0.0, deadline - time.monotonic())
+
+        def failure(
+            result: dict,
+            *,
+            stage: str,
+        ) -> dict:
+            error = result.get("error") or result.get("errorMessage") or str(result)
+            return {
+                "name": name,
+                "value": "",
+                "exists": None,
+                "verification": "request_failed",
+                "error": str(error),
+                "request_stage": stage,
+            }
+
         marker = f"__ue_cli_cvar_info__:{time.time_ns()}:"
         script = f"""
 import json
@@ -515,7 +571,16 @@ except Exception as _e:
         "error": str(_e),
     }}))
 """
-        result = self.exec_python_ex(script, timeout=timeout)
+        primary_timeout = remaining_timeout()
+        if primary_timeout is not None and primary_timeout <= 0:
+            return failure(
+                {"error": f"CVar query timed out after {timeout:g} seconds."},
+                stage="bridge_metadata",
+            )
+        result = self.exec_python_ex(script, timeout=primary_timeout)
+        if "error" in result or "errorMessage" in result:
+            return failure(result, stage="bridge_metadata")
+
         bridge_error: str | None = None
         for item in result.get("LogOutput", []) or []:
             line = str(item.get("Output", ""))
@@ -533,7 +598,19 @@ except Exception as _e:
                 break
             return info
 
-        value = self.get_cvar(name)
+        fallback_timeout = remaining_timeout()
+        if fallback_timeout is not None and fallback_timeout <= 0:
+            return failure(
+                {"error": f"CVar query timed out after {timeout:g} seconds."},
+                stage="kismet_fallback",
+            )
+        fallback_result = self._get_cvar_response(
+            name,
+            timeout=fallback_timeout,
+        )
+        if "error" in fallback_result or "errorMessage" in fallback_result:
+            return failure(fallback_result, stage="kismet_fallback")
+        value = str(fallback_result.get("ReturnValue", fallback_result))
         fallback = {
             "name": name,
             "value": value,

@@ -3054,12 +3054,72 @@ def cvar_group():
 
 @cvar_group.command("get")
 @click.argument("name")
+@click.option(
+    "--timeout",
+    default=10,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Total seconds allowed for editor readiness and the CVar query.",
+)
 @handle_error
 @click.pass_obj
-def cvar_get(state: AppState, name):
+def cvar_get(state: AppState, name, timeout):
     """Get a console variable value."""
-    api = require_editor(state)
-    info = api.get_cvar_info(name)
+    deadline = time.monotonic() + timeout
+    try:
+        api = require_editor(state, timeout=timeout)
+    except AppError as error:
+        if error.code != "EDITOR_UNREACHABLE" or time.monotonic() < deadline:
+            raise
+        raise AppError(
+            "CVAR_GET_TIMEOUT",
+            f"CVar query timed out after {timeout} seconds: {name}",
+            exit_code=3,
+            suggestion=(
+                "Run editor status. Retry after PIE or the game thread becomes responsive, "
+                "or increase editor cvar get --timeout."
+            ),
+            details={
+                "name": name,
+                "timeout_seconds": timeout,
+                "request_stage": "editor_readiness",
+            },
+        )
+
+    remaining = max(0.0, deadline - time.monotonic())
+    if remaining <= 0:
+        info = {
+            "name": name,
+            "error": f"CVar query timed out after {timeout} seconds.",
+            "request_stage": "editor_readiness",
+        }
+    else:
+        info = api.get_cvar_info(name, timeout=remaining)
+
+    if info.get("error"):
+        if _is_transport_timeout_result(info):
+            details = dict(info)
+            details["timeout_seconds"] = timeout
+            raise AppError(
+                "CVAR_GET_TIMEOUT",
+                f"CVar query timed out after {timeout} seconds: {name}",
+                exit_code=3,
+                suggestion=(
+                    "Run editor status. Retry after PIE or the game thread becomes responsive, "
+                    "or increase editor cvar get --timeout."
+                ),
+                details=details,
+            )
+        if _is_transport_disconnect_result(info):
+            _raise_editor_connection_lost(info, "editor cvar get")
+        raise AppError(
+            "CVAR_GET_FAILED",
+            f"CVar query failed: {name}",
+            exit_code=3,
+            suggestion="Run editor status, wait for the editor to become responsive, then retry.",
+            details=info,
+        )
+
     value = str(info.get("value", ""))
     exists = info.get("exists")
     if exists is False:

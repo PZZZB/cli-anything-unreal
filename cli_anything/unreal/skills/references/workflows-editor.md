@@ -139,9 +139,10 @@ Negative CVar values are valid:
 ```bash
 ue-cli editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -4
 ue-cli editor cvar set r.Shadow.Virtual.ResolutionLodBiasDirectional -- -4
+ue-cli editor cvar get r.VSync --timeout 10
 ```
 
-`editor cvar get NAME` fails instead of returning a misleading success when UE returns an empty value for a missing or unverified CVar. If the bridge plugin is old and the value is empty, upgrade it:
+`editor cvar get NAME` uses a 10-second total timeout by default. A busy PIE/game thread returns `CVAR_GET_TIMEOUT` instead of waiting on a second fallback request. It also fails instead of returning a misleading success when UE returns an empty value for a missing or unverified CVar. If the bridge plugin is old and the value is empty, upgrade it:
 
 ```bash
 ue-cli editor plugin-upgrade

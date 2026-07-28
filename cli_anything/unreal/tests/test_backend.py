@@ -925,6 +925,26 @@ class TestHTTPAPI:
         assert api.is_alive() is True
 
     @patch("socket.create_connection")
+    @patch("requests.get")
+    def test_is_alive_total_timeout_stops_before_fallback(
+        self,
+        mock_get,
+        mock_connect,
+    ):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        mock_get.side_effect = TimeoutError("remote info busy")
+        api = UEEditorAPI()
+        with patch(
+            "cli_anything.unreal.utils.ue_http_api.time.monotonic",
+            side_effect=[100.0, 100.0, 101.1],
+        ):
+            assert api.is_alive(timeout=1.0) is False
+
+        assert mock_get.call_args.kwargs["timeout"] == 1.0
+        mock_connect.assert_not_called()
+
+    @patch("socket.create_connection")
     @patch("requests.put")
     @patch("requests.get")
     def test_is_alive_falls_back_to_read_only_object_call(
@@ -1002,8 +1022,9 @@ class TestHTTPAPI:
         mock_put.return_value = mock_response
 
         api = UEEditorAPI()
-        val = api.get_cvar("r.VSync")
+        val = api.get_cvar("r.VSync", timeout=4)
         assert val == "1"
+        assert mock_put.call_args.kwargs["timeout"] == 4
 
     def test_get_cvar_info_uses_bridge_metadata(self):
         from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
@@ -1037,7 +1058,11 @@ class TestHTTPAPI:
 
         api = UEEditorAPI()
         with patch.object(api, "exec_python_ex", return_value={"LogOutput": []}), \
-             patch.object(api, "get_cvar", return_value=""):
+             patch.object(
+                 api,
+                 "_get_cvar_response",
+                 return_value={"ReturnValue": ""},
+             ):
             info = api.get_cvar_info("r.MaybeMissing")
 
         assert info["name"] == "r.MaybeMissing"
@@ -1050,7 +1075,11 @@ class TestHTTPAPI:
 
         api = UEEditorAPI()
         with patch.object(api, "exec_python_ex", return_value={"LogOutput": []}), \
-             patch.object(api, "get_cvar", return_value="1"):
+             patch.object(
+                 api,
+                 "_get_cvar_response",
+                 return_value={"ReturnValue": "1"},
+             ):
             info = api.get_cvar_info("r.VSync")
 
         assert info["name"] == "r.VSync"
@@ -1063,7 +1092,11 @@ class TestHTTPAPI:
 
         api = UEEditorAPI()
         with patch.object(api, "exec_python_ex") as mock_exec, \
-             patch.object(api, "get_cvar", return_value="1"):
+             patch.object(
+                 api,
+                 "_get_cvar_response",
+                 return_value={"ReturnValue": "1"},
+             ):
             def fake_exec(script, *, timeout=None):
                 import re
 
@@ -1087,6 +1120,45 @@ class TestHTTPAPI:
         assert info["exists"] is True
         assert info["value"] == "1"
         assert info["bridge_error"] == "missing function"
+
+    def test_get_cvar_info_returns_primary_timeout_without_fallback(self):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        api = UEEditorAPI()
+        with patch.object(
+            api,
+            "exec_python_ex",
+            return_value={
+                "error": (
+                    "HTTPConnectionPool(host='localhost', port=30010): "
+                    "Read timed out. (read timeout=5)"
+                )
+            },
+        ), patch.object(api, "_get_cvar_response") as mock_fallback:
+            info = api.get_cvar_info("r.SDOC.Enable", timeout=5)
+
+        assert "Read timed out" in info["error"]
+        assert info["verification"] == "request_failed"
+        assert info["request_stage"] == "bridge_metadata"
+        mock_fallback.assert_not_called()
+
+    def test_get_cvar_info_uses_one_total_timeout_for_fallback(self):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        api = UEEditorAPI()
+        with patch(
+            "cli_anything.unreal.utils.ue_http_api.time.monotonic",
+            side_effect=[100.0, 100.0, 106.0],
+        ), patch.object(
+            api,
+            "exec_python_ex",
+            return_value={"LogOutput": []},
+        ), patch.object(api, "_get_cvar_response") as mock_fallback:
+            info = api.get_cvar_info("r.SDOC.Enable", timeout=5)
+
+        assert "timed out after 5 seconds" in info["error"]
+        assert info["request_stage"] == "kismet_fallback"
+        mock_fallback.assert_not_called()
 
     def test_scan_editor_ports_empty(self):
         from cli_anything.unreal.utils.ue_http_api import scan_editor_ports
