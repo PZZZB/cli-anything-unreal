@@ -1835,7 +1835,7 @@ def test_editor_launch_without_timeout_uses_bounded_foreground_wait(mini_project
     assert result.exit_code == 0, result.output
     assert captured["payload"]["timeout"] is not None
     assert captured["wait_timeout"] is not None
-    assert captured["wait_timeout"] <= 120
+    assert captured["wait_timeout"] == 30
 
 
 def test_editor_launch_with_long_timeout_returns_pollable_progress(mini_project):
@@ -1881,11 +1881,11 @@ def test_editor_launch_with_long_timeout_returns_pollable_progress(mini_project)
 
     assert result.exit_code == 0, result.output
     assert captured["payload"]["timeout"] == 600
-    assert captured["wait_timeout"] == 110
+    assert captured["wait_timeout"] == 30
     data = json.loads(result.output)
     assert data["result"]["status"] == "launching"
     assert data["result"]["task_id"] == "launch-task"
-    assert data["result"]["foreground_wait_timeout_seconds"] == 110
+    assert data["result"]["foreground_wait_timeout_seconds"] == 30
     assert data["result"]["next_command"] == (
         f'ue-cli --project "{mini_project}" editor status launch-task'
     )
@@ -1934,7 +1934,7 @@ def test_editor_launch_returns_progress_when_final_task_read_is_blocked(mini_pro
     )
 
 
-def test_editor_launch_returns_online_when_task_wait_times_out_but_editor_is_online(mini_project):
+def test_editor_launch_returns_progress_without_post_wait_editor_scan(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
@@ -1954,19 +1954,7 @@ def test_editor_launch_returns_online_when_task_wait_times_out_but_editor_is_onl
          patch("cli_anything.unreal.commands.editor.wait_for_task", return_value=None), \
          patch("cli_anything.unreal.commands.editor.load_task", return_value=running_task), \
          patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
-             "status": "online",
-             "pid": 68348,
-             "port": 30011,
-             "project_path": mini_project,
-             "bridge_version": "1.17",
-             "bundled_version": "1.17",
-             "plugin_match": True,
-         }]), \
-         patch(
-             "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
-             return_value=68348,
-         ):
+         patch("cli_anything.unreal.commands.editor._scan_editor_status_instances") as scan:
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "launch", "--timeout", "120",
@@ -1975,11 +1963,14 @@ def test_editor_launch_returns_online_when_task_wait_times_out_but_editor_is_onl
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert data["status"] == "success"
-    assert data["result"]["status"] == "online"
+    assert data["result"]["status"] == "launching"
     assert data["result"]["pid"] == 68348
-    assert data["result"]["port"] == 30011
     assert data["result"]["task_id"] == "launch-task"
-    assert data["result"]["launch_task_status"] == "running"
+    assert data["result"]["foreground_wait_timeout_seconds"] == 30
+    assert data["result"]["next_command"] == (
+        f'ue-cli --project "{mini_project}" editor status launch-task'
+    )
+    scan.assert_not_called()
 
 
 def test_editor_launch_does_not_recover_map_launch_without_level_verification(mini_project):
@@ -1988,24 +1979,24 @@ def test_editor_launch_does_not_recover_map_launch_without_level_verification(mi
 
     runner = CliRunner()
     requested_map = "/Game/Maps/Oregon_Main"
-    running_task = {
+    timed_out_task = {
         "task_id": "launch-task",
         "command": "editor.launch",
-        "status": "running",
+        "status": "timeout",
         "payload": {
             "project_path": mini_project,
             "map_path": requested_map,
+            "port": 30011,
         },
         "pid": 68348,
         "suggested_poll_interval_seconds": 5,
     }
 
     with patch("cli_anything.unreal.commands.editor.submit_task", return_value={
-            "task_id": "launch-task",
-            "command": "editor.launch",
-        }), \
-         patch("cli_anything.unreal.commands.editor.wait_for_task", return_value=None), \
-         patch("cli_anything.unreal.commands.editor.load_task", return_value=running_task), \
+             "task_id": "launch-task",
+             "command": "editor.launch",
+         }), \
+         patch("cli_anything.unreal.commands.editor.wait_for_task", return_value=timed_out_task), \
          patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
          patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
              "status": "online",
@@ -2032,8 +2023,7 @@ def test_editor_launch_does_not_recover_map_launch_without_level_verification(mi
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data["result"]["status"] == "launching"
-    assert data["result"]["next_command"] == f'ue-cli --project "{mini_project}" editor status launch-task'
+    assert data["result"]["status"] == "timeout"
 
 
 def test_editor_launch_recovers_map_launch_after_exact_level_verification(mini_project):

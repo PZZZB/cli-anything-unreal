@@ -26,7 +26,7 @@ from cli_anything.unreal.commands import (
 from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, cancel_task, iter_tasks, load_task, save_task, submit_task, task_data_path, task_progress, wait_for_task
 
 
-DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 110
+DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 30
 DEFAULT_EDITOR_LAUNCH_WORKER_TIMEOUT_SECONDS = 300
 REMOTE_UNREACHABLE_GRACE_SECONDS = 60
 REMOTE_UNREACHABLE_CACHE_TTL_SECONDS = 7200
@@ -2005,10 +2005,6 @@ def editor_launch(
             current = load_task(task["task_id"]) or task
         except PermissionError:
             current = task
-        online_result = _recover_online_launch_result(state, task["task_id"], current)
-        if online_result is not None:
-            output(online_result, state)
-            return
         progress = task_progress(current)
         if current.get("status") not in {"completed", "failed", "timeout", "cancelled"}:
             progress["status"] = "launching"
