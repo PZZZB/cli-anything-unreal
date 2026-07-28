@@ -372,6 +372,15 @@ def task_cancel_cmd(task_id):
             details=progress,
         ))
         raise SystemExit(4)
+    output_integrity = progress.get("output_integrity", {})
+    if output_integrity.get("code") == "BUILD_CANCELLED_OUTPUTS_INCOMPLETE":
+        emit_json(error_payload(
+            "BUILD_CANCELLED_OUTPUTS_INCOMPLETE",
+            output_integrity["message"],
+            suggestion=f"Run: {output_integrity['recovery_command']}",
+            details=progress,
+        ))
+        raise SystemExit(4)
     emit_json(progress)
 
 

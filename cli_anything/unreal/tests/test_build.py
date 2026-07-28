@@ -76,16 +76,20 @@ class TestBuildSuccessPaths:
         *,
         config: str = "Development",
         filename: str = "TestProjectEditor.target",
+        runtime_dependencies=None,
     ) -> Path:
         receipt = project_dir / "Binaries" / "Win64" / filename
+        data = {
+            "TargetName": "TestProjectEditor",
+            "Platform": "Win64",
+            "Configuration": config,
+            "TargetType": "Editor",
+            "BuildProducts": products,
+        }
+        if runtime_dependencies is not None:
+            data["RuntimeDependencies"] = runtime_dependencies
         receipt.write_text(
-            json.dumps({
-                "TargetName": "TestProjectEditor",
-                "Platform": "Win64",
-                "Configuration": config,
-                "TargetType": "Editor",
-                "BuildProducts": products,
-            }),
+            json.dumps(data),
             encoding="utf-8",
         )
         return receipt
@@ -222,6 +226,73 @@ class TestBuildSuccessPaths:
         assert result["status"] == "ok"
         assert result["returncode"] == 0
         assert "invalid_build_products" not in result
+
+    def test_cancel_output_inspection_reports_missing_runtime_dependencies(
+        self, temp_project, tmp_path
+    ):
+        from cli_anything.unreal.core.build import (
+            inspect_win64_editor_runtime_dependencies,
+        )
+
+        project_dir = Path(temp_project["dir"])
+        engine_root = tmp_path / "EngineRoot"
+        existing = (
+            engine_root
+            / "Engine"
+            / "Binaries"
+            / "ThirdParty"
+            / "Existing.dll"
+        )
+        existing.parent.mkdir(parents=True)
+        existing.write_bytes(b"present")
+        receipt = self._write_editor_receipt(
+            project_dir,
+            [],
+            runtime_dependencies=[
+                {
+                    "Path": "$(EngineDir)/Binaries/ThirdParty/Existing.dll",
+                    "Type": "NonUFS",
+                },
+                {
+                    "Path": "$(EngineDir)/Binaries/ThirdParty/tbbmalloc.dll",
+                    "Type": "NonUFS",
+                },
+                {
+                    "Path": "$(ProjectDir)/Content/Resources/usd.schema.json",
+                    "Type": "NonUFS",
+                },
+                {
+                    "Path": "$(EngineDir)/Binaries/ThirdParty/tbbmalloc.dll",
+                    "Type": "NonUFS",
+                },
+            ],
+        )
+
+        result = inspect_win64_editor_runtime_dependencies(
+            temp_project["uproject"],
+            str(engine_root),
+        )
+
+        assert result["status"] == "incomplete"
+        assert result["code"] == "BUILD_CANCELLED_OUTPUTS_INCOMPLETE"
+        assert result["failure_kind"] == "missing_runtime_dependencies"
+        assert result["receipt_file"] == str(receipt)
+        assert result["checked_runtime_dependency_count"] == 3
+        assert result["missing_runtime_dependency_count"] == 2
+        assert result["missing_runtime_dependencies"] == [
+            str(
+                engine_root
+                / "Engine"
+                / "Binaries"
+                / "ThirdParty"
+                / "tbbmalloc.dll"
+            ),
+            str(project_dir / "Content" / "Resources" / "usd.schema.json"),
+        ]
+        assert result["recovery_command"] == (
+            f'ue-cli --project "{temp_project["uproject"]}" build compile '
+            "--platform Win64 --config Development"
+        )
 
     @pytest.mark.parametrize(
         ("config", "filename"),
@@ -2035,6 +2106,54 @@ class TestBuildStopAndDetect:
         assert result["status"] == "cancelled"
         assert result["cancel_result"]["killed"] == [41002, 41001]
         assert result["cancel_result"]["remaining"] == []
+
+    def test_cancel_task_persists_incomplete_runtime_dependency_warning(
+        self, temp_project, tmp_path, monkeypatch
+    ):
+        from cli_anything.unreal.core.tasks import (
+            cancel_task,
+            create_task,
+            save_task,
+            task_progress,
+        )
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task(
+            "build.compile",
+            {
+                "project_path": temp_project["uproject"],
+                "engine_root": r"F:\Engine",
+                "platform": "Win64",
+                "build_config": "Development",
+            },
+        )
+        task["status"] = "running"
+        save_task(task)
+        integrity = {
+            "status": "incomplete",
+            "code": "BUILD_CANCELLED_OUTPUTS_INCOMPLETE",
+            "message": "Two runtime dependencies are missing.",
+            "recovery_command": "ue-cli full-build",
+        }
+
+        with patch(
+            "cli_anything.unreal.utils.ue_backend.kill_build_processes",
+            return_value={"killed": [], "remaining": [], "status": "none"},
+        ), patch(
+            "cli_anything.unreal.core.build."
+            "inspect_win64_editor_runtime_dependencies",
+            return_value=integrity,
+        ) as inspect:
+            result = cancel_task(task["task_id"])
+
+        assert result["status"] == "cancelled"
+        assert result["output_integrity"] == integrity
+        assert task_progress(result)["output_integrity"] == integrity
+        inspect.assert_called_once_with(
+            temp_project["uproject"],
+            r"F:\Engine",
+            "Development",
+        )
 
     def test_cancel_task_rechecks_root_identity_after_worker_exit(
         self, temp_project, tmp_path, monkeypatch
@@ -4050,6 +4169,53 @@ class TestBuildCLI:
         assert data["code"] == "TASK_CANCEL_FAILED"
         assert data["details"]["cancel_result"]["remaining"] == [51001, 51002]
         assert data["details"]["cancel_result"]["processes"][0]["error"] == "taskkill timed out"
+
+    def test_build_cancel_incomplete_outputs_is_structured_nonzero_json(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        cancelled_task = {
+            "task_id": "t-cancel-incomplete",
+            "command": "build.compile",
+            "status": "cancelled",
+            "cancelled": True,
+            "cancel_result": {
+                "killed": [51101],
+                "remaining": [],
+                "processes": [],
+            },
+            "output_integrity": {
+                "status": "incomplete",
+                "code": "BUILD_CANCELLED_OUTPUTS_INCOMPLETE",
+                "message": "Two runtime dependencies are missing.",
+                "missing_runtime_dependency_count": 2,
+                "missing_runtime_dependencies": [
+                    r"F:\Engine\Binaries\Win64\tbbmalloc.dll",
+                    r"F:\Engine\Binaries\Win64\libfbxsdk.dll",
+                ],
+                "recovery_command": (
+                    'ue-cli --project "F:\\Game\\Game.uproject" build compile '
+                    "--platform Win64 --config Development"
+                ),
+            },
+        }
+        with patch(
+            "cli_anything.unreal.core.tasks.cancel_task",
+            return_value=cancelled_task,
+        ):
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "build", "cancel", "t-cancel-incomplete",
+            ])
+
+        assert result.exit_code == 4
+        data = self._parse_json_output(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "BUILD_CANCELLED_OUTPUTS_INCOMPLETE"
+        assert data["details"]["status"] == "cancelled"
+        assert data["details"]["output_integrity"][
+            "missing_runtime_dependency_count"
+        ] == 2
+        assert data["suggestion"].startswith("Run: ue-cli --project")
 
     def test_build_stop_partial_is_structured_nonzero_json(self, temp_project):
         """Project stop propagates task/process diagnostics instead of success."""

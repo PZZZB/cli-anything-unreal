@@ -31,6 +31,7 @@ _MODULE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PE_BUILD_PRODUCT_TYPES = frozenset({"dynamiclibrary", "executable"})
 _PE_BUILD_PRODUCT_SUFFIXES = frozenset({".dll", ".exe"})
 _MAX_REPORTED_INVALID_BUILD_PRODUCTS = 20
+_MAX_REPORTED_MISSING_RUNTIME_DEPENDENCIES = 20
 _BUILD_STATE_PROCESS_PROBE_TIMEOUT_SECONDS = 3
 
 _TARGET_LEXICAL_NOISE_PATTERN = re.compile(
@@ -434,6 +435,135 @@ def _load_editor_target_receipt(
             continue
         return receipt_path, receipt, None
     return None, None, first_error
+
+
+def inspect_win64_editor_runtime_dependencies(
+    uproject_path: str,
+    engine_root: str | None,
+    config: str = "Development",
+) -> dict:
+    """Inspect runtime dependencies declared by the current Editor receipt."""
+    target, target_error = _resolve_editor_target(uproject_path)
+    if target_error or not target:
+        return {
+            "status": "unavailable",
+            "reason": "editor_target_unresolved",
+            "message": target_error or "Could not resolve the Editor target.",
+        }
+
+    resolved_engine_root = engine_root or find_engine_root(uproject_path)
+    if not resolved_engine_root:
+        return {
+            "status": "unavailable",
+            "reason": "engine_root_unresolved",
+            "message": "Could not resolve the engine root for output inspection.",
+        }
+
+    project_dir = Path(uproject_path).parent
+    receipt_path, receipt, receipt_error = _load_editor_target_receipt(
+        project_dir,
+        target,
+        config,
+    )
+    if receipt_error:
+        return {
+            "status": "unavailable",
+            "reason": "invalid_editor_target_receipt",
+            "receipt_file": receipt_error.get("receipt_file"),
+            "message": "Could not read a valid Editor target receipt for output inspection.",
+        }
+    if receipt_path is None or receipt is None:
+        return {
+            "status": "unavailable",
+            "reason": "editor_target_receipt_not_found",
+            "expected_receipt_directory": str(project_dir / "Binaries" / "Win64"),
+            "message": "No matching Editor target receipt exists for output inspection.",
+        }
+
+    runtime_dependencies = receipt.get("RuntimeDependencies")
+    if not isinstance(runtime_dependencies, list):
+        return {
+            "status": "unavailable",
+            "reason": "runtime_dependencies_not_declared",
+            "receipt_file": str(receipt_path),
+            "message": "Editor target receipt does not declare RuntimeDependencies.",
+        }
+
+    missing_paths: list[str] = []
+    unresolved_entries: list[dict] = []
+    seen_paths: set[str] = set()
+    engine_path = Path(resolved_engine_root)
+    for index, dependency in enumerate(runtime_dependencies):
+        if not isinstance(dependency, dict):
+            unresolved_entries.append({
+                "index": index,
+                "reason": "entry is not an object",
+            })
+            continue
+        raw_path = dependency.get("Path")
+        if not isinstance(raw_path, str) or not raw_path:
+            unresolved_entries.append({
+                "index": index,
+                "reason": "Path is missing or is not a string",
+            })
+            continue
+        path = _resolve_receipt_product_path(
+            raw_path,
+            project_dir=project_dir,
+            engine_root=engine_path,
+        )
+        if path is None:
+            unresolved_entries.append({
+                "index": index,
+                "path": raw_path,
+                "reason": "unsupported path macro",
+            })
+            continue
+        path_text = str(path)
+        path_key = path_text.replace("/", "\\").casefold()
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        if not path.exists():
+            missing_paths.append(path_text)
+
+    recovery_command = (
+        f'ue-cli --project "{uproject_path}" build compile '
+        f"--platform Win64 --config {config}"
+    )
+    result = {
+        "status": "ok",
+        "receipt_file": str(receipt_path),
+        "checked_runtime_dependency_count": len(seen_paths),
+        "unresolved_runtime_dependency_count": len(unresolved_entries),
+    }
+    if unresolved_entries:
+        result["unresolved_runtime_dependencies"] = unresolved_entries[
+            :_MAX_REPORTED_MISSING_RUNTIME_DEPENDENCIES
+        ]
+    if not missing_paths:
+        return result
+
+    missing_count = len(missing_paths)
+    result.update({
+        "status": "incomplete",
+        "code": "BUILD_CANCELLED_OUTPUTS_INCOMPLETE",
+        "failure_kind": "missing_runtime_dependencies",
+        "missing_runtime_dependency_count": missing_count,
+        "missing_runtime_dependencies": missing_paths[
+            :_MAX_REPORTED_MISSING_RUNTIME_DEPENDENCIES
+        ],
+        "missing_runtime_dependencies_truncated": (
+            missing_count > _MAX_REPORTED_MISSING_RUNTIME_DEPENDENCIES
+        ),
+        "recovery_command": recovery_command,
+        "message": (
+            f"Cancellation completed, but {missing_count} runtime dependency "
+            f"path(s) declared by {receipt_path.name} are missing. The Editor "
+            "target may not launch; run a full Editor build to restore it."
+        ),
+    })
+    return result
 
 
 def _validate_win64_editor_build_products(

@@ -496,6 +496,15 @@ def build_cancel(state: AppState, task_id):
             suggestion="Retry cancellation after inspecting the remaining process diagnostics.",
             details=progress,
         )
+    output_integrity = progress.get("output_integrity", {})
+    if output_integrity.get("code") == "BUILD_CANCELLED_OUTPUTS_INCOMPLETE":
+        raise AppError(
+            "BUILD_CANCELLED_OUTPUTS_INCOMPLETE",
+            output_integrity["message"],
+            exit_code=4,
+            suggestion=f"Run: {output_integrity['recovery_command']}",
+            details=progress,
+        )
     output(progress, state)
 
 

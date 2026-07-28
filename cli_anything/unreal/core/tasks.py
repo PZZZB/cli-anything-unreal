@@ -573,6 +573,8 @@ def task_progress(task: dict) -> dict:
         result["error"] = task["error"]
     if "cancel_result" in task:
         result["cancel_result"] = task["cancel_result"]
+    if "output_integrity" in task:
+        result["output_integrity"] = task["output_integrity"]
     if "reconciliation" in task:
         result["reconciliation"] = task["reconciliation"]
     return result
@@ -890,6 +892,31 @@ def cancel_task(task_id: str) -> dict | None:
             })
             return update_task_fields(task_id, updates) or task
 
+        if (
+            command == "build.compile"
+            and str(payload.get("platform", "Win64")).casefold() == "win64"
+        ):
+            try:
+                from cli_anything.unreal.core.build import (
+                    inspect_win64_editor_runtime_dependencies,
+                )
+
+                updates["output_integrity"] = (
+                    inspect_win64_editor_runtime_dependencies(
+                        payload.get("project_path", ""),
+                        payload.get("engine_root"),
+                        payload.get("build_config", "Development"),
+                    )
+                )
+            except Exception as exc:
+                updates["output_integrity"] = {
+                    "status": "unavailable",
+                    "reason": "runtime_dependency_inspection_failed",
+                    "message": (
+                        "Build cancellation succeeded, but output integrity "
+                        f"inspection failed: {exc}"
+                    ),
+                }
         updates.update({"status": "cancelled", "cancelled": True})
         return update_task_fields(
             task_id,
