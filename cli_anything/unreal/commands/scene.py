@@ -107,6 +107,13 @@ def scene_list_components(state: AppState, actor_path):
 
     api = require_editor(state)
     result = get_actor_components(api, actor_path)
+    if isinstance(result, dict) and result.get("error"):
+        raise AppError(
+            "SCENE_COMPONENT_LIST_FAILED",
+            str(result["error"]),
+            exit_code=3,
+            details=result,
+        )
     output(result, state)
 
 
@@ -134,4 +141,11 @@ def scene_get_transform(state: AppState, actor_path):
 
     api = require_editor(state)
     result = get_actor_transform(api, actor_path)
+    if isinstance(result, dict) and result.get("error"):
+        raise AppError(
+            "SCENE_TRANSFORM_READ_FAILED",
+            str(result["error"]),
+            exit_code=3,
+            details=result,
+        )
     output(result, state)

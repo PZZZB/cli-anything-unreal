@@ -1458,23 +1458,53 @@ result = {{"status": "cleanup"}}
         assert "rotation" in result
         assert "scale" in result
 
-    def test_transform_cli(self, cli_runner, api_port, api):
-        from cli_anything.unreal.core.scene import list_actors
+    def test_listed_actor_path_works_across_scene_read_commands(
+        self, cli_runner, api_port, api
+    ):
         from cli_anything.unreal.unreal_cli import cli
 
-        all_actors = list_actors(api)
-        if not all_actors.get("actors"):
+        listed = cli_runner.invoke(cli, [
+            "--output", "json", "--port", str(api_port),
+            "scene", "list",
+        ])
+        assert listed.exit_code == 0
+        listed_data = json.loads(listed.output)
+        actors = listed_data["result"].get("actors") or []
+        if not actors:
             pytest.skip("No actors in level")
 
-        actor_path = all_actors["actors"][0]["path"]
-        result = cli_runner.invoke(cli, [
+        actor_path = actors[0]["path"]
+        transform = cli_runner.invoke(cli, [
             "--output", "json", "--port", str(api_port),
             "scene", "get-transform", actor_path,
         ])
-        assert result.exit_code == 0
-        data = json.loads(result.output)
-        assert data["status"] == "success"
-        assert "location" in data["result"]
+        assert transform.exit_code == 0
+        transform_data = json.loads(transform.output)
+        assert transform_data["status"] == "success"
+        assert "location" in transform_data["result"]
+
+        components = cli_runner.invoke(cli, [
+            "--output", "json", "--port", str(api_port),
+            "scene", "list-components", actor_path,
+        ])
+        assert components.exit_code == 0
+        components_data = json.loads(components.output)
+        assert components_data["status"] == "success"
+        assert "components" in components_data["result"]
+
+        actor_outer = actor_path.rsplit(".", 1)[0]
+        missing_path = actor_outer + ".CodexMissingActor_36"
+        for command, error_code in (
+            (["scene", "get-transform", missing_path], "SCENE_TRANSFORM_READ_FAILED"),
+            (["scene", "list-components", missing_path], "SCENE_COMPONENT_LIST_FAILED"),
+        ):
+            missing = cli_runner.invoke(cli, [
+                "--output", "json", "--port", str(api_port), *command,
+            ])
+            assert missing.exit_code == 3
+            missing_data = json.loads(missing.output)
+            assert missing_data["status"] == "error"
+            assert missing_data["code"] == error_code
 
     # ─── api-discover: the actor → component → property workflow ─────────
     # These protect the "human's Details-panel path" contract added in plugin v1.9:

@@ -287,11 +287,15 @@ import unreal as _u
 
 _actor_path = {actor_path!r}
 _sub = _u.get_editor_subsystem(_u.EditorActorSubsystem)
-_actor = None
-for _candidate in _sub.get_all_level_actors():
-    if _candidate.get_path_name() == _actor_path:
-        _actor = _candidate
-        break
+try:
+    _actor = _u.load_object(None, _actor_path)
+except Exception:
+    _actor = None
+if _actor is None:
+    for _candidate in _sub.get_all_level_actors():
+        if _candidate.get_path_name() == _actor_path:
+            _actor = _candidate
+            break
 
 if _actor is None:
     result = {{"error": "Actor not found: " + _actor_path}}
@@ -403,47 +407,59 @@ def get_actor_transform(api: UEEditorAPI, actor_path: str) -> dict:
     Returns:
         {"location": {...}, "rotation": {...}, "scale": {...}}
     """
-    script = f"""
-import unreal
-actor = unreal.EditorAssetLibrary.load_asset('{actor_path}')
-if not actor:
-    # It might be in the map, try to find it
-    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-    actors = subsystem.get_all_level_actors()
-    for a in actors:
-        if a.get_path_name() == '{actor_path}':
-            actor = a
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    script = f'''\
+import unreal as _u
+
+_actor_path = {actor_path!r}
+_sub = _u.get_editor_subsystem(_u.EditorActorSubsystem)
+try:
+    _actor = _u.load_object(None, _actor_path)
+except Exception:
+    _actor = None
+if _actor is None:
+    for _candidate in _sub.get_all_level_actors():
+        if _candidate.get_path_name() == _actor_path:
+            _actor = _candidate
             break
 
-if not actor:
-    unreal.log_error(f"Actor not found: {{'{actor_path}'}}")
+if _actor is None:
+    result = {{
+        "error": "Actor not found: " + _actor_path,
+        "actor": _actor_path,
+    }}
 else:
-    transform = actor.get_actor_transform()
-    loc = transform.translation
-    rot = transform.rotation.rotator()
-    scale = transform.scale3d
-    unreal.log(f"TRANSFORM_DATA:{{loc.x}},{{loc.y}},{{loc.z}}|{{rot.pitch}},{{rot.yaw}},{{rot.roll}}|{{scale.x}},{{scale.y}},{{scale.z}}")
-"""
-    
-    result = {"actor": actor_path}
-    
-    res = api.exec_python_ex(script)
-    for log_item in res.get("LogOutput", []):
-        line = log_item.get("Output", "")
-        if line.startswith("TRANSFORM_DATA:"):
-            try:
-                parts = line.split(":", 1)[1].strip().split("|")
-                lx, ly, lz = map(float, parts[0].split(","))
-                rp, ry, rr = map(float, parts[1].split(","))
-                sx, sy, sz = map(float, parts[2].split(","))
-                result["location"] = {"X": lx, "Y": ly, "Z": lz}
-                result["rotation"] = {"Pitch": rp, "Yaw": ry, "Roll": rr}
-                result["scale"] = {"X": sx, "Y": sy, "Z": sz}
-                return result
-            except Exception as e:
-                return {"error": f"Failed to parse transform data: {e}", "raw": line}
-
-    return {"error": "Failed to get transform. Actor might not exist or script failed."}
+    try:
+        _transform = _actor.get_actor_transform()
+        _location = _transform.translation
+        _rotation = _transform.rotation.rotator()
+        _scale = _transform.scale3d
+        result = {{
+            "actor": _actor.get_path_name(),
+            "location": {{
+                "X": _location.x,
+                "Y": _location.y,
+                "Z": _location.z,
+            }},
+            "rotation": {{
+                "Pitch": _rotation.pitch,
+                "Yaw": _rotation.yaw,
+                "Roll": _rotation.roll,
+            }},
+            "scale": {{
+                "X": _scale.x,
+                "Y": _scale.y,
+                "Z": _scale.z,
+            }},
+        }}
+    except Exception as _exc:
+        result = {{
+            "error": "Failed to read actor transform: " + str(_exc),
+            "actor": _actor_path,
+        }}
+'''
+    return run_python_code(api, script, save=False)
 
 _LEVEL_EDITOR_SUBSYSTEM = "/Script/LevelEditor.Default__LevelEditorSubsystem"
 

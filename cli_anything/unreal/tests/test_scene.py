@@ -297,7 +297,9 @@ class TestScene:
         assert [c["name"] for c in result["components"]] == ["StaticMeshComponent0"]
         mock_run.assert_called_once()
 
-    def test_get_actor_components_without_get_root_component(self, monkeypatch):
+    def test_get_actor_components_loads_listed_actor_path_without_get_root_component(
+        self, monkeypatch
+    ):
         import sys
         from types import ModuleType
 
@@ -333,14 +335,19 @@ class TestScene:
             def get_components_by_class(self, _component_class):
                 return [component]
 
+        actor = FakeActor()
+
         class FakeSubsystem:
             def get_all_level_actors(self):
-                return [FakeActor()]
+                return []
 
         fake_unreal = ModuleType("unreal")
         fake_unreal.EditorActorSubsystem = object()
         fake_unreal.ActorComponent = object()
         fake_unreal.get_editor_subsystem = lambda _class: FakeSubsystem()
+        fake_unreal.load_object = (
+            lambda _outer, path: actor if path == actor_path else None
+        )
         monkeypatch.setitem(sys.modules, "unreal", fake_unreal)
 
         def execute_script(_api, script, save=False):
@@ -412,15 +419,26 @@ class TestScene:
         from cli_anything.unreal.core.scene import get_actor_transform
 
         api = self._mock_api()
-        api.exec_python_ex.return_value = {
-            "LogOutput": [{"Output": "TRANSFORM_DATA:100.0,200.0,0.0|0.0,45.0,0.0|1.0,1.0,1.0"}]
-        }
+        actor_path = "/Game/Map.Map:PersistentLevel.Actor_0"
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code"
+        ) as mock_run:
+            mock_run.return_value = {
+                "actor": actor_path,
+                "location": {"X": 100.0, "Y": 200.0, "Z": 0.0},
+                "rotation": {"Pitch": 0.0, "Yaw": 45.0, "Roll": 0.0},
+                "scale": {"X": 1.0, "Y": 1.0, "Z": 1.0},
+            }
 
-        result = get_actor_transform(api, "/Game/Map:Actor_0")
-        assert result["actor"] == "/Game/Map:Actor_0"
+            result = get_actor_transform(api, actor_path)
+
+        assert result["actor"] == actor_path
         assert result["location"]["X"] == 100
         assert result["rotation"]["Yaw"] == 45
         assert result["scale"]["X"] == 1
+        script = mock_run.call_args.args[1]
+        assert "_u.load_object(None, _actor_path)" in script
+        mock_run.assert_called_once_with(api, script, save=False)
 
     def test_open_level_verifies_active_world_matches_requested_package(self):
         from cli_anything.unreal.core.scene import open_level
@@ -707,15 +725,39 @@ class TestSceneCLI:
             assert data["status"] == "success"
             assert len(data["result"]["components"]) == 1
 
+    def test_scene_components_cli_surfaces_read_failure(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.get_actor_components") as mock_get:
+            mock_editor.return_value = MagicMock()
+            mock_get.return_value = {"error": "Actor not found: /Game/Map:Missing"}
+
+            result = runner.invoke(cli, [
+                "--output", "json", "scene", "list-components", "/Game/Map:Missing",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "SCENE_COMPONENT_LIST_FAILED"
+        assert data["message"] == "Actor not found: /Game/Map:Missing"
+
     def test_scene_transform_cli(self):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor:
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.get_actor_transform") as mock_get:
             mock_api = MagicMock()
-            mock_api.exec_python_ex.return_value = {
-                "LogOutput": [{"Output": "TRANSFORM_DATA:0.0,0.0,0.0|0.0,90.0,0.0|1.0,1.0,1.0"}]
+            mock_get.return_value = {
+                "actor": "/Game/Map:Actor_0",
+                "location": {"X": 0.0, "Y": 0.0, "Z": 0.0},
+                "rotation": {"Pitch": 0.0, "Yaw": 90.0, "Roll": 0.0},
+                "scale": {"X": 1.0, "Y": 1.0, "Z": 1.0},
             }
             mock_editor.return_value = mock_api
 
@@ -726,6 +768,29 @@ class TestSceneCLI:
             data = json.loads(result.output)
             assert data["status"] == "success"
             assert data["result"]["rotation"]["Yaw"] == 90
+
+    def test_scene_transform_cli_surfaces_read_failure(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.scene.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.get_actor_transform") as mock_get:
+            mock_editor.return_value = MagicMock()
+            mock_get.return_value = {
+                "error": "Actor not found: /Game/Map:Missing",
+                "actor": "/Game/Map:Missing",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "scene", "get-transform", "/Game/Map:Missing",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "SCENE_TRANSFORM_READ_FAILED"
+        assert data["message"] == "Actor not found: /Game/Map:Missing"
 
 
 # ═══════════════════════════════════════════════════════════════════════
