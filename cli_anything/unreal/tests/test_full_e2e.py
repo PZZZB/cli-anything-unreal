@@ -1895,3 +1895,85 @@ class TestAssetsE2E:
             "unreal.SystemLibrary.collect_garbage()\n"
             "result = {'cleaned': True}\n"
         ), project_dir=project_dir, timeout=10, save=False)
+
+    def test_asset_property_reads_blueprint_class_default_object(
+        self, cli_runner, api_port, api, project_path
+    ):
+        from cli_anything.unreal.unreal_cli import cli
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        project_dir = str(Path(project_path).parent)
+        asset_path = "/Game/E2E_AssetProperty/BP_E2E_ClassDefaults"
+        cleanup_code = (
+            "import unreal\n"
+            f"path = {asset_path!r}\n"
+            "if unreal.EditorAssetLibrary.does_asset_exist(path):\n"
+            "    unreal.EditorAssetLibrary.delete_asset(path)\n"
+            "    unreal.SystemLibrary.collect_garbage()\n"
+            "result = {'cleaned': True}\n"
+        )
+        create_code = (
+            "import unreal\n"
+            f"path = {asset_path!r}\n"
+            "factory = unreal.BlueprintFactory()\n"
+            "factory.set_editor_property('parent_class', unreal.Actor)\n"
+            "tools = unreal.AssetToolsHelpers.get_asset_tools()\n"
+            "bp = tools.create_asset('BP_E2E_ClassDefaults', "
+            "'/Game/E2E_AssetProperty', unreal.Blueprint, factory)\n"
+            "if bp is None:\n"
+            "    result = {'error': 'Blueprint creation failed'}\n"
+            "else:\n"
+            "    cdo = unreal.get_default_object(bp.generated_class())\n"
+            "    cdo.set_editor_property('initial_life_span', 37.5)\n"
+            "    saved = unreal.EditorAssetLibrary.save_asset("
+            "path, only_if_is_dirty=False)\n"
+            "    result = {'created': True, 'saved': saved}\n"
+        )
+
+        run_python_code(
+            api, cleanup_code, project_dir=project_dir, timeout=15, save=False
+        )
+        try:
+            created = run_python_code(
+                api, create_code, project_dir=project_dir, timeout=15, save=False
+            )
+            assert created.get("created") is True
+            assert created.get("saved") is True
+
+            listed = cli_runner.invoke(cli, [
+                "--output", "json", "--port", str(api_port),
+                "--project", project_path,
+                "asset", "list", "--path", "/Game/E2E_AssetProperty",
+                "-q", "BP_E2E_ClassDefaults", "--limit", "10",
+            ])
+            assert listed.exit_code == 0
+            listed_data = json.loads(listed.output)
+            assert listed_data["status"] == "success"
+            assert any(
+                item["path"] == asset_path
+                for item in listed_data["result"]["assets"]
+            )
+
+            read = cli_runner.invoke(cli, [
+                "--output", "json", "--port", str(api_port),
+                "--project", project_path,
+                "asset", "property", asset_path, "InitialLifeSpan",
+            ])
+            assert read.exit_code == 0
+            read_data = json.loads(read.output)
+            assert read_data["status"] == "success"
+            assert read_data["result"]["InitialLifeSpan"] == 37.5
+
+            missing = cli_runner.invoke(cli, [
+                "--output", "json", "--port", str(api_port),
+                "--project", project_path,
+                "asset", "property", asset_path, "DefinitelyMissingProperty",
+            ])
+            assert missing.exit_code == 3
+            missing_data = json.loads(missing.output)
+            assert missing_data["status"] == "error"
+            assert missing_data["code"] == "ASSET_PROPERTY_READ_FAILED"
+        finally:
+            run_python_code(
+                api, cleanup_code, project_dir=project_dir, timeout=15, save=False
+            )

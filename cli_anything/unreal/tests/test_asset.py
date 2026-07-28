@@ -283,17 +283,80 @@ class TestAssets:
         assert result["status"] == "ok"
         assert result["renamed"] is True
 
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_property_get_uses_loaded_asset(self, mock_exec):
         from cli_anything.unreal.core.assets import get_asset_property
 
         api = self._mock_api()
-        api.does_asset_exist.return_value = True
-        api.exec_python_ex.return_value = {
-            "LogOutput": [{"Output": "LOADED_OBJECT:/Game/M_Test.M_Test"}]
+        mock_exec.return_value = {
+            "asset": "/Game/M_Test",
+            "loaded_asset": "/Game/M_Test.M_Test",
+            "loaded_path": "/Game/M_Test",
+            "targets": [
+                {"kind": "asset", "object_path": "/Game/M_Test.M_Test"},
+            ],
         }
         api.get_property.return_value = {"BlendMode": "Opaque"}
 
         result = get_asset_property(api, "/Game/M_Test", "BlendMode")
+
         assert result["BlendMode"] == "Opaque"
+        api.get_property.assert_called_once_with("/Game/M_Test.M_Test", "BlendMode")
+        assert "does_asset_exist" not in mock_exec.call_args.args[1]
+
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_property_get_reads_blueprint_class_default_object(self, mock_exec):
+        from cli_anything.unreal.core.assets import get_asset_property
+
+        api = self._mock_api()
+        mock_exec.side_effect = [
+            {
+                "asset": "/Game/BP_Test",
+                "loaded_asset": "/Game/BP_Test.BP_Test",
+                "loaded_path": "/Game/BP_Test",
+                "targets": [
+                    {"kind": "asset", "object_path": "/Game/BP_Test.BP_Test"},
+                    {
+                        "kind": "class_default_object",
+                        "object_path": "/Game/BP_Test.Default__BP_Test_C",
+                    },
+                ],
+            },
+            {
+                "InitialLifeSpan": 37.5,
+                "asset": "/Game/BP_Test",
+                "object_path": "/Game/BP_Test.Default__BP_Test_C",
+                "target": "class_default_object",
+                "read_via": "unreal_python",
+            },
+        ]
+        api.get_property.return_value = {
+            "error": "Property is not accessible via Remote Control"
+        }
+
+        result = get_asset_property(api, "/Game/BP_Test", "InitialLifeSpan")
+
+        assert result["InitialLifeSpan"] == 37.5
+        assert result["target"] == "class_default_object"
+        assert api.get_property.call_count == 2
+        fallback_script = mock_exec.call_args_list[1].args[1]
+        assert "get_editor_property" in fallback_script
+
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_property_get_reports_load_failure(self, mock_exec):
+        from cli_anything.unreal.core.assets import get_asset_property
+
+        api = self._mock_api()
+        mock_exec.return_value = {
+            "error": "Asset not found: /Game/Missing",
+            "asset": "/Game/Missing",
+            "tried": ["/Game/Missing", "/Game/Missing.Missing"],
+        }
+
+        result = get_asset_property(api, "/Game/Missing", "BlendMode")
+
+        assert result["error"] == "Asset not found: /Game/Missing"
+        api.get_property.assert_not_called()
 
     def test_asset_property_set(self):
         from cli_anything.unreal.core.assets import set_asset_property
@@ -372,6 +435,48 @@ class TestAssetCLI:
             data = json.loads(result.output)
             assert data["status"] == "success"
             assert data["result"]["exists"] is False
+
+    def test_asset_property_get_cli_surfaces_read_failure(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.asset.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.assets.get_asset_property") as mock_get:
+            mock_editor.return_value = MagicMock()
+            mock_get.return_value = {"error": "Asset not found: /Game/Missing"}
+
+            result = runner.invoke(cli, [
+                "--output", "json", "asset", "property",
+                "/Game/Missing", "BlendMode",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "ASSET_PROPERTY_READ_FAILED"
+        assert data["message"] == "Asset not found: /Game/Missing"
+
+    def test_asset_property_set_cli_surfaces_write_failure(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.asset.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.assets.set_asset_property") as mock_set:
+            mock_editor.return_value = MagicMock()
+            mock_set.return_value = {"error": "Property cannot be written"}
+
+            result = runner.invoke(cli, [
+                "--output", "json", "asset", "property",
+                "/Game/M_Test", "BlendMode=Masked",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "ASSET_PROPERTY_WRITE_FAILED"
+        assert data["message"] == "Property cannot be written"
 
     def test_asset_delete_cli_no_refs(self):
         from click.testing import CliRunner

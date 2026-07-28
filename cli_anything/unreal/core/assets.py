@@ -405,27 +405,178 @@ def asset_rename(
     return _exec(api, script, project_dir)
 
 def get_asset_property(api: "UEEditorAPI", asset_path: str, property_name: str) -> dict:
-    """Get a property value on a UAsset."""
-    if not api.does_asset_exist(asset_path):
-        return {"error": f"Asset not found: {asset_path}"}
-        
-    script = f'''
-import unreal
-asset = unreal.EditorAssetLibrary.load_asset('{asset_path}')
-if asset:
-    unreal.log(f'LOADED_OBJECT:{{asset.get_path_name()}}')
+    """Get a property value on a UAsset or Blueprint class default object."""
+    resolve_script = f'''\
+import unreal as _u
+
+_requested_path = {asset_path!r}
+_base_path = _requested_path.split(":", 1)[0]
+_leaf = _base_path.rsplit("/", 1)[-1]
+_path_candidates = [_base_path]
+if "." not in _leaf:
+    _path_candidates.append(_base_path + "." + _leaf)
+
+_asset = None
+_loaded_path = None
+_tried = []
+for _candidate in _path_candidates:
+    if not _candidate or _candidate in _tried:
+        continue
+    _tried.append(_candidate)
+    try:
+        _asset = _u.EditorAssetLibrary.load_asset(_candidate)
+    except Exception:
+        _asset = None
+    if _asset is None:
+        try:
+            _asset = _u.load_asset(_candidate)
+        except Exception:
+            _asset = None
+    if _asset is None:
+        try:
+            _asset = _u.load_object(None, _candidate)
+        except Exception:
+            _asset = None
+    if _asset is not None:
+        _loaded_path = _candidate
+        break
+
+if _asset is None:
+    result = {{
+        "error": "Asset not found: " + _requested_path,
+        "asset": _requested_path,
+        "tried": _tried,
+    }}
+else:
+    _targets = [{{
+        "kind": "asset",
+        "object_path": _asset.get_path_name(),
+    }}]
+    _generated_class = None
+    try:
+        _generated_class = _asset.generated_class()
+    except Exception:
+        try:
+            _generated_class = _asset.get_editor_property("generated_class")
+        except Exception:
+            _generated_class = None
+    if _generated_class is not None:
+        try:
+            _cdo = _u.get_default_object(_generated_class)
+        except Exception:
+            _cdo = None
+        if _cdo is not None:
+            _targets.append({{
+                "kind": "class_default_object",
+                "object_path": _cdo.get_path_name(),
+            }})
+    result = {{
+        "asset": _requested_path,
+        "loaded_asset": _asset.get_path_name(),
+        "loaded_path": _loaded_path,
+        "targets": _targets,
+    }}
 '''
-    res = api.exec_python_ex(script)
-    object_path = None
-    for item in res.get("LogOutput", []):
-        line = item.get("Output", "")
-        if line.startswith("LOADED_OBJECT:"):
-            object_path = line.split(":", 1)[1].strip()
-            
-    if not object_path:
-        return {"error": f"Failed to load asset into memory: {asset_path}"}
-        
-    return api.get_property(object_path, property_name)
+    resolved = _exec(api, resolve_script, None)
+    if resolved.get("error"):
+        return resolved
+
+    targets = resolved.get("targets", [])
+    remote_errors = []
+    for target in targets:
+        object_path = target.get("object_path")
+        if not object_path:
+            continue
+        remote_result = api.get_property(object_path, property_name)
+        remote_error = remote_result.get("error") or remote_result.get("errorMessage")
+        if not remote_error:
+            return remote_result
+        remote_errors.append({
+            "target": target.get("kind"),
+            "object_path": object_path,
+            "error": str(remote_error),
+        })
+
+    fallback_script = f'''\
+import re as _re
+import unreal as _u
+
+_asset_path = {asset_path!r}
+_property_name = {property_name!r}
+_targets = {targets!r}
+
+def _cli_property_name(_name):
+    return _re.sub(r"(?<!^)(?=[A-Z])", "_", _name).lower()
+
+def _cli_serialize_property(_value):
+    if _value is None or isinstance(_value, (bool, int, float, str)):
+        return _value
+    if isinstance(_value, _u.Object):
+        return _value.get_path_name()
+    if isinstance(_value, (list, tuple, set)):
+        return [_cli_serialize_property(_item) for _item in _value]
+    if isinstance(_value, dict):
+        return {{
+            str(_key): _cli_serialize_property(_item)
+            for _key, _item in _value.items()
+        }}
+    return str(_value)
+
+_property_candidates = [_property_name]
+_snake_name = _cli_property_name(_property_name)
+if _snake_name not in _property_candidates:
+    _property_candidates.append(_snake_name)
+
+_attempts = []
+_property_read = False
+for _target in _targets:
+    _object_path = _target.get("object_path")
+    try:
+        _object = _u.load_object(None, _object_path)
+    except Exception as _exc:
+        _object = None
+        _attempts.append({{
+            "target": _target.get("kind"),
+            "object_path": _object_path,
+            "error": str(_exc),
+        }})
+    if _object is None:
+        continue
+    for _candidate in _property_candidates:
+        try:
+            _value = _object.get_editor_property(_candidate)
+            result = {{
+                _property_name: _cli_serialize_property(_value),
+                "asset": _asset_path,
+                "object_path": _object_path,
+                "target": _target.get("kind"),
+                "read_via": "unreal_python",
+            }}
+            _property_read = True
+            break
+        except Exception as _exc:
+            _attempts.append({{
+                "target": _target.get("kind"),
+                "object_path": _object_path,
+                "property": _candidate,
+                "error": str(_exc),
+            }})
+    if _property_read:
+        break
+
+if not _property_read:
+    result = {{
+        "error": "Property '" + _property_name + "' is not readable on asset or class default object.",
+        "asset": _asset_path,
+        "property": _property_name,
+        "targets": _targets,
+        "attempts": _attempts,
+    }}
+'''
+    fallback = _exec(api, fallback_script, None)
+    if fallback.get("error") and remote_errors:
+        fallback["remote_control_attempts"] = remote_errors
+    return fallback
 
 def set_asset_property(api: "UEEditorAPI", asset_path: str, property_name: str, value) -> dict:
     """Set a property value on a UAsset and mark it dirty."""

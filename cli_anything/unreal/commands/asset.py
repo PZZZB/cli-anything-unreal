@@ -2,7 +2,14 @@
 
 import click
 
-from cli_anything.unreal.commands import AppState, handle_error, output, require_editor, require_project
+from cli_anything.unreal.commands import (
+    AppError,
+    AppState,
+    handle_error,
+    output,
+    require_editor,
+    require_project,
+)
 from cli_anything.unreal.commands._parse_value import parse_property_value
 
 
@@ -184,7 +191,17 @@ def asset_property(state: AppState, asset_path, expression):
     if "=" in expression:
         prop_name, raw_value = expression.split("=", 1)
         result = set_asset_property(api, asset_path, prop_name, parse_property_value(raw_value))
+        error_code = "ASSET_PROPERTY_WRITE_FAILED"
     else:
         result = get_asset_property(api, asset_path, expression)
+        error_code = "ASSET_PROPERTY_READ_FAILED"
+
+    if isinstance(result, dict) and result.get("error"):
+        raise AppError(
+            error_code,
+            str(result["error"]),
+            exit_code=3,
+            details=result,
+        )
 
     output(result, state)
