@@ -175,6 +175,7 @@ def _capture_viewport_png_raw(
     foreground: bool = True,
     rc_timeout: float | None = None,
     output_path: str | None = None,
+    include_ui: bool = False,
 ) -> dict:
     """Redraw and synchronously capture the active Level Viewport through the bridge."""
     capture_timeout = max(float(wait_timeout), 0.1)
@@ -203,9 +204,14 @@ def _capture_viewport_png_raw(
     temp_path = save_path.with_name(
         f".{save_path.stem}.ue-cli-{uuid.uuid4().hex}.png"
     ).resolve()
+    bridge_args = (
+        f"{temp_path.as_posix()!r}, True"
+        if include_ui
+        else f"{temp_path.as_posix()!r}"
+    )
     script = (
         "import unreal\n"
-        f"_ok = unreal.CliAnythingBridgeLibrary.take_active_viewport_screenshot({temp_path.as_posix()!r})\n"
+        f"_ok = unreal.CliAnythingBridgeLibrary.take_active_viewport_screenshot({bridge_args})\n"
         "if not _ok:\n"
         '    raise RuntimeError("active viewport screenshot failed")\n'
         'unreal.log("UECLI_SCREENSHOT_RESULT:ok")'
@@ -319,7 +325,11 @@ def _capture_viewport_png_raw(
         "status": "ok",
         "path_raw": str(save_path),
         "size_raw": size,
-        "capture_mode": "bridge_active_viewport",
+        "capture_mode": (
+            "bridge_active_viewport_composed"
+            if include_ui
+            else "bridge_active_viewport"
+        ),
         "foreground_ok": foreground_ok,
         "refresh": refresh_result,
     }
@@ -342,6 +352,7 @@ def take_screenshot(
     delay: float = _DEFAULT_RENDER_DELAY,
     output_path: str | None = None,
     jpeg_for_llm: bool = True,
+    include_ui: bool = False,
 ) -> dict:
     """Capture the active Level Viewport to PNG (then optional JPEG for agents).
 
@@ -355,12 +366,21 @@ def take_screenshot(
         delay: Seconds for viewport to render before capture.
         output_path: Optional full path for the requested PNG/JPG output.
         jpeg_for_llm: Whether to create and select a compressed JPEG result.
+        include_ui: Capture the composed viewport including Stat HUD and Slate overlays.
 
     Returns:
         {"path": str, "size": int} or {"error": str}
     """
     raw = _capture_viewport_png_raw(
-        api, filename, project_dir, wait_timeout, res_x, res_y, delay, output_path=output_path
+        api,
+        filename,
+        project_dir,
+        wait_timeout,
+        res_x,
+        res_y,
+        delay,
+        output_path=output_path,
+        include_ui=include_ui,
     )
     if raw.get("status") == "ok":
         screenshot_path = raw["path_raw"]

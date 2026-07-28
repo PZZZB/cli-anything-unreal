@@ -31,9 +31,14 @@ def _raise_capture_error(result: dict) -> None:
 @click.option("--filename", default="screenshot",
               help="Output filename or stem when --path is a directory, or legacy project screenshot name.")
 @click.option("--no-compress", is_flag=True, help="Return raw PNG instead of compressed JPG")
+@click.option(
+    "--include-ui",
+    is_flag=True,
+    help="Include composed viewport UI such as stat HUD and Slate/Canvas overlays.",
+)
 @handle_error
 @click.pass_obj
-def screenshot_static(state: AppState, output_path, filename, no_compress):
+def screenshot_static(state: AppState, output_path, filename, no_compress, include_ui):
     """Take a single static screenshot. Returns compressed JPG by default.
 
     Use --path for a full file path (e.g., F:/Test574/round7_result.png),
@@ -54,6 +59,7 @@ def screenshot_static(state: AppState, output_path, filename, no_compress):
         project_dir=state.session.project_dir,
         output_path=output_path,
         jpeg_for_llm=not no_compress,
+        include_ui=include_ui,
     )
     _raise_capture_error(result)
 

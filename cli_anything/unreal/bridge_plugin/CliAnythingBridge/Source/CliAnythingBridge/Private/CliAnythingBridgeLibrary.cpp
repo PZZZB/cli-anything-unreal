@@ -264,7 +264,7 @@ FIntVector4 UCliAnythingBridgeLibrary::GetActiveViewportScreenBounds()
 	return Bounds;
 }
 
-bool UCliAnythingBridgeLibrary::TakeActiveViewportScreenshot(const FString& OutputPath)
+bool UCliAnythingBridgeLibrary::TakeActiveViewportScreenshot(const FString& OutputPath, bool bIncludeUI)
 {
 	if (OutputPath.IsEmpty() || !FModuleManager::Get().IsModuleLoaded("LevelEditor"))
 	{
@@ -304,18 +304,40 @@ bool UCliAnythingBridgeLibrary::TakeActiveViewportScreenshot(const FString& Outp
 	SceneViewport->Draw();
 	FlushRenderingCommands();
 
-	const FIntPoint Size = SceneViewport->GetRenderTargetTextureSizeXY();
-	if (Size.X <= 0 || Size.Y <= 0)
-	{
-		return false;
-	}
-	const FIntRect CaptureRect(0, 0, Size.X, Size.Y);
+	FIntPoint Size;
 	TArray<FColor> Pixels;
-	Pixels.SetNum(CaptureRect.Area());
-	if (!SceneViewport->ReadPixels(
-		Pixels,
-		FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX),
-		CaptureRect))
+	if (bIncludeUI)
+	{
+		if (!FSlateApplication::IsInitialized())
+		{
+			return false;
+		}
+		TSharedPtr<SViewport> ViewportWidget = ActiveViewport->GetViewportWidget().Pin();
+		if (!ViewportWidget.IsValid())
+		{
+			return false;
+		}
+		FIntVector ScreenshotSize;
+		if (!FSlateApplication::Get().TakeScreenshot(ViewportWidget.ToSharedRef(), Pixels, ScreenshotSize))
+		{
+			return false;
+		}
+		Size = FIntPoint(ScreenshotSize.X, ScreenshotSize.Y);
+	}
+	else
+	{
+		Size = SceneViewport->GetRenderTargetTextureSizeXY();
+		const FIntRect CaptureRect(0, 0, Size.X, Size.Y);
+		Pixels.SetNum(CaptureRect.Area());
+		if (!SceneViewport->ReadPixels(
+			Pixels,
+			FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX),
+			CaptureRect))
+		{
+			return false;
+		}
+	}
+	if (Size.X <= 0 || Size.Y <= 0)
 	{
 		return false;
 	}
@@ -365,7 +387,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.19");
+	return TEXT("1.20");
 }
 
 FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)

@@ -192,7 +192,29 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.19"
+        assert version == "1.20"
+
+    def test_bridge_composed_viewport_capture_uses_slate_screenshot(self):
+        """HUD-inclusive capture must read the composed Slate viewport region."""
+        plugin_dir = Path(__file__).resolve().parents[1] / "bridge_plugin" / "CliAnythingBridge"
+        header = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Public"
+            / "CliAnythingBridgeLibrary.h"
+        ).read_text(encoding="utf-8")
+        cpp = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+
+        assert "bool bIncludeUI = false" in header
+        assert "FSlateApplication::Get().TakeScreenshot" in cpp
+        assert "if (bIncludeUI)" in cpp
 
     def test_bridge_declares_umg_helpers(self):
         """UMG authoring helpers live in the bridge because WidgetTree fields are protected."""

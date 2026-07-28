@@ -224,7 +224,7 @@ All screenshot commands require editor.
 
 | Command | Description |
 |---------|-------------|
-| `screenshot capture [--path PATH] [--filename NAME] [--no-compress]` | Redraw and capture a fresh frame from the active Level Viewport at its live resolution. Requires the bundled bridge version shown by `editor status`. `--path` may be a full output file path or an existing directory. Directory paths combine with `--filename`; `.png` writes the raw PNG there, `.jpg/.jpeg` writes the compressed image there and keeps raw PNG beside it |
+| `screenshot capture [--path PATH] [--filename NAME] [--no-compress] [--include-ui]` | Redraw and capture a fresh frame from the active Level Viewport at its live resolution. Default capture reads scene pixels only; `--include-ui` captures the composed viewport region including stat HUD and Slate/Canvas overlays. Requires the bundled bridge version shown by `editor status`. `--path` may be a full output file path or an existing directory. Directory paths combine with `--filename`; `.png` writes the raw PNG there, `.jpg/.jpeg` writes the compressed image there and keeps raw PNG beside it |
 | `screenshot capture-sequence [-n N] [-i SEC] [--no-compress]` | Capture sequence with bounded per-frame waits |
 
 ## session - Undo/Redo

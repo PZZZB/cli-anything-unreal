@@ -56,7 +56,7 @@ When user asks UE work:
 3. **Properties/functions known?** Use `editor api-discover <target>` overview, then `-d Name1,Name2`. Target can be class, asset path, actor path, component path. For actors, use `components[].path` when property lives on component (e.g. light intensity on `LightComponent0`). Unknown class? See `references/workflows-editor.md` "UE Python API - Class Lookup".
 4. **Subcommand exists?** Check `references/commands.md`. If no, step 5.
 5. **No subcommand?** Write Python, run `editor run-script`, using reflection data for exact names/types. Delete script after.
-6. **Need visual proof?** `screenshot capture`, inspect image.
+6. **Need visual proof?** `screenshot capture`, inspect image. Add `--include-ui` when evidence must include stat HUD or Slate/Canvas overlays.
 7. **Need GPU debug?** `editor exec "renderdoc.captureframe"`, analyze `.rdc`; see RenderDoc workflow.
 
 Failures: inspect JSON `error`. Common causes: connection refused (editor down), timeout (editor busy, retry 10-15s), asset not found (wrong path, use list commands).

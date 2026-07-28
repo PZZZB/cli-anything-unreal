@@ -100,6 +100,7 @@ ue-cli editor status
 ue-cli --output json material list
 ue-cli --output json material analyze /Game/MyMaterial
 ue-cli --output json screenshot capture --filename material_check
+ue-cli --output json screenshot capture --filename stat_evidence --include-ui
 ```
 
 ## Known Engine Bugs

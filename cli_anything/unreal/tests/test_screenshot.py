@@ -270,6 +270,35 @@ class TestScreenshot:
         data = json.loads(result.output)
         assert data["result"]["default_path"] == str(target)
 
+    def test_capture_include_ui_forwards_to_core(self, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        target = tmp_path / "composed.png"
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.screenshot.require_editor",
+            return_value=MagicMock(),
+        ), patch(
+            "cli_anything.unreal.core.screenshot.take_screenshot",
+            return_value={"status": "ok", "path_raw": str(target)},
+        ) as mock_capture:
+            result = runner.invoke(
+                cli,
+                [
+                    "--output",
+                    "json",
+                    "screenshot",
+                    "capture",
+                    "--path",
+                    str(target),
+                    "--include-ui",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock_capture.call_args.kwargs["include_ui"] is True
+
     def test_take_screenshot_no_compress_skips_jpeg(self, tmp_path):
         from cli_anything.unreal.core.screenshot import take_screenshot
 
@@ -375,6 +404,44 @@ class TestScreenshot:
             call.args and str(call.args[0]).startswith("HighResShot ")
             for call in api.exec_console.call_args_list
         )
+
+    def test_capture_include_ui_requests_composed_viewport_frame(self, tmp_path):
+        from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw
+
+        api = MagicMock()
+        target = tmp_path / "composed viewport" / "with_stats.png"
+
+        def run_bridge(script, timeout=None):
+            match = re.search(
+                r"take_active_viewport_screenshot\((.+), True\)",
+                script,
+            )
+            assert match is not None
+            native_path = Path(ast.literal_eval(match.group(1)))
+            native_path.parent.mkdir(parents=True, exist_ok=True)
+            native_path.write_bytes(b"composed-viewport-frame")
+            return {"LogOutput": [{"Output": "UECLI_SCREENSHOT_RESULT:ok"}]}
+
+        api.exec_python_ex.side_effect = run_bridge
+        with patch("cli_anything.unreal.core.screenshot.time.sleep"), patch(
+            "cli_anything.unreal.core.screenshot._refresh_editor_viewports",
+            return_value={},
+        ):
+            result = _capture_viewport_png_raw(
+                api,
+                "ignored",
+                str(tmp_path / "Project"),
+                wait_timeout=15.0,
+                res_x=1920,
+                res_y=1080,
+                delay=0,
+                output_path=str(target),
+                include_ui=True,
+            )
+
+        assert result["status"] == "ok", result
+        assert result["capture_mode"] == "bridge_active_viewport_composed"
+        assert target.read_bytes() == b"composed-viewport-frame"
 
     def test_capture_request_failure_cleans_native_temp_file(self, tmp_path):
         from cli_anything.unreal.core.screenshot import _capture_viewport_png_raw

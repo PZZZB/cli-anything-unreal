@@ -46,9 +46,11 @@ public:
 	/**
 	 * Redraws the active Level Viewport and synchronously writes a PNG.
 	 * Unlike HighResShot, this targets one viewport and preserves its live state.
+	 * When bIncludeUI is true, captures the composed Slate viewport region so
+	 * Canvas debug overlays such as stat commands are included.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
-	static bool TakeActiveViewportScreenshot(const FString& OutputPath);
+	static bool TakeActiveViewportScreenshot(const FString& OutputPath, bool bIncludeUI = false);
 
 	/**
 	 * Gets recent engine error and warning logs.
