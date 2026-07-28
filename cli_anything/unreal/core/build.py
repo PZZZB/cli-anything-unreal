@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from cli_anything.unreal.utils.ue_backend import (
@@ -32,7 +33,23 @@ _PE_BUILD_PRODUCT_TYPES = frozenset({"dynamiclibrary", "executable"})
 _PE_BUILD_PRODUCT_SUFFIXES = frozenset({".dll", ".exe"})
 _MAX_REPORTED_INVALID_BUILD_PRODUCTS = 20
 _MAX_REPORTED_MISSING_RUNTIME_DEPENDENCIES = 20
+_MAX_REPORTED_MISSING_INCLUDES = 20
 _BUILD_STATE_PROCESS_PROBE_TIMEOUT_SECONDS = 3
+_ENGINE_PROVENANCE_TIMEOUT_SECONDS = 3
+
+_MSVC_MISSING_INCLUDE_PATTERN = re.compile(
+    r"^(?P<referenced_by>.+?)"
+    r"\((?P<line>\d+)(?:,(?P<column>\d+))?\):\s*"
+    r"fatal error C1083:\s*(?P<message>.+)$",
+    re.IGNORECASE,
+)
+_MSVC_MISSING_INCLUDE_MESSAGE_PATTERN = re.compile(
+    r"cannot open include file|无法打开包括文件",
+    re.IGNORECASE,
+)
+_QUOTED_INCLUDE_PATTERN = re.compile(
+    r"""["'“‘](?P<include>[^"'“”‘’]+)["'”’]"""
+)
 
 _TARGET_LEXICAL_NOISE_PATTERN = re.compile(
     r"//[^\r\n]*|/\*.*?\*/|"
@@ -210,7 +227,130 @@ def _check_already_building(uproject_path: str) -> dict | None:
     }
 
 
-def _build_failure_diagnostics(log_file: str | None) -> dict:
+def _extract_msvc_missing_includes(diagnostics: list[str]) -> list[dict]:
+    """Return structured evidence for MSVC C1083 missing-include failures."""
+    missing_includes = []
+    seen = set()
+    for diagnostic in diagnostics:
+        match = _MSVC_MISSING_INCLUDE_PATTERN.match(diagnostic)
+        if not match:
+            continue
+        message = match.group("message")
+        if not _MSVC_MISSING_INCLUDE_MESSAGE_PATTERN.search(message):
+            continue
+        include_match = _QUOTED_INCLUDE_PATTERN.search(message)
+        if include_match:
+            include = include_match.group("include").strip()
+        else:
+            include_match = re.search(
+                r"(?:include file|包括文件)\s*[:：]\s*"
+                r"(?P<include>.+?)\s*[:：]\s*",
+                message,
+                re.IGNORECASE,
+            )
+            if not include_match:
+                continue
+            include = include_match.group("include").strip()
+        if not include:
+            continue
+
+        referenced_by = match.group("referenced_by").strip()
+        line = int(match.group("line"))
+        column_text = match.group("column")
+        key = (include.casefold(), referenced_by.casefold(), line, column_text)
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = {
+            "include": include,
+            "referenced_by": referenced_by,
+            "line": line,
+        }
+        if column_text is not None:
+            entry["column"] = int(column_text)
+        missing_includes.append(entry)
+    return missing_includes
+
+
+def _engine_source_control_provenance(engine_root: str) -> dict:
+    """Read bounded Git provenance for a source engine without changing it."""
+
+    def run_git(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", engine_root, *args],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_ENGINE_PROVENANCE_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        value = result.stdout.strip()
+        return value or None
+
+    commit = run_git("rev-parse", "--verify", "HEAD")
+    if not commit:
+        return {"status": "unavailable"}
+    branch = run_git("branch", "--show-current")
+    provenance = {
+        "status": "available",
+        "type": "git",
+        "commit": commit,
+    }
+    if branch:
+        provenance["branch"] = branch
+    else:
+        provenance["detached_head"] = True
+    return provenance
+
+
+def _missing_include_compatibility_context(
+    uproject_path: str | None,
+    engine_root: str | None,
+) -> dict:
+    """Describe factual project/engine context without claiming mismatch."""
+    context = {
+        "status": "unverified",
+        "reason": (
+            "Compiler output proves that an include could not be resolved; "
+            "it does not prove a project/engine revision mismatch."
+        ),
+    }
+    if uproject_path:
+        project = {"path": uproject_path}
+        try:
+            descriptor = json.loads(
+                Path(uproject_path).read_text(encoding="utf-8-sig")
+            )
+        except (OSError, json.JSONDecodeError):
+            descriptor = None
+        if isinstance(descriptor, dict):
+            association = descriptor.get("EngineAssociation")
+            if association:
+                project["engine_association"] = str(association)
+        context["project"] = project
+    if engine_root:
+        engine = {
+            "root": engine_root,
+            "source_control": _engine_source_control_provenance(engine_root),
+        }
+        version = get_engine_version(engine_root)
+        if version:
+            engine["version"] = version
+        context["engine"] = engine
+    return context
+
+
+def _build_failure_diagnostics(
+    log_file: str | None,
+    *,
+    uproject_path: str | None = None,
+    engine_root: str | None = None,
+) -> dict:
     """Extract bounded, factual diagnostics from a failed UAT/UBT log."""
     if not log_file:
         return {}
@@ -233,6 +373,25 @@ def _build_failure_diagnostics(log_file: str | None) -> dict:
             compiler_diagnostics.append(line)
     compiler_diagnostics = list(dict.fromkeys(compiler_diagnostics))[-20:]
     if compiler_diagnostics:
+        missing_includes = _extract_msvc_missing_includes(compiler_diagnostics)
+        if missing_includes:
+            missing_includes = missing_includes[-_MAX_REPORTED_MISSING_INCLUDES:]
+            return {
+                "code": "BUILD_MISSING_INCLUDE",
+                "failure_kind": "missing_include",
+                "diagnostics": compiler_diagnostics,
+                "missing_include_count": len(missing_includes),
+                "missing_includes": missing_includes,
+                "compatibility": _missing_include_compatibility_context(
+                    uproject_path,
+                    engine_root,
+                ),
+                "suggestion": (
+                    "Verify that the project source revision matches the engine "
+                    "branch/commit, then restore or update the missing include "
+                    "and rebuild."
+                ),
+            }
         return {
             "failure_kind": "compiler_diagnostics",
             "diagnostics": compiler_diagnostics,
@@ -269,7 +428,13 @@ def _build_failure_diagnostics(log_file: str | None) -> dict:
     return result
 
 
-def _normalize_result(result: dict, action: str) -> dict:
+def _normalize_result(
+    result: dict,
+    action: str,
+    *,
+    uproject_path: str | None = None,
+    engine_root: str | None = None,
+) -> dict:
     out = {
         "status": "ok" if result["returncode"] == 0 else "error",
         "returncode": result["returncode"],
@@ -283,7 +448,11 @@ def _normalize_result(result: dict, action: str) -> dict:
             "error",
             f"{action} failed (exit {result['returncode']}). See log_file for details.",
         )
-        out.update(_build_failure_diagnostics(result.get("log_file")))
+        out.update(_build_failure_diagnostics(
+            result.get("log_file"),
+            uproject_path=uproject_path,
+            engine_root=engine_root,
+        ))
     return out
 
 
@@ -728,7 +897,12 @@ def _normalize_compile_result(
     platform: str,
     modules: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
-    out = _normalize_result(result, "Compile")
+    out = _normalize_result(
+        result,
+        "Compile",
+        uproject_path=uproject_path,
+        engine_root=engine_root,
+    )
     if out["status"] != "ok" or platform.casefold() != "win64":
         return out
     validation = _validate_win64_editor_build_products(

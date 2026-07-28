@@ -848,6 +848,85 @@ class TestBuildSuccessPaths:
         assert "error C2065" in result["diagnostics"][0]
         assert "fatal error LNK1104" in result["diagnostics"][1]
 
+    def test_compile_failure_classifies_missing_include_with_engine_context(
+        self,
+        temp_project,
+        mock_engine_root,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.build import _normalize_compile_result
+
+        diagnostic = (
+            r"F:\Project\Source\Game\Public\OcclusionRevealComponent.h"
+            "(7,1): fatal error C1083: "
+            "\u65e0\u6cd5\u6253\u5f00\u5305\u62ec\u6587\u4ef6: "
+            "\u201cLocalOcclusionInvalidation.h\u201d: No such file or directory"
+        )
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_bytes((diagnostic + "\n").encode("mbcs"))
+
+        with patch(
+            "cli_anything.unreal.core.build._engine_source_control_provenance",
+            return_value={
+                "status": "available",
+                "type": "git",
+                "branch": "NL_Master",
+                "commit": "780f6e1652acca9b8eda1c965724ab910e3feab2",
+            },
+        ):
+            result = _normalize_compile_result(
+                {"returncode": 6, "log_file": str(log_file)},
+                uproject_path=temp_project["uproject"],
+                engine_root=mock_engine_root,
+                config="Development",
+                platform="Win64",
+            )
+
+        assert result["code"] == "BUILD_MISSING_INCLUDE"
+        assert result["failure_kind"] == "missing_include"
+        assert result["missing_include_count"] == 1
+        assert result["missing_includes"] == [{
+            "include": "LocalOcclusionInvalidation.h",
+            "referenced_by": (
+                r"F:\Project\Source\Game\Public\OcclusionRevealComponent.h"
+            ),
+            "line": 7,
+            "column": 1,
+        }]
+        assert result["compatibility"]["status"] == "unverified"
+        assert result["compatibility"]["project"]["engine_association"] == "5.7"
+        assert result["compatibility"]["engine"]["version"] == "5.7.0"
+        assert (
+            result["compatibility"]["engine"]["source_control"]["branch"]
+            == "NL_Master"
+        )
+        assert (
+            result["compatibility"]["engine"]["source_control"]["commit"]
+            == "780f6e1652acca9b8eda1c965724ab910e3feab2"
+        )
+        assert "project source revision" in result["suggestion"]
+
+    def test_c1083_non_include_failure_remains_generic_compiler_diagnostic(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.build import _normalize_result
+
+        diagnostic = (
+            "Source.cpp(7): fatal error C1083: "
+            "Cannot open compiler generated file: 'Source.obj': Permission denied"
+        )
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_text(diagnostic + "\n", encoding="utf-8")
+
+        result = _normalize_result(
+            {"returncode": 6, "log_file": str(log_file)},
+            "Compile",
+        )
+
+        assert result["failure_kind"] == "compiler_diagnostics"
+        assert "code" not in result
+
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows compiler encoding behavior")
     def test_compile_failure_decodes_localized_msvc_diagnostics(self, tmp_path):
         from cli_anything.unreal.core.build import _normalize_result
