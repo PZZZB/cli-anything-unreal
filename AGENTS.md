@@ -1,95 +1,197 @@
 # AGENTS.md
 
-Codex repo guide.
+Canonical repository guide for Codex, Claude Code, and CodeBuddy. `CLAUDE.md`
+and `CODEBUDDY.md` import this file. Keep shared guidance here; do not duplicate
+it into the compatibility entrypoints.
 
-## What This Is
+## Repository Purpose
 
-`ue-cli` = Python CLI for AI agents controlling Unreal Engine 5 editors. Wraps UE Remote Control HTTP API + UAT/UBT behind structured, token-light JSON commands.
+`ue-cli` is a Python CLI for AI agents controlling Unreal Engine 5 editors. It
+wraps UAT/UBT subprocesses, the UE Remote Control HTTP API, and editor Python
+behind structured, token-light commands.
 
-## Commands
+Requirements:
 
-### Install & Setup
+- Python 3.10+
+- Unreal Engine 5.x for editor and build operations
+- Remote Control enabled for commands that talk to a running editor
+
+## Setup
+
 ```bash
-pip install -e .                    # Dev install
-pip install -e ".[dev]"             # With pytest
+pip install -e .
+pip install -e ".[dev]"
 ```
 
-### Running Tests
+The `dev` extra installs pytest tooling. Packaging uses `python -m build`, which
+requires the separate `build` package.
+
+## Validation
+
+Unit tests use mocks or synthetic projects and do not require Unreal Editor:
+
 ```bash
-# Unit tests (no UE editor needed, ~358 tests)
+# Full unit suite
 python -m pytest cli_anything/unreal/tests/ -v
 
-# Single test file
+# One file
 python -m pytest cli_anything/unreal/tests/test_material.py -v
 
-# Single test
+# One test
 python -m pytest cli_anything/unreal/tests/test_material.py::TestMaterial::test_list -v
 
-# E2E tests (requires running UE editor + UE_TEST_PROJECT env var)
-UE_TEST_PROJECT=F:\path\to\Project.uproject python -m pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e
+# Collection only
+python -m pytest --collect-only -q cli_anything/unreal/tests/
+```
 
-# E2E with auto-launch
+E2E tests require a real `.uproject`. PowerShell:
+
+```powershell
+$env:UE_TEST_PROJECT = "F:/path/to/Project.uproject"
+
+# Existing reachable editor
+python -m pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e
+
+# Auto-launch editor
 python -m pytest cli_anything/unreal/tests/test_full_e2e.py -v --e2e --e2e-auto-launch --e2e-launch-timeout 300
 
-# E2E smoke subset only
+# Bounded smoke subset
 python -m pytest cli_anything/unreal/tests/ -v --e2e --e2e-smoke
 ```
 
-### Running the CLI
+Do not hard-code a collected-test count in this guide; it changes frequently.
+`tmp_path` writes under `.tmp_pytest/`. E2E tests remain skipped unless
+`--e2e` is passed.
+
+## CLI Contract
+
 ```bash
 ue-cli --help
+python -m cli_anything.unreal --help
+ue-cli --list-commands
 ue-cli --output json editor status
-ue-cli --project F:\path\to\Project.uproject editor launch
+ue-cli --project F:/path/to/Project.uproject editor launch
+ue-cli --project F:/path/to/Project.uproject --output json project info
+```
+
+- Global flags such as `--output`, `--project`, and `--port` go before
+  subcommands.
+- TTY stdout defaults to text; non-TTY stdout defaults to JSON.
+- `--project` sets project context for the current CLI or REPL session.
+- Port starts at 30010 and, unless explicitly set, can be replaced by project
+  `Config/DefaultRemoteControl.ini` or one unambiguous live editor.
+- `_fix_argv_msys2()` repairs Git Bash/MSYS2 mangling of Unreal paths such as
+  `/Game/...`.
+- Use root and command-specific `--help` or `--list-commands` instead of
+  guessing command syntax.
+
+## Common Workflows
+
+```bash
+# Discover editor instances and ports
+ue-cli editor status
+ue-cli --project F:/path/to/Project.uproject editor status
+
+# Check launch prerequisites
+ue-cli --project F:/path/to/Project.uproject preflight
+
+# Enable Remote Control; restart the editor afterward
+ue-cli --project F:/path/to/Project.uproject editor enable-remote
+
+# Launch asynchronously, then poll
+ue-cli --project F:/path/to/Project.uproject editor launch --no-wait
+ue-cli task status <task_id>
+
+# Execute editor Python; assign result for structured output
+ue-cli --project F:/path/to/Project.uproject --output json editor run-script -c "result = {'status': 'ok'}"
+
+# UAT/UBT operations; --no-wait returns a task ID
+ue-cli --project F:/path/to/Project.uproject build compile --config Development --platform Win64 --no-wait
+ue-cli --project F:/path/to/Project.uproject build cook --platform Win64 --no-wait
+ue-cli --project F:/path/to/Project.uproject build package --config Development --platform Win64 --output-dir F:/path/to/out --no-wait
+ue-cli --project F:/path/to/Project.uproject build status <task_id>
+ue-cli build cancel <task_id>
+
+# Bridge maintenance
+ue-cli --project F:/path/to/Project.uproject editor plugin-version
+ue-cli --project F:/path/to/Project.uproject editor plugin-upgrade
 ```
 
 ## Architecture
 
-### Three Communication Tiers
+### Communication Tiers
 
-1. **Subprocess tier** (`core/build.py`): UAT/UBT compile/cook/package. No editor.
-2. **HTTP REST tier** (`utils/ue_http_api.py`): Remote Control API, default port 30010. Query props, search assets, call UObject funcs.
-3. **Python script injection** (`core/script_runner.py`): escape hatch for HTTP gaps. Runs via `PythonScriptLibrary.ExecutePythonCommandEx`, captures `unreal.log("__cli_result__:" + json.dumps(...))`.
+1. **Subprocess:** `core/build.py` and `utils/ue_backend.py` call UAT/UBT for
+   compile, cook, and package operations. No editor required.
+2. **HTTP REST:** `utils/ue_http_api.py` provides the single `UEEditorAPI`
+   client for Remote Control properties, searches, and UObject calls.
+3. **Python injection:** `core/script_runner.py` executes editor Python through
+   `PythonScriptLibrary.ExecutePythonCommandEx` when HTTP cannot express an
+   operation.
 
-### Code Layers
+### Package Layers
 
-- **`commands/`** - thin Click layer: parse args, call core, emit `output()`/`emit_json()`.
-- **`core/`** - business logic: materials, blueprint, scene, build, script runner.
-- **`utils/ue_http_api.py`** - single HTTP client: `UEEditorAPI`.
-- **`utils/ue_backend.py`** - editor exe/process/preflight/port/zombie management.
+- `unreal_cli.py`: Click root, global flags, output defaults, command metadata,
+  MSYS2 repair, and hidden task worker.
+- `commands/`: thin Click layer; parse input, require project/editor, call
+  `core/`, emit output.
+- `core/`: project, build, editor-domain, session, plugin, and task logic.
+- `utils/ue_http_api.py`: Remote Control HTTP client.
+- `utils/ue_backend.py`: engine discovery, process/preflight handling, Remote
+  Control configuration, and UAT/UBT helpers.
+- `bridge_plugin/CliAnythingBridge/`: bundled C++ Unreal plugin.
+- `skills/`: packaged agent skill and load-on-demand references.
+- `tests/`: unit and E2E tests.
 
-### Script Runner Pattern
+### Script Runner
 
-`core/script_runner.py` wraps user code in `_WRAPPER_TEMPLATE`: isolated `_cli_user_ns`, stdout capture, traceback capture, dirty-package auto-save. CLI parses `LogOutput`, finds `__cli_result__:`, returns dict. `result` dict merges into response; no `result` -> `{"status": "ok"}`.
+`run_python_code()` and `run_python_script()` use a fresh `_cli_user_ns`,
+capture stdout and exceptions, parse the `__cli_result__:` marker, and
+auto-save dirty `/Game/` packages unless saving is disabled. A `result` dict
+merges into the response; a non-dict becomes `{"value": ...}`; no result
+becomes `{"status": "ok"}`. Use `--no-save` deliberately.
 
-### Bridge Plugin (`bridge_plugin/CliAnythingBridge/`)
+### Background Tasks
 
-Bundled C++ UE plugin auto-deployed to project `Plugins/`. Exposes:
-- `GetClassInfo` - `TFieldIterator` reflection, Details-panel parity
-- `GetActorComponentTree` - actor component hierarchy
-- `GetMaterialCompileErrors` - direct `FMaterialResource`
-- `GetMaterialHLSLCode` / `GetMaterialShaderSource` - shader source
-- `GetActiveViewportScreenBounds` - viewport crop bounds
+Long operations use `core/tasks.py`. `submit_task()` writes task JSON, starts a
+detached `_task-worker`, and returns a task ID. Poll with `task status`,
+`editor status <task_id>`, or `build status <task_id>`. Final states include
+`completed`, `failed`, `timeout`, and `cancelled`.
 
-### Async Task System (`core/tasks.py`)
+### Bridge Plugin
 
-Long ops (compile/cook/package/editor launch) use file task queue. `submit_task()` writes task JSON in temp, spawns detached worker: `ue-cli _task-worker run <task_id>`. Poll `task status <task_id>`. Final: `completed`, `failed`, `timeout`, `cancelled`.
+The bundled `CliAnythingBridge` exposes class reflection, actor component
+trees, material compile errors, material HLSL/shader source, and active
+viewport bounds. `editor plugin-upgrade` deploys and compiles it, restarts the
+editor when needed, then verifies the loaded version.
 
-### Skill System (`skills/`)
+## Change Rules
 
-`SKILL.md` tells agents how to use CLI. `references/` holds load-on-demand domain docs. `install-skills` copies docs into agent settings.
+- Keep `commands/` thin; put business logic in `core/`.
+- Preserve structured failures and explicit unknown states. Never report
+  success from empty or unverified output.
+- Use `UEEditorAPI` rather than adding separate Remote Control clients.
+- Keep editor-free unit tests mocked or synthetic.
+- Add focused tests for a change, then run the full unit suite.
+- Keep global CLI flags before command groups in docs and tests.
+- Update `README.md` for user-facing behavior changes.
+- Keep volatile values such as test counts out of persistent guidance.
 
-## Key Design Decisions
+## Agent Skill System
 
-- JSON default when stdout non-TTY. `--output json` must appear before subcommands.
-- `--project` sticky for session.
-- Port auto-detect from `Config/DefaultRemoteControl.ini` if not specified.
-- `_fix_argv_msys2()` repairs Git Bash `/Game/...` path mangling.
-- `script_runner` auto-saves dirty packages after each script run unless `save=False`.
-- Fresh `_cli_user_ns` per `run_python_code`; no variable leak.
+`cli_anything/unreal/skills/SKILL.md` is the packaged `ue-cli` skill;
+`references/` contains domain guides loaded on demand.
 
-## Testing Conventions
+`ue-cli install-skills` detects installed clients and writes only matching
+targets. `--all-targets` explicitly installs every built-in target. A custom
+`--target` must name the exact `ue-cli` leaf directory; existing target content
+is replaced while sibling skills remain untouched.
 
-- Unit tests mock `UEEditorAPI`; never require real editor.
-- `tmp_path` fixture writes under `.tmp_pytest/`.
-- `temp_project` builds fake UE project tree.
-- E2E gated behind `--e2e` + `UE_TEST_PROJECT`.
+## Known Unreal Behavior
+
+- `editor enable-remote` edits project settings; restart the editor before
+  expecting Remote Control console or Python calls to work.
+- Raw Remote Control reads of intrinsic transforms can fail; scene transform
+  reads already use editor Python.
+- UE 5.7 `DeleteAllMaterialExpressions` can skip expressions while deleting.
+  Follow the workaround in `ENGINE_BUGS.md`.
