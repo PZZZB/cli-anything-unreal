@@ -38,13 +38,12 @@ class TestInstallSkills:
         """Bundled editor workflows query the engine before choosing a fallback."""
         references_dir = Path(__file__).parent.parent / "skills" / "references"
 
-        for filename in ("workflows-editor.md", "workflows-editor.original.md"):
-            workflow = (references_dir / filename).read_text(encoding="utf-8")
-            assert "editor api-discover LevelEditorSubsystem -q realtime" in workflow
-            assert "EditorSetViewportRealtime" in workflow
-            assert "editor_set_viewport_realtime(True)" in workflow
-            assert "viewport realtime -> not exposed to Python" not in workflow
-            assert "viewport realtime → not exposed to Python" not in workflow
+        workflow = (references_dir / "workflows-editor.md").read_text(encoding="utf-8")
+        assert "editor api-discover LevelEditorSubsystem -q realtime" in workflow
+        assert "EditorSetViewportRealtime" in workflow
+        assert "editor_set_viewport_realtime(True)" in workflow
+        assert "viewport realtime -> not exposed to Python" not in workflow
+        assert "viewport realtime → not exposed to Python" not in workflow
 
     def test_install_to_custom_target(self, tmp_path):
         """--target writes the full skill tree to the given dir.

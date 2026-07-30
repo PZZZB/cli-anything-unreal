@@ -28,8 +28,8 @@ REQUIRED_REPORT_FIELDS = {
 }
 
 REPORTING_GUIDES = (PACKAGED_SKILL,)
-ISSUE_QUEUE_URL = "https://github.com/PZZZB/cli-anything-unreal/issues"
-GH_ISSUE_COMMAND = "gh issue create --repo PZZZB/cli-anything-unreal"
+ISSUE_QUEUE_URL = "https://github.com/PZZZB/ue-cli/issues"
+GH_ISSUE_COMMAND = "gh issue create --repo PZZZB/ue-cli"
 REPORTING_PREFERENCE = (
     "Prefer connected GitHub tooling when available; otherwise run "
     f"`{GH_ISSUE_COMMAND}`."

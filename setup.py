@@ -32,11 +32,11 @@ setup(
 
     author="cli-anything contributors",
     author_email="",
-    url="https://github.com/HKUDS/CLI-Anything",
+    url="https://github.com/PZZZB/ue-cli",
 
     project_urls={
-        "Source": "https://github.com/HKUDS/CLI-Anything",
-        "Tracker": "https://github.com/HKUDS/CLI-Anything/issues",
+        "Source": "https://github.com/PZZZB/ue-cli",
+        "Tracker": "https://github.com/PZZZB/ue-cli/issues",
     },
 
     license="MIT",
