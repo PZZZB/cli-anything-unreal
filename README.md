@@ -93,19 +93,28 @@ ue-cli --output json --project "$Project" editor enable-remote
 
 ## Install Agent Skills
 
-Skill installation is optional. With no `--target`, this command installs to exactly three locations:
+Skill installation is optional. By default, this command detects installed clients and writes only their matching global targets:
 
 ```powershell
 ue-cli install-skills
 ```
 
-- `%USERPROFILE%\.claude\skills\ue-cli`
-- `%USERPROFILE%\.codebuddy\agents\ue-cli`
-- `%USERPROFILE%\.gemini\skills\ue-cli`
+| Target | Installed when detected |
+| --- | --- |
+| `%USERPROFILE%\.agents\skills\ue-cli` | Codex, Cursor, GitHub Copilot, Windsurf, or OpenCode |
+| `%USERPROFILE%\.claude\skills\ue-cli` | Claude Code |
+| `%USERPROFILE%\.codebuddy\agents\ue-cli` | CodeBuddy |
+| `%USERPROFILE%\.gemini\skills\ue-cli` | Gemini CLI |
 
-Existing target directories are replaced, including custom `--target` directories. Cursor, Codex, and GitHub Copilot are not default targets.
+The shared `.agents` location follows the Agent Skills convention. If no supported client or initialized skill directory is detected, the command reports every target as `skipped` and creates no skill target. Run a newly installed client once so its profile directory exists, or explicitly install every built-in target:
 
-For another agent, first confirm that agent's skill-directory convention, then install only to that directory:
+```powershell
+ue-cli install-skills --all-targets
+```
+
+Existing `ue-cli` target directories are replaced, including custom `--target` directories. Other skills beside the `ue-cli` directory are not changed.
+
+For an agent with a different skill-directory convention, install directly to its exact `ue-cli` directory. The final directory name must be `ue-cli`; this prevents accidentally replacing an entire skills root:
 
 ```powershell
 ue-cli install-skills --target "C:/path/expected/by/your-agent/ue-cli"

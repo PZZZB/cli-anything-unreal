@@ -54,7 +54,7 @@ class TestInstallSkills:
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
-        target = tmp_path / "my_skill"
+        target = tmp_path / "custom-agent" / "skills" / "ue-cli"
         runner = CliRunner()
         result = runner.invoke(
             cli, ["--output", "json", "install-skills", "--target", str(target)]
@@ -78,7 +78,8 @@ class TestInstallSkills:
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
-        t1, t2 = tmp_path / "t1", tmp_path / "t2"
+        t1 = tmp_path / "agent-one" / "skills" / "ue-cli"
+        t2 = tmp_path / "agent-two" / "skills" / "ue-cli"
         result = CliRunner().invoke(cli, [
             "--output", "json", "install-skills",
             "--target", str(t1),
@@ -93,9 +94,12 @@ class TestInstallSkills:
         assert (t2 / "SKILL.md").is_file()
 
     def test_default_targets_use_ue_cli_directory(self, tmp_path):
-        """Default skill installs use the package/CLI name as their leaf dir."""
+        """Default installs cover native and cross-agent global directories."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
+
+        for marker in (".claude", ".codebuddy", ".codex", ".gemini"):
+            (tmp_path / marker).mkdir()
 
         with patch("pathlib.Path.home", return_value=tmp_path):
             result = CliRunner().invoke(cli, ["--output", "json", "install-skills"])
@@ -103,25 +107,116 @@ class TestInstallSkills:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["status"] == "success"
-        assert data["result"]["installed_count"] == 3
+        assert data["result"]["installed_count"] == 4
         paths = {
             name: Path(info["path"])
             for name, info in data["result"]["targets"].items()
         }
+        assert paths["agents_global"] == tmp_path / ".agents" / "skills" / "ue-cli"
         assert paths["claude_global"] == tmp_path / ".claude" / "skills" / "ue-cli"
         assert paths["codebuddy_global"] == tmp_path / ".codebuddy" / "agents" / "ue-cli"
         assert paths["gemini_global"] == tmp_path / ".gemini" / "skills" / "ue-cli"
         assert all((path / "SKILL.md").is_file() for path in paths.values())
+
+        clients = {
+            client
+            for info in data["result"]["targets"].values()
+            for client in info["clients"]
+        }
+        assert clients == {
+            "claude_code",
+            "codebuddy",
+            "codex",
+            "cursor",
+            "gemini",
+            "github_copilot",
+            "opencode",
+            "windsurf",
+        }
+        assert data["result"]["detected_clients"] == [
+            "claude_code",
+            "codebuddy",
+            "codex",
+            "gemini",
+        ]
+
+    def test_default_targets_skip_clients_that_are_not_detected(self, tmp_path):
+        """Default install does not create config dirs for absent clients."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        (tmp_path / ".cursor").mkdir()
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = CliRunner().invoke(cli, ["--output", "json", "install-skills"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["result"]
+        assert data["installed_count"] == 1
+        assert data["skipped_count"] == 3
+        assert data["detected_clients"] == ["cursor"]
+        assert data["targets"]["agents_global"]["installed"] is True
+        for name in ("claude_global", "codebuddy_global", "gemini_global"):
+            assert data["targets"][name]["skipped"] is True
+        assert not (tmp_path / ".claude").exists()
+        assert not (tmp_path / ".codebuddy").exists()
+        assert not (tmp_path / ".gemini").exists()
+
+    def test_all_targets_explicitly_installs_without_detected_clients(self, tmp_path):
+        """--all-targets is the opt-in path for provisioning every client."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = CliRunner().invoke(
+                cli,
+                ["--output", "json", "install-skills", "--all-targets"],
+            )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["result"]
+        assert data["installed_count"] == 4
+        assert data["skipped_count"] == 0
+        assert data["detected_clients"] == []
+        assert data["forced_all_targets"] is True
+
+    def test_no_detected_client_is_a_non_mutating_warning(self, tmp_path):
+        """A plain install on a clean profile reports why nothing was written."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = CliRunner().invoke(cli, ["--output", "json", "install-skills"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["result"]
+        assert data["installed_count"] == 0
+        assert data["skipped_count"] == 4
+        assert "No supported client was detected" in data["warning"]
+        for client_dir in (".agents", ".claude", ".codebuddy", ".gemini"):
+            assert not (tmp_path / client_dir).exists()
+
+    def test_copilot_vscode_extension_is_detected(self, tmp_path):
+        """Copilot can be present as a VS Code extension without ~/.copilot."""
+        from cli_anything.unreal.commands.skills import _detect_clients
+
+        extension = tmp_path / ".vscode" / "extensions" / "github.copilot-1.2.3"
+        extension.mkdir(parents=True)
+
+        assert _detect_clients(tmp_path) == {"github_copilot"}
 
     def test_install_overwrites_existing_target(self, tmp_path):
         """If the target already exists it is replaced, not merged."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
-        target = tmp_path / "existing"
-        target.mkdir()
+        skills_root = tmp_path / "existing" / "skills"
+        target = skills_root / "ue-cli"
+        sibling = skills_root / "other-skill"
+        target.mkdir(parents=True)
+        sibling.mkdir()
         # Leave a stray file that should NOT survive the reinstall.
         (target / "stray.txt").write_text("should be gone")
+        (sibling / "SKILL.md").write_text("must survive")
 
         result = CliRunner().invoke(
             cli, ["--output", "json", "install-skills", "--target", str(target)]
@@ -130,6 +225,45 @@ class TestInstallSkills:
 
         assert not (target / "stray.txt").exists()
         assert (target / "SKILL.md").is_file()
+        assert (sibling / "SKILL.md").read_text() == "must survive"
+
+    def test_custom_target_must_be_the_ue_cli_leaf(self, tmp_path):
+        """A broad skill root is rejected before any directory is removed."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        broad_target = tmp_path / "skills"
+        broad_target.mkdir()
+        sentinel = broad_target / "other-skill.txt"
+        sentinel.write_text("must survive")
+
+        result = CliRunner().invoke(
+            cli,
+            ["--output", "json", "install-skills", "--target", str(broad_target)],
+        )
+
+        assert result.exit_code == 2, result.output
+        data = json.loads(result.output)
+        assert data["code"] == "INVALID_SKILL_TARGET"
+        assert "must end with 'ue-cli'" in data["message"]
+        assert sentinel.read_text() == "must survive"
+
+    def test_custom_target_cannot_overlap_bundled_source(self, tmp_path):
+        """Source, ancestors, and descendants cannot be replacement targets."""
+        from cli_anything.unreal.commands import AppError
+        from cli_anything.unreal.commands.skills import _validate_custom_target
+
+        repo_root = tmp_path / "ue-cli"
+        source_dir = repo_root / "package" / "skills"
+        source_dir.mkdir(parents=True)
+
+        for unsafe_target in (
+            repo_root,
+            source_dir,
+            source_dir / "nested" / "ue-cli",
+        ):
+            with pytest.raises(AppError, match="overlaps the bundled skill source"):
+                _validate_custom_target(source_dir, unsafe_target)
 
 
 # ═══════════════════════════════════════════════════════════════════════
