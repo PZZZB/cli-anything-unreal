@@ -1131,11 +1131,6 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         if state.session.engine_root
         else None
     )
-    bridge_launch_prepare = None
-    if launch_binary_prefix == "UE4Editor":
-        from cli_anything.unreal.core.plugin_bridge import ensure_project_bridge_disabled_by_default
-
-        bridge_launch_prepare = ensure_project_bridge_disabled_by_default(state.session.project_dir)
 
     preflight = preflight_check(state.session.project_path, state.session.engine_root)
     remote_control = preflight.get("remote_control", {})
@@ -1180,7 +1175,6 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "startup_precheck": startup_precheck,
             "preflight": preflight,
             "remote_control_prepare": remote_control_prepare,
-            "bridge_launch_prepare": bridge_launch_prepare,
         }
         return save_task(task)
 
@@ -1210,45 +1204,31 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         new_port = resolve_available_port(state.session.project_dir, state.session.port)
         state.session.port = new_port
 
-    editor_binary_prefix = preflight.get("engine", {}).get("details", {}).get("editor_binary_prefix", "UnrealEditor")
     bridge_enabled_changed = False
-    bridge_binary_status = {"ready": False, "reason": "skipped_ue4", "message": "Bridge plugin skipped for UE4 projects."}
     compile_reason = None
-    if editor_binary_prefix == "UE4Editor":
-        from cli_anything.unreal.core.plugin_bridge import ensure_project_bridge_disabled_by_default
-
-        if bridge_launch_prepare is None:
-            bridge_launch_prepare = ensure_project_bridge_disabled_by_default(state.session.project_dir)
-        deploy_result = {
-            "deployed": False,
-            "action": "skipped_ue4",
-            "skipped": True,
-            "normalize_result": bridge_launch_prepare,
+    deploy_result = _deploy_bridge(state.session, state)
+    if not deploy_result.get("deployed", False):
+        task["status"] = "failed"
+        task["error"] = {
+            "code": "BRIDGE_DEPLOY_FAILED",
+            "message": deploy_result.get("error", "CliAnythingBridge deployment failed"),
+            "details": deploy_result,
         }
-    else:
-        deploy_result = _deploy_bridge(state.session, state)
-        if not deploy_result.get("deployed", False):
-            task["status"] = "failed"
-            task["error"] = {
-                "code": "BRIDGE_DEPLOY_FAILED",
-                "message": deploy_result.get("error", "CliAnythingBridge deployment failed"),
-                "details": deploy_result,
-            }
-            return save_task(task)
+        return save_task(task)
 
-        # Auto-enable CliAnythingBridge in .uproject
-        from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
-        bridge_enabled_changed = _ensure_plugin_enabled(state.session.project_dir, "CliAnythingBridge")
+    # Auto-enable CliAnythingBridge in .uproject
+    from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
+    bridge_enabled_changed = _ensure_plugin_enabled(state.session.project_dir, "CliAnythingBridge")
 
-        from cli_anything.unreal.core.plugin_bridge import get_plugin_binary_status
-        bridge_binary_status = get_plugin_binary_status(
-            state.session.project_dir,
-            engine_root=state.session.engine_root,
-        )
-        if not bridge_binary_status.get("ready", False):
-            compile_reason = bridge_binary_status.get("message") or "Bridge plugin binary is not ready."
-        elif deploy_result.get("action") != "already_up_to_date":
-            compile_reason = f"Bridge plugin source {deploy_result.get('action')} requires compilation."
+    from cli_anything.unreal.core.plugin_bridge import get_plugin_binary_status
+    bridge_binary_status = get_plugin_binary_status(
+        state.session.project_dir,
+        engine_root=state.session.engine_root,
+    )
+    if not bridge_binary_status.get("ready", False):
+        compile_reason = bridge_binary_status.get("message") or "Bridge plugin binary is not ready."
+    elif deploy_result.get("action") != "already_up_to_date":
+        compile_reason = f"Bridge plugin source {deploy_result.get('action')} requires compilation."
 
     if compile_reason:
         task = load_task(task["task_id"]) or task

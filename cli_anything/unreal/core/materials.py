@@ -229,21 +229,24 @@ else:
         # ── Material output connections ── which node feeds each output pin
         try:
             _prop_list = [
-                ("BaseColor", unreal.MaterialProperty.MP_BASE_COLOR),
-                ("Metallic", unreal.MaterialProperty.MP_METALLIC),
-                ("Specular", unreal.MaterialProperty.MP_SPECULAR),
-                ("Roughness", unreal.MaterialProperty.MP_ROUGHNESS),
-                ("Normal", unreal.MaterialProperty.MP_NORMAL),
-                ("EmissiveColor", unreal.MaterialProperty.MP_EMISSIVE_COLOR),
-                ("Opacity", unreal.MaterialProperty.MP_OPACITY),
-                ("OpacityMask", unreal.MaterialProperty.MP_OPACITY_MASK),
-                ("WorldPositionOffset", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET),
-                ("AmbientOcclusion", unreal.MaterialProperty.MP_AMBIENT_OCCLUSION),
-                ("SubsurfaceColor", unreal.MaterialProperty.MP_SUBSURFACE_COLOR),
+                ("BaseColor", "MP_BASE_COLOR"),
+                ("Metallic", "MP_METALLIC"),
+                ("Specular", "MP_SPECULAR"),
+                ("Roughness", "MP_ROUGHNESS"),
+                ("Normal", "MP_NORMAL"),
+                ("EmissiveColor", "MP_EMISSIVE_COLOR"),
+                ("Opacity", "MP_OPACITY"),
+                ("OpacityMask", "MP_OPACITY_MASK"),
+                ("WorldPositionOffset", "MP_WORLD_POSITION_OFFSET"),
+                ("AmbientOcclusion", "MP_AMBIENT_OCCLUSION"),
+                ("SubsurfaceColor", "MP_SUBSURFACE_COLOR"),
             ]
             mat_outputs = {{}}
-            for _name, _mp in _prop_list:
+            for _name, _mp_name in _prop_list:
                 try:
+                    _mp = getattr(unreal.MaterialProperty, _mp_name, None)
+                    if _mp is None:
+                        continue
                     _src = mel.get_material_property_input_node(mat, _mp)
                     if _src is not None:
                         _out = ""
@@ -626,21 +629,37 @@ else:
             if to_node_name == "__material_output__":
                 # Connect to material output property (BaseColor, Normal, etc.)
                 prop_map = {{
-                    "BaseColor": unreal.MaterialProperty.MP_BASE_COLOR,
-                    "Metallic": unreal.MaterialProperty.MP_METALLIC,
-                    "Specular": unreal.MaterialProperty.MP_SPECULAR,
-                    "Roughness": unreal.MaterialProperty.MP_ROUGHNESS,
-                    "Normal": unreal.MaterialProperty.MP_NORMAL,
-                    "EmissiveColor": unreal.MaterialProperty.MP_EMISSIVE_COLOR,
-                    "Opacity": unreal.MaterialProperty.MP_OPACITY,
-                    "OpacityMask": unreal.MaterialProperty.MP_OPACITY_MASK,
-                    "WorldPositionOffset": unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET,
-                    "AmbientOcclusion": unreal.MaterialProperty.MP_AMBIENT_OCCLUSION,
-                    "SubsurfaceColor": unreal.MaterialProperty.MP_SUBSURFACE_COLOR,
+                    "BaseColor": "MP_BASE_COLOR",
+                    "Metallic": "MP_METALLIC",
+                    "Specular": "MP_SPECULAR",
+                    "Roughness": "MP_ROUGHNESS",
+                    "Normal": "MP_NORMAL",
+                    "EmissiveColor": "MP_EMISSIVE_COLOR",
+                    "Opacity": "MP_OPACITY",
+                    "OpacityMask": "MP_OPACITY_MASK",
+                    "WorldPositionOffset": "MP_WORLD_POSITION_OFFSET",
+                    "AmbientOcclusion": "MP_AMBIENT_OCCLUSION",
+                    "SubsurfaceColor": "MP_SUBSURFACE_COLOR",
                 }}
-                mat_prop = prop_map.get(to_input)
-                if mat_prop is None:
+                mat_prop_name = prop_map.get(to_input)
+                mat_prop = getattr(unreal.MaterialProperty, mat_prop_name, None) if mat_prop_name else None
+                if mat_prop_name is None:
                     result = {{"error": "Unknown material property: " + to_input, "available_properties": list(prop_map.keys())}}
+                elif mat_prop is None:
+                    bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+                    connect_output = getattr(bridge, "connect_material_output", None) if bridge else None
+                    if connect_output is None:
+                        result = {{
+                            "error": "Material property is not exposed by this engine Python API: " + to_input,
+                            "suggestion": "Run editor plugin-upgrade, then relaunch the editor.",
+                        }}
+                    else:
+                        raw = connect_output(from_expr, from_output, to_input)
+                        result = json.loads(raw) if raw else {{"error": "Bridge returned empty result"}}
+                        if "error" not in result:
+                            mel.recompile_material(mat)
+                            mat.modify()
+                            result["from"] = from_node_name
                 else:
                     ok = mel.connect_material_property(from_expr, from_output, mat_prop)
                     if ok:
@@ -681,31 +700,44 @@ else:
     try:
         if to_node_name == "__material_output__":
             prop_map = {{
-                "BaseColor": unreal.MaterialProperty.MP_BASE_COLOR,
-                "Metallic": unreal.MaterialProperty.MP_METALLIC,
-                "Specular": unreal.MaterialProperty.MP_SPECULAR,
-                "Roughness": unreal.MaterialProperty.MP_ROUGHNESS,
-                "Normal": unreal.MaterialProperty.MP_NORMAL,
-                "EmissiveColor": unreal.MaterialProperty.MP_EMISSIVE_COLOR,
-                "Opacity": unreal.MaterialProperty.MP_OPACITY,
-                "OpacityMask": unreal.MaterialProperty.MP_OPACITY_MASK,
-                "WorldPositionOffset": unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET,
-                "AmbientOcclusion": unreal.MaterialProperty.MP_AMBIENT_OCCLUSION,
-                "SubsurfaceColor": unreal.MaterialProperty.MP_SUBSURFACE_COLOR,
+                "BaseColor": "MP_BASE_COLOR",
+                "Metallic": "MP_METALLIC",
+                "Specular": "MP_SPECULAR",
+                "Roughness": "MP_ROUGHNESS",
+                "Normal": "MP_NORMAL",
+                "EmissiveColor": "MP_EMISSIVE_COLOR",
+                "Opacity": "MP_OPACITY",
+                "OpacityMask": "MP_OPACITY_MASK",
+                "WorldPositionOffset": "MP_WORLD_POSITION_OFFSET",
+                "AmbientOcclusion": "MP_AMBIENT_OCCLUSION",
+                "SubsurfaceColor": "MP_SUBSURFACE_COLOR",
             }}
-            mat_prop = prop_map.get(to_input)
-            if mat_prop is None:
+            mat_prop_name = prop_map.get(to_input)
+            mat_prop = getattr(unreal.MaterialProperty, mat_prop_name, None) if mat_prop_name else None
+            if mat_prop_name is None:
                 result = {{"error": "Unknown material property: " + to_input, "available_properties": list(prop_map.keys())}}
             else:
-                # Disconnect by connecting None to the material property
-                # (there is no delete_material_property in UE 5.7+)
-                try:
-                    mel.connect_material_property(None, "", mat_prop)
-                except:
-                    pass
-                mel.recompile_material(mat)
-                mat.modify()
-                result = {{"status": "ok", "action": "disconnect", "from": from_node_name, "to": "MaterialOutput." + to_input}}
+                bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+                disconnect_output = getattr(bridge, "disconnect_material_output", None) if bridge else None
+                if disconnect_output is not None:
+                    raw = disconnect_output(mat, to_input)
+                    result = json.loads(raw) if raw else {{"error": "Bridge returned empty result"}}
+                elif mat_prop is None:
+                    result = {{
+                        "error": "Material property is not exposed by this engine Python API: " + to_input,
+                        "suggestion": "Run editor plugin-upgrade, then relaunch the editor.",
+                    }}
+                else:
+                    # Legacy fallback for older bridge versions.
+                    try:
+                        mel.connect_material_property(None, "", mat_prop)
+                    except Exception:
+                        pass
+                    result = {{"status": "ok", "action": "disconnect", "to": "MaterialOutput." + to_input}}
+                if "error" not in result:
+                    mel.recompile_material(mat)
+                    mat.modify()
+                    result["from"] = from_node_name
         else:
             # Find target node by name using unreal.find_object
             mat_obj_path = mat.get_path_name()
@@ -1755,6 +1787,7 @@ def recompile_material(
         api,
         _SCRIPT_RECOMPILE,
         project_dir=project_dir,
+        timeout=120.0,
         material_path=material_path,
     )
 

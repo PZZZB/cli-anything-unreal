@@ -16,6 +16,8 @@ public class CliAnythingBridge : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			"BlueprintGraph",
+			"MaterialEditor",
 			"RHI",
 			"RenderCore",
 			"Slate",

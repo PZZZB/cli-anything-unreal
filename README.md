@@ -1,13 +1,13 @@
 # ue-cli
 
-`ue-cli` controls Unreal Engine 5 editors from a shell. It provides structured commands for project inspection, editor lifecycle, materials, Blueprints, scenes, screenshots, CVars, Python, and UAT/UBT builds.
+`ue-cli` controls Unreal Engine 4.26 and Unreal Engine 5.x editors from a shell. It provides structured commands for project inspection, editor lifecycle, materials, Blueprints, scenes, screenshots, CVars, Python, and UAT/UBT builds.
 
 ## Requirements
 
 - Python 3.10+
 - Git, required by the GitHub install command below
-- Unreal Engine 5.x and a `.uproject`
-- A loadable Epic `RemoteControl` engine plugin; `editor launch` enables and configures it for the selected project
+- Unreal Engine 4.26 or 5.x and a `.uproject`
+- Loadable Epic `RemoteControl`, `PythonScriptPlugin`, and `EditorScriptingUtilities` engine plugins; `editor launch` enables and configures them for the selected project
 - Windows for the supported end-to-end workflow; editor discovery, launch, and UAT/UBT integration currently use Windows-specific paths and tools
 
 A coding agent is optional. Every command can also be run manually.
@@ -64,7 +64,7 @@ ue-cli --output json --project "$Project" editor launch
 
 First launch may:
 
-- enable `RemoteControl` and `CliAnythingBridge` in the `.uproject`;
+- enable `RemoteControl`, `PythonScriptPlugin`, `EditorScriptingUtilities`, and `CliAnythingBridge` in the `.uproject`;
 - create or update `Config/DefaultRemoteControl.ini`;
 - deploy `Plugins/CliAnythingBridge`;
 - compile the bridge when its binary is missing or stale.

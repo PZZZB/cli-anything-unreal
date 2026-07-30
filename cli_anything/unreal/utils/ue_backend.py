@@ -1515,6 +1515,11 @@ _REMOTE_CONTROL_REQUIRED_SETTINGS = {
     "bEnableRemotePythonExecution": "True",
     'AllowedOrigin': '"*"',
 }
+_EDITOR_AUTOMATION_PLUGINS = (
+    "RemoteControl",
+    "PythonScriptPlugin",
+    "EditorScriptingUtilities",
+)
 
 
 def _is_plugin_enabled_in_uproject(project_dir: str, plugin_name: str) -> bool:
@@ -1638,7 +1643,9 @@ def _check_plugin_loadable(
     modules = [
         m.get("Name")
         for m in data.get("Modules", [])
-        if m.get("Name") and m.get("Type", "Runtime") in {"Runtime", "RuntimeNoCommandlet", "Editor", "Developer"}
+        if m.get("Name")
+        and m.get("Type", "Runtime")
+        in {"Runtime", "RuntimeNoCommandlet", "Editor", "Developer", "UncookedOnly"}
     ]
     if not modules:
         return {
@@ -1715,8 +1722,9 @@ def ensure_remote_control_config(
     - Remote Python execution
     - Allow all origins
 
-    Also enables the RemoteControl plugin in the .uproject file, but only
-    after verifying that the plugin has loadable editor module binaries.
+    Also enables the RemoteControl, PythonScriptPlugin, and
+    EditorScriptingUtilities plugins in the .uproject file, but only after
+    verifying that all three plugins have loadable editor module binaries.
 
     Args:
         project_dir: Path to project root directory.
@@ -1731,28 +1739,36 @@ def ensure_remote_control_config(
     changes = []
 
     if engine_root:
-        loadable = _check_plugin_loadable(
-            project_dir,
-            "RemoteControl",
-            engine_root=engine_root,
-            editor_binary_prefix=editor_binary_prefix,
-        )
-        if not loadable.get("available", False):
-            return {
-                "status": "unavailable",
-                "file": str(config_file),
-                "changes": [],
-                "error": "RemoteControl plugin is not available/loadable for this engine; no project files were modified.",
-                "details": loadable,
-                "suggestion": "Install or compile the engine RemoteControl plugin first, or use an editor automation path that does not require Remote Control.",
-            }
+        for plugin_name in _EDITOR_AUTOMATION_PLUGINS:
+            loadable = _check_plugin_loadable(
+                project_dir,
+                plugin_name,
+                engine_root=engine_root,
+                editor_binary_prefix=editor_binary_prefix,
+            )
+            if not loadable.get("available", False):
+                return {
+                    "status": "unavailable",
+                    "file": str(config_file),
+                    "changes": [],
+                    "error": (
+                        f"{plugin_name} plugin is not available/loadable for this engine; "
+                        "no project files were modified."
+                    ),
+                    "details": loadable,
+                    "suggestion": (
+                        f"Install or compile the engine {plugin_name} plugin first. "
+                        "ue-cli editor automation requires RemoteControl, "
+                        "PythonScriptPlugin, and EditorScriptingUtilities."
+                    ),
+                }
 
     if not config_dir.is_dir():
         config_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure RemoteControl plugin is enabled
-    if _ensure_plugin_enabled(project_dir, "RemoteControl"):
-        changes.append("Enabled RemoteControl plugin in .uproject")
+    for plugin_name in _EDITOR_AUTOMATION_PLUGINS:
+        if _ensure_plugin_enabled(project_dir, plugin_name):
+            changes.append(f"Enabled {plugin_name} plugin in .uproject")
 
     if not config_file.exists():
         # Create new config
@@ -1805,6 +1821,20 @@ def check_remote_control_config(project_dir: str) -> dict:
         issues.append(
             "RemoteControl plugin is not enabled in .uproject. "
             "Remote Control HTTP server will not start. "
+            "Run: ue-cli editor enable-remote"
+        )
+
+    if not _is_plugin_enabled_in_uproject(project_dir, "PythonScriptPlugin"):
+        issues.append(
+            "PythonScriptPlugin is not enabled in .uproject. "
+            "Python script execution will fail. "
+            "Run: ue-cli editor enable-remote"
+        )
+
+    if not _is_plugin_enabled_in_uproject(project_dir, "EditorScriptingUtilities"):
+        issues.append(
+            "EditorScriptingUtilities is not enabled in .uproject. "
+            "Editor asset scripting will fail. "
             "Run: ue-cli editor enable-remote"
         )
 
@@ -2252,82 +2282,96 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
     # Check Remote Control config
     project_dir = str(Path(uproject_path).parent)
     rc_check = check_remote_control_config(project_dir)
-    rc_plugin_check = _check_plugin_loadable(
-        project_dir,
-        "RemoteControl",
-        engine_root=engine_root,
-        editor_binary_prefix=editor_binary_prefix,
+    plugin_checks = {
+        plugin_name: _check_plugin_loadable(
+            project_dir,
+            plugin_name,
+            engine_root=engine_root,
+            editor_binary_prefix=editor_binary_prefix,
+        )
+        for plugin_name in _EDITOR_AUTOMATION_PLUGINS
+    }
+    plugin_loadable = {
+        "available": all(check.get("available", False) for check in plugin_checks.values()),
+        "plugins": plugin_checks,
+    }
+    unavailable_plugin = next(
+        (
+            (plugin_name, check)
+            for plugin_name, check in plugin_checks.items()
+            if not check.get("available", False)
+        ),
+        None,
     )
+    rc_check["plugin_loadable"] = plugin_loadable
     rc_check["auto_fixed"] = False
-    if not rc_plugin_check.get("available", False):
+    if unavailable_plugin is not None:
+        plugin_name, unavailable_check = unavailable_plugin
         rc_check["configured"] = False
-        rc_check["plugin_loadable"] = rc_plugin_check
         rc_check["issues"] = [
-            "RemoteControl plugin is not available/loadable for this engine; preflight did not modify project files."
+            f"{plugin_name} plugin is not available/loadable for this engine; "
+            "preflight did not modify project files."
         ]
         rc_check["auto_fixed"] = False
         rc_check["fix_result"] = {
             "status": "unavailable",
             "file": str(Path(project_dir) / "Config" / "DefaultRemoteControl.ini"),
             "changes": [],
-            "error": "RemoteControl plugin is not available/loadable for this engine; preflight did not modify .uproject or DefaultRemoteControl.ini.",
-            "details": rc_plugin_check,
-            "suggestion": "Install or compile the engine RemoteControl plugin first, or use an editor automation path that does not require Remote Control.",
+            "error": (
+                f"{plugin_name} plugin is not available/loadable for this engine; "
+                "preflight did not modify .uproject or DefaultRemoteControl.ini."
+            ),
+            "details": unavailable_check,
+            "suggestion": (
+                f"Install or compile the engine {plugin_name} plugin first. "
+                "ue-cli editor automation requires RemoteControl, "
+                "PythonScriptPlugin, and EditorScriptingUtilities."
+            ),
         }
     elif not rc_check["configured"]:
-        rc_check["plugin_loadable"] = rc_plugin_check
         rc_check["suggestion"] = (
             "Run ue-cli editor enable-remote to prepare the project explicitly, "
-            "or use editor launch, which prepares Remote Control as part of startup."
+            "or use editor launch, which prepares editor automation as part of startup."
         )
 
     # Check bridge plugin readiness (informational — auto-fixed during launch)
     bridge_issues = []
-    if editor_binary_prefix == "UE4Editor":
-        bridge_issues.append("CliAnythingBridge is skipped for UE4 projects; UE5 bridge-only commands are unavailable.")
-        result["bridge_plugin"] = {
-            "ready": False,
-            "issues": bridge_issues,
-            "auto_fixable": False,
-            "skipped": True,
-        }
+    from cli_anything.unreal.core.plugin_bridge import get_bundled_version, get_plugin_binary_status
+
+    bridge_descriptor = Path(project_dir) / "Plugins" / "CliAnythingBridge" / "CliAnythingBridge.uplugin"
+    bundled_version = get_bundled_version()
+    deployed_version = None
+    if bridge_descriptor.is_file():
+        try:
+            deployed_version = json.loads(
+                bridge_descriptor.read_text(encoding="utf-8-sig")
+            ).get("VersionName")
+        except (OSError, json.JSONDecodeError):
+            bridge_issues.append("CliAnythingBridge descriptor could not be read")
     else:
-        from cli_anything.unreal.core.plugin_bridge import get_bundled_version, get_plugin_binary_status
+        bridge_issues.append("CliAnythingBridge plugin source is not deployed")
 
-        bridge_descriptor = Path(project_dir) / "Plugins" / "CliAnythingBridge" / "CliAnythingBridge.uplugin"
-        bundled_version = get_bundled_version()
-        deployed_version = None
-        if bridge_descriptor.is_file():
-            try:
-                deployed_version = json.loads(
-                    bridge_descriptor.read_text(encoding="utf-8-sig")
-                ).get("VersionName")
-            except (OSError, json.JSONDecodeError):
-                bridge_issues.append("CliAnythingBridge descriptor could not be read")
-        else:
-            bridge_issues.append("CliAnythingBridge plugin source is not deployed")
-
-        if bridge_descriptor.is_file() and deployed_version != bundled_version:
-            bridge_issues.append(
-                f"CliAnythingBridge plugin version {deployed_version or 'unknown'} "
-                f"does not match bundled version {bundled_version or 'unknown'}"
-            )
-        bridge_enabled = _is_plugin_enabled_in_uproject(project_dir, "CliAnythingBridge")
-        if not bridge_enabled:
-            bridge_issues.append("CliAnythingBridge plugin not enabled in .uproject")
-        bridge_binary_status = get_plugin_binary_status(project_dir, engine_root=engine_root)
-        if bridge_descriptor.is_file() and not bridge_binary_status.get("ready", False):
-            bridge_issues.append(
-                bridge_binary_status.get("message", "CliAnythingBridge binary is not ready")
-            )
-        result["bridge_plugin"] = {
-            "ready": len(bridge_issues) == 0,
-            "issues": bridge_issues,
-            "auto_fixable": True,
-            "bundled_version": bundled_version,
-            "deployed_version": deployed_version,
-            "binary_status": bridge_binary_status,
-        }
+    if bridge_descriptor.is_file() and deployed_version != bundled_version:
+        bridge_issues.append(
+            f"CliAnythingBridge plugin version {deployed_version or 'unknown'} "
+            f"does not match bundled version {bundled_version or 'unknown'}"
+        )
+    bridge_enabled = _is_plugin_enabled_in_uproject(project_dir, "CliAnythingBridge")
+    if not bridge_enabled:
+        bridge_issues.append("CliAnythingBridge plugin not enabled in .uproject")
+    bridge_binary_status = get_plugin_binary_status(project_dir, engine_root=engine_root)
+    if bridge_descriptor.is_file() and not bridge_binary_status.get("ready", False):
+        bridge_issues.append(
+            bridge_binary_status.get("message", "CliAnythingBridge binary is not ready")
+        )
+    result["bridge_plugin"] = {
+        "ready": len(bridge_issues) == 0,
+        "issues": bridge_issues,
+        "auto_fixable": True,
+        "bundled_version": bundled_version,
+        "deployed_version": deployed_version,
+        "binary_status": bridge_binary_status,
+    }
 
     result["engine"] = engine_check
     result["project"] = project_check

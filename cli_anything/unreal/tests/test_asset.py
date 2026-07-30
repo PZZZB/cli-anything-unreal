@@ -35,6 +35,9 @@ class TestAssets:
 
         script = mock_run.call_args.args[1]
         assert "def _cli_asset_class_matches" in script
+        assert "def _cli_asset_class_name" in script
+        assert "asset_class_path.asset_name" in script
+        assert "asset_data.asset_class" in script
         assert "_class_filter = 'Blueprint'" in script
         assert "return _cls == _filter or _cls.endswith('Blueprint')" in script
 
@@ -305,6 +308,24 @@ class TestAssets:
         assert "does_asset_exist" not in mock_exec.call_args.args[1]
 
     @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_property_get_normalizes_ue4_enum_repr(self, mock_exec):
+        from cli_anything.unreal.core.assets import get_asset_property
+
+        api = self._mock_api()
+        mock_exec.return_value = {
+            "targets": [
+                {"kind": "asset", "object_path": "/Game/M_Test.M_Test"},
+            ],
+        }
+        api.get_property.return_value = {
+            "BlendMode": "<BlendMode.BLEND_OPAQUE: 0>",
+        }
+
+        result = get_asset_property(api, "/Game/M_Test", "BlendMode")
+
+        assert result["BlendMode"] == "Opaque"
+
+    @patch("cli_anything.unreal.core.assets._exec")
     def test_asset_property_get_reads_blueprint_class_default_object(self, mock_exec):
         from cli_anything.unreal.core.assets import get_asset_property
 
@@ -339,8 +360,34 @@ class TestAssets:
         assert result["InitialLifeSpan"] == 37.5
         assert result["target"] == "class_default_object"
         assert api.get_property.call_count == 2
+        resolve_script = mock_exec.call_args_list[0].args[1]
+        assert '_asset.get_path_name() + "_C"' in resolve_script
         fallback_script = mock_exec.call_args_list[1].args[1]
         assert "get_editor_property" in fallback_script
+
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_property_get_normalizes_ue4_enum_repr_from_python(self, mock_exec):
+        from cli_anything.unreal.core.assets import get_asset_property
+
+        api = self._mock_api()
+        mock_exec.side_effect = [
+            {
+                "targets": [
+                    {"kind": "asset", "object_path": "/Game/M_Test.M_Test"},
+                ],
+            },
+            {
+                "BlendMode": "<BlendMode.BLEND_OPAQUE: 0>",
+                "read_via": "unreal_python",
+            },
+        ]
+        api.get_property.return_value = {
+            "error": "Property is not accessible via Remote Control"
+        }
+
+        result = get_asset_property(api, "/Game/M_Test", "BlendMode")
+
+        assert result["BlendMode"] == "Opaque"
 
     @patch("cli_anything.unreal.core.assets._exec")
     def test_asset_property_get_reports_load_failure(self, mock_exec):

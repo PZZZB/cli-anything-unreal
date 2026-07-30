@@ -192,7 +192,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.20"
+        assert version == "1.23"
 
     def test_bridge_composed_viewport_capture_uses_slate_screenshot(self):
         """HUD-inclusive capture must read the composed Slate viewport region."""

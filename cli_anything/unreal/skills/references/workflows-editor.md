@@ -24,7 +24,7 @@ Step 4: editor status (verify)
 
 Key points:
 - `preflight` (`editor preflight` also works) is strictly read-only. It reports engine/project, Remote Control, and bridge readiness but never changes `.uproject`, config, or plugin files. It is an editor-startup check, not a prerequisite for `build cook` or `build package`.
-- `editor enable-remote` is the explicit Remote Control mutation command. `editor launch` may perform the same Remote Control preparation and deploy/enable CliAnythingBridge because launching the controlled editor requires them.
+- `editor enable-remote` is the explicit editor-automation mutation command. It enables RemoteControl, PythonScriptPlugin, and EditorScriptingUtilities, then configures Remote Control. `editor launch` may perform the same preparation and deploy/enable CliAnythingBridge because launching the controlled editor requires them.
 - `editor launch` starts an interactive editor by default. Pass `--unattended` only when UE dialogs must be suppressed; `--no-unattended` explicitly preserves interactivity. It waits up to 30 seconds for the API, then returns `launching` with a task id if startup is still in progress. `--timeout` controls the background startup deadline and does not extend the foreground shell wait. Do not use `sleep`.
 - Async: `--no-wait`, then `editor status <task_id>` or `task status <task_id>`.
 - DLL locked build fail -> `editor close`, then compile. If `editor plugin-upgrade` reports `LNK1104` with `locked_file`, close/kill all UnrealEditor processes for that project and retry the reported command. `plugin-upgrade` waits for matching editor processes to exit before compiling, but another stale process can still hold third-party plugin DLLs.

@@ -79,6 +79,7 @@ setup(
     keywords=[
         "cli",
         "unreal-engine",
+        "ue4",
         "ue5",
         "materials",
         "automation",

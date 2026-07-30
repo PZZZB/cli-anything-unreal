@@ -1173,13 +1173,26 @@ class TestHTTPAPI:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _write_remote_control_project(project_dir: Path, *, remote_enabled: bool) -> Path:
+def _write_remote_control_project(
+    project_dir: Path,
+    *,
+    remote_enabled: bool,
+    python_enabled: bool = True,
+    editor_scripting_enabled: bool = True,
+) -> Path:
     project_dir.mkdir()
     uproject = project_dir / "RemoteOnly.uproject"
     uproject.write_text(json.dumps({
         "FileVersion": 3,
         "EngineAssociation": "5.7",
-        "Plugins": [{"Name": "RemoteControl", "Enabled": remote_enabled}],
+        "Plugins": [
+            {"Name": "RemoteControl", "Enabled": remote_enabled},
+            {"Name": "PythonScriptPlugin", "Enabled": python_enabled},
+            {
+                "Name": "EditorScriptingUtilities",
+                "Enabled": editor_scripting_enabled,
+            },
+        ],
     }), encoding="utf-8")
 
     config_dir = project_dir / "Config"
@@ -1209,6 +1222,40 @@ def test_check_remote_control_config_requires_enabled_plugin(tmp_path):
     assert any("RemoteControl plugin is not enabled" in issue for issue in result["issues"])
 
 
+def test_check_remote_control_config_requires_python_script_plugin(tmp_path):
+    """Remote Python settings still need PythonScriptPlugin loaded by the editor."""
+    from cli_anything.unreal.utils.ue_backend import check_remote_control_config
+
+    project_dir = tmp_path / "RemoteOnly"
+    _write_remote_control_project(
+        project_dir,
+        remote_enabled=True,
+        python_enabled=False,
+    )
+
+    result = check_remote_control_config(str(project_dir))
+
+    assert result["configured"] is False
+    assert any("PythonScriptPlugin is not enabled" in issue for issue in result["issues"])
+
+
+def test_check_remote_control_config_requires_editor_scripting_utilities(tmp_path):
+    """Asset commands need EditorAssetLibrary from EditorScriptingUtilities."""
+    from cli_anything.unreal.utils.ue_backend import check_remote_control_config
+
+    project_dir = tmp_path / "RemoteOnly"
+    _write_remote_control_project(
+        project_dir,
+        remote_enabled=True,
+        editor_scripting_enabled=False,
+    )
+
+    result = check_remote_control_config(str(project_dir))
+
+    assert result["configured"] is False
+    assert any("EditorScriptingUtilities is not enabled" in issue for issue in result["issues"])
+
+
 def test_ensure_remote_control_unavailable_error_is_command_neutral(tmp_path):
     from cli_anything.unreal.utils.ue_backend import ensure_remote_control_config
 
@@ -1221,6 +1268,114 @@ def test_ensure_remote_control_unavailable_error_is_command_neutral(tmp_path):
     assert result["status"] == "unavailable"
     assert "preflight" not in result["error"].lower()
     assert result["changes"] == []
+
+
+def test_ensure_remote_control_enables_both_required_plugins(tmp_path):
+    from cli_anything.unreal.utils.ue_backend import (
+        _is_plugin_enabled_in_uproject,
+        ensure_remote_control_config,
+    )
+
+    project_dir = tmp_path / "Automation"
+    project_dir.mkdir()
+    (project_dir / "Automation.uproject").write_text(
+        json.dumps({"FileVersion": 3, "Plugins": []}),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "cli_anything.unreal.utils.ue_backend._check_plugin_loadable",
+        return_value={"available": True, "reason": "test"},
+    ) as mock_loadable:
+        result = ensure_remote_control_config(
+            str(project_dir),
+            engine_root="F:/MockEngine",
+        )
+
+    assert result["status"] == "created"
+    assert _is_plugin_enabled_in_uproject(str(project_dir), "RemoteControl") is True
+    assert _is_plugin_enabled_in_uproject(str(project_dir), "PythonScriptPlugin") is True
+    assert [call.args[1] for call in mock_loadable.call_args_list] == [
+        "RemoteControl",
+        "PythonScriptPlugin",
+        "EditorScriptingUtilities",
+    ]
+
+
+def test_ensure_remote_control_does_not_partially_enable_plugins(tmp_path):
+    from cli_anything.unreal.utils.ue_backend import ensure_remote_control_config
+
+    project_dir = tmp_path / "Automation"
+    project_dir.mkdir()
+    uproject = project_dir / "Automation.uproject"
+    uproject.write_text(
+        json.dumps({"FileVersion": 3, "Plugins": []}),
+        encoding="utf-8",
+    )
+    before = uproject.read_bytes()
+
+    with patch(
+        "cli_anything.unreal.utils.ue_backend._check_plugin_loadable",
+        side_effect=[
+            {"available": True, "plugin": "RemoteControl", "reason": "test"},
+            {
+                "available": False,
+                "plugin": "PythonScriptPlugin",
+                "reason": "module_missing",
+            },
+        ],
+    ):
+        result = ensure_remote_control_config(
+            str(project_dir),
+            engine_root="F:/MockEngine",
+        )
+
+    assert result["status"] == "unavailable"
+    assert "PythonScriptPlugin plugin is not available" in result["error"]
+    assert result["changes"] == []
+    assert uproject.read_bytes() == before
+    assert not (project_dir / "Config").exists()
+
+
+def test_plugin_loadability_checks_ue4_uncooked_only_modules(tmp_path):
+    from cli_anything.unreal.utils.ue_backend import _check_plugin_loadable
+
+    project_dir = tmp_path / "Project"
+    project_dir.mkdir()
+    engine_root = tmp_path / "UE4Engine"
+    plugin_dir = (
+        engine_root
+        / "Engine"
+        / "Plugins"
+        / "Experimental"
+        / "PythonScriptPlugin"
+    )
+    source_dir = plugin_dir / "Source" / "PythonScriptPlugin"
+    source_dir.mkdir(parents=True)
+    (plugin_dir / "PythonScriptPlugin.uplugin").write_text(
+        json.dumps({
+            "FileVersion": 3,
+            "Modules": [
+                {"Name": "PythonScriptPlugin", "Type": "UncookedOnly"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (source_dir / "PythonScriptPlugin.Build.cs").write_text(
+        "// source only",
+        encoding="utf-8",
+    )
+
+    result = _check_plugin_loadable(
+        str(project_dir),
+        "PythonScriptPlugin",
+        engine_root=str(engine_root),
+        editor_binary_prefix="UE4Editor",
+    )
+
+    assert result["available"] is False
+    assert result["reason"] == "source_only_modules_uncompiled"
+    assert result["modules"] == ["PythonScriptPlugin"]
 
 
 def test_preflight_is_read_only_when_remote_control_plugin_is_disabled(tmp_path):
@@ -1388,7 +1543,8 @@ def test_preflight_does_not_enable_unavailable_remote_control_plugin(tmp_path):
     assert result["remote_control"]["fix_result"]["status"] == "unavailable"
     assert "RemoteControl plugin is not available" in result["remote_control"]["fix_result"]["error"]
     assert result["ready"] is False
-    assert result["bridge_plugin"]["skipped"] is True
+    assert result["bridge_plugin"]["auto_fixable"] is True
+    assert "CliAnythingBridge plugin source is not deployed" in result["bridge_plugin"]["issues"]
     assert not (project_dir / "Plugins" / "CliAnythingBridge").exists()
 
 

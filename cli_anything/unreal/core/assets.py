@@ -10,7 +10,26 @@ not reliably perform write operations like DeleteAsset.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
+
+
+_UNREAL_ENUM_RE = re.compile(
+    r"^<[^.<>]+\.([A-Z][A-Z0-9_]*):\s*-?\d+>$"
+)
+
+
+def _normalize_unreal_property_value(value):
+    """Normalize UE4 Python enum reprs to the stable UE property text form."""
+    if not isinstance(value, str):
+        return value
+    match = _UNREAL_ENUM_RE.fullmatch(value.strip())
+    if not match:
+        return value
+    tokens = match.group(1).split("_")
+    if len(tokens) > 1:
+        tokens = tokens[1:]
+    return "".join(token.title() for token in tokens)
 
 
 def _asset_class_matches(asset_class: str, class_filter: str | None) -> bool:
@@ -219,6 +238,12 @@ def _cli_asset_class_matches(_cls, _filter):
         return _cls == _filter or _cls.endswith('Blueprint')
     return _cls == _filter
 
+def _cli_asset_class_name(_asset_data):
+    try:
+        return str(_asset_data.asset_class_path.asset_name)
+    except Exception:
+        return str(_asset_data.asset_class)
+
 # Case-insensitive regex for name query (re.search — partial match OK).
 _name_pat = None
 if _name_query:
@@ -234,7 +259,7 @@ if _name_pat is False:
 else:
     _results = []
     for _ad in _assets:
-        _cls = str(_ad.asset_class_path.asset_name)
+        _cls = _cli_asset_class_name(_ad)
         _name = str(_ad.asset_name)
 
         if not _cli_asset_class_matches(_cls, _class_filter):
@@ -460,6 +485,13 @@ else:
             _generated_class = _asset.get_editor_property("generated_class")
         except Exception:
             _generated_class = None
+    if _generated_class is None:
+        try:
+            _generated_class = _u.load_object(
+                None, _asset.get_path_name() + "_C"
+            )
+        except Exception:
+            _generated_class = None
     if _generated_class is not None:
         try:
             _cdo = _u.get_default_object(_generated_class)
@@ -490,7 +522,12 @@ else:
         remote_result = api.get_property(object_path, property_name)
         remote_error = remote_result.get("error") or remote_result.get("errorMessage")
         if not remote_error:
-            return remote_result
+            normalized = dict(remote_result)
+            if property_name in normalized:
+                normalized[property_name] = _normalize_unreal_property_value(
+                    normalized[property_name]
+                )
+            return normalized
         remote_errors.append({
             "target": target.get("kind"),
             "object_path": object_path,
@@ -574,6 +611,10 @@ if not _property_read:
     }}
 '''
     fallback = _exec(api, fallback_script, None)
+    if property_name in fallback:
+        fallback[property_name] = _normalize_unreal_property_value(
+            fallback[property_name]
+        )
     if fallback.get("error") and remote_errors:
         fallback["remote_control_attempts"] = remote_errors
     return fallback

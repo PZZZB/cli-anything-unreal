@@ -3,10 +3,11 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialInterface.h"
+#include "MaterialEditingLibrary.h"
 #include "Engine/Texture2D.h"
 #include "Engine/Texture.h"
 #include "MaterialShared.h"
-#include "RHIShaderPlatform.h"
+#include "RHI.h"
 #include "ShaderCompiler.h"
 #include "ShaderCompilerCore.h"
 
@@ -21,6 +22,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "RenderingThread.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include "Slate/SceneViewport.h"
 
 #include "GameFramework/Actor.h"
@@ -49,11 +51,52 @@ static FString WidgetJson(UWidget* Widget, UWidgetBlueprint* Blueprint);
 class FMaterialResourceExtractSource : public FMaterialResource
 {
 public:
+#if ENGINE_MAJOR_VERSION >= 5
 	virtual void SetupExtraCompilationSettings(FExtraShaderCompilerSettings& Settings) const override
+#else
+	virtual void SetupExtaCompilationSettings(const EShaderPlatform Platform, FExtraShaderCompilerSettings& Settings) const override
+#endif
 	{
 		Settings.bExtractShaderSource = true;
 	}
 };
+
+#if ENGINE_MAJOR_VERSION < 5
+static const TCHAR* GetTextureSourceFormatName426(ETextureSourceFormat Format)
+{
+	switch (Format)
+	{
+	case TSF_G8: return TEXT("TSF_G8");
+	case TSF_BGRA8: return TEXT("TSF_BGRA8");
+	case TSF_BGRE8: return TEXT("TSF_BGRE8");
+	case TSF_RGBA16: return TEXT("TSF_RGBA16");
+	case TSF_RGBA16F: return TEXT("TSF_RGBA16F");
+	case TSF_RGBA8: return TEXT("TSF_RGBA8");
+	case TSF_RGBE8: return TEXT("TSF_RGBE8");
+	case TSF_G16: return TEXT("TSF_G16");
+	default: return TEXT("TSF_Invalid");
+	}
+}
+
+static int32 GetTextureSourceNumComponents426(ETextureSourceFormat Format)
+{
+	switch (Format)
+	{
+	case TSF_G8:
+	case TSF_G16:
+		return 1;
+	case TSF_BGRA8:
+	case TSF_BGRE8:
+	case TSF_RGBA16:
+	case TSF_RGBA16F:
+	case TSF_RGBA8:
+	case TSF_RGBE8:
+		return 4;
+	default:
+		return 0;
+	}
+}
+#endif
 
 TArray<FString> UCliAnythingBridgeLibrary::GetMaterialCompileErrors(UMaterialInterface* Material)
 {
@@ -64,7 +107,11 @@ TArray<FString> UCliAnythingBridgeLibrary::GetMaterialCompileErrors(UMaterialInt
 	const EShaderPlatform Platform = GMaxRHIShaderPlatform;
 	for (int32 QualityLevel = 0; QualityLevel < EMaterialQualityLevel::Num; ++QualityLevel)
 	{
+#if ENGINE_MAJOR_VERSION >= 5
 		const FMaterialResource* Resource = BaseMat->GetMaterialResource(Platform, static_cast<EMaterialQualityLevel::Type>(QualityLevel));
+#else
+		const FMaterialResource* Resource = BaseMat->GetMaterialResource(GMaxRHIFeatureLevel, static_cast<EMaterialQualityLevel::Type>(QualityLevel));
+#endif
 		if (!Resource) continue;
 		for (const FString& Error : Resource->GetCompileErrors()) { Result.AddUnique(Error); }
 	}
@@ -168,17 +215,27 @@ FString UCliAnythingBridgeLibrary::GetTextureSourceInfo(UTexture2D* Texture)
 	const int32 NumLayers = Source.GetNumLayers();
 	const int32 NumBlocks = Source.GetNumBlocks();
 	const int64 SizeOnDisk = Source.GetSizeOnDisk();
-	const bool bHasPayload = Source.HasPayloadData();
 	const ETextureSourceFormat Format = Source.GetFormat();
 	const bool bValidFormat = Format > TSF_Invalid && Format < TSF_MAX;
+#if ENGINE_MAJOR_VERSION >= 5
+	const bool bHasPayload = Source.HasPayloadData();
 	const FTextureSourceFormatInfo& FormatInfo = GTextureSourceFormats[bValidFormat ? Format : TSF_Invalid];
+	const FString FormatName = bValidFormat ? FString(FormatInfo.Name) : FString(TEXT("TSF_Invalid"));
+	const int32 BytesPerPixel = bValidFormat ? FormatInfo.BytesPerPixel : 0;
+	const int32 NumComponents = bValidFormat ? FormatInfo.NumComponents : 0;
+#else
+	const bool bHasPayload = SizeOnDisk > 0;
+	const FString FormatName = GetTextureSourceFormatName426(Format);
+	const int32 BytesPerPixel = bValidFormat ? FTextureSource::GetBytesPerPixel(Format) : 0;
+	const int32 NumComponents = GetTextureSourceNumComponents426(Format);
+#endif
 
 	FString Json = TEXT("{\"status\":\"ok\",\"asset\":\"") + JsonEscape(Texture->GetPathName()) + TEXT("\"");
 	Json += FString::Printf(TEXT(",\"source_size\":{\"x\":%lld,\"y\":%lld,\"slices\":%d}"), SizeX, SizeY, NumSlices);
-	Json += TEXT(",\"source_format\":\"") + JsonEscape(bValidFormat ? FString(FormatInfo.Name) : FString(TEXT("TSF_Invalid"))) + TEXT("\"");
+	Json += TEXT(",\"source_format\":\"") + JsonEscape(FormatName) + TEXT("\"");
 	Json += FString::Printf(TEXT(",\"source_format_value\":%d"), static_cast<int32>(Format));
 	Json += FString::Printf(TEXT(",\"num_mips\":%d,\"num_layers\":%d,\"num_blocks\":%d"), NumMips, NumLayers, NumBlocks);
-	Json += FString::Printf(TEXT(",\"bytes_per_pixel\":%d,\"num_components\":%d,\"size_on_disk\":%lld"), bValidFormat ? FormatInfo.BytesPerPixel : 0, bValidFormat ? FormatInfo.NumComponents : 0, SizeOnDisk);
+	Json += FString::Printf(TEXT(",\"bytes_per_pixel\":%d,\"num_components\":%d,\"size_on_disk\":%lld"), BytesPerPixel, NumComponents, SizeOnDisk);
 	Json += TEXT(",\"has_payload\":") + FString(bHasPayload ? TEXT("true") : TEXT("false"));
 
 	const uint8* Data = nullptr;
@@ -186,7 +243,11 @@ FString UCliAnythingBridgeLibrary::GetTextureSourceInfo(UTexture2D* Texture)
 	if (bHasPayload && NumMips > 0 && SizeX > 0 && SizeY > 0)
 	{
 		MipSize = Source.CalcMipSize(0);
+#if ENGINE_MAJOR_VERSION >= 5
 		Data = Source.LockMipReadOnly(0);
+#else
+		Data = Source.LockMip(0);
+#endif
 	}
 	Json += FString::Printf(TEXT(",\"mip0_bytes\":%lld"), MipSize);
 
@@ -243,14 +304,14 @@ FString UCliAnythingBridgeLibrary::GetTextureSourceInfo(UTexture2D* Texture)
 	return Json;
 }
 
-FIntVector4 UCliAnythingBridgeLibrary::GetActiveViewportScreenBounds()
+FVector4 UCliAnythingBridgeLibrary::GetActiveViewportScreenBounds()
 {
-	FIntVector4 Bounds(0, 0, 0, 0);
+	FVector4 Bounds(0.0f, 0.0f, 0.0f, 0.0f);
 	if (!FModuleManager::Get().IsModuleLoaded("LevelEditor")) return Bounds;
 	FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>("LevelEditor");
 	TSharedPtr<ILevelEditor> ActiveLevelEditor = LevelEditorModule.GetFirstLevelEditor();
 	if (!ActiveLevelEditor.IsValid()) return Bounds;
-	TSharedPtr<SLevelViewport> ActiveViewport = ActiveLevelEditor->GetActiveViewportInterface();
+	auto ActiveViewport = ActiveLevelEditor->GetActiveViewportInterface();
 	if (!ActiveViewport.IsValid()) return Bounds;
 	TSharedPtr<SViewport> ViewportWidget = ActiveViewport->GetViewportWidget().Pin();
 	if (!ViewportWidget.IsValid()) return Bounds;
@@ -278,10 +339,10 @@ bool UCliAnythingBridgeLibrary::TakeActiveViewportScreenshot(const FString& Outp
 		return false;
 	}
 
-	TSharedPtr<SLevelViewport> ActiveViewport = ActiveLevelEditor->GetActiveViewportInterface();
+	auto ActiveViewport = ActiveLevelEditor->GetActiveViewportInterface();
 	if (!ActiveViewport.IsValid())
 	{
-		for (const TSharedPtr<SLevelViewport>& Viewport : ActiveLevelEditor->GetViewports())
+		for (const auto& Viewport : ActiveLevelEditor->GetViewports())
 		{
 			if (Viewport.IsValid() && Viewport->GetSharedActiveViewport().IsValid())
 			{
@@ -351,13 +412,18 @@ bool UCliAnythingBridgeLibrary::TakeActiveViewportScreenshot(const FString& Outp
 		Pixels[Index].A = 255;
 	}
 
+#if ENGINE_MAJOR_VERSION >= 5
 	TArray64<uint8> CompressedPng;
 	FImageUtils::PNGCompressImageArray(
 		Size.X,
 		Size.Y,
 		TArrayView64<const FColor>(Pixels.GetData(), PixelCount),
 		CompressedPng);
-	if (CompressedPng.IsEmpty())
+#else
+	TArray<uint8> CompressedPng;
+	FImageUtils::CompressImageArray(Size.X, Size.Y, Pixels, CompressedPng);
+#endif
+	if (CompressedPng.Num() == 0)
 	{
 		return false;
 	}
@@ -387,7 +453,78 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.20");
+	return TEXT("1.23");
+}
+
+static bool ResolveMaterialProperty(const FString& PropertyName, EMaterialProperty& OutProperty)
+{
+	FString Name = PropertyName;
+	Name.TrimStartAndEndInline();
+	if (Name.Equals(TEXT("BaseColor"), ESearchCase::IgnoreCase)) OutProperty = MP_BaseColor;
+	else if (Name.Equals(TEXT("Metallic"), ESearchCase::IgnoreCase)) OutProperty = MP_Metallic;
+	else if (Name.Equals(TEXT("Specular"), ESearchCase::IgnoreCase)) OutProperty = MP_Specular;
+	else if (Name.Equals(TEXT("Roughness"), ESearchCase::IgnoreCase)) OutProperty = MP_Roughness;
+	else if (Name.Equals(TEXT("Normal"), ESearchCase::IgnoreCase)) OutProperty = MP_Normal;
+	else if (Name.Equals(TEXT("EmissiveColor"), ESearchCase::IgnoreCase)) OutProperty = MP_EmissiveColor;
+	else if (Name.Equals(TEXT("Opacity"), ESearchCase::IgnoreCase)) OutProperty = MP_Opacity;
+	else if (Name.Equals(TEXT("OpacityMask"), ESearchCase::IgnoreCase)) OutProperty = MP_OpacityMask;
+	else if (Name.Equals(TEXT("WorldPositionOffset"), ESearchCase::IgnoreCase)) OutProperty = MP_WorldPositionOffset;
+	else if (Name.Equals(TEXT("AmbientOcclusion"), ESearchCase::IgnoreCase)) OutProperty = MP_AmbientOcclusion;
+	else if (Name.Equals(TEXT("SubsurfaceColor"), ESearchCase::IgnoreCase)) OutProperty = MP_SubsurfaceColor;
+	else return false;
+	return true;
+}
+
+FString UCliAnythingBridgeLibrary::ConnectMaterialOutput(UMaterialExpression* FromExpression, const FString& FromOutputName, const FString& PropertyName)
+{
+	if (!FromExpression)
+	{
+		return JsonError(TEXT("Source expression is null"));
+	}
+
+	EMaterialProperty Property = MP_MAX;
+	if (!ResolveMaterialProperty(PropertyName, Property))
+	{
+		return JsonError(TEXT("Unknown material property: ") + PropertyName);
+	}
+	if (!UMaterialEditingLibrary::ConnectMaterialProperty(FromExpression, FromOutputName, Property))
+	{
+		return JsonError(TEXT("ConnectMaterialProperty returned false for: ") + PropertyName);
+	}
+
+	return TEXT("{\"status\":\"ok\",\"action\":\"connect\",\"to\":\"MaterialOutput.")
+		+ JsonEscape(PropertyName)
+		+ TEXT("\"}");
+}
+
+FString UCliAnythingBridgeLibrary::DisconnectMaterialOutput(UMaterial* Material, const FString& PropertyName)
+{
+	if (!Material)
+	{
+		return JsonError(TEXT("Material is null"));
+	}
+
+	EMaterialProperty Property = MP_MAX;
+	if (!ResolveMaterialProperty(PropertyName, Property))
+	{
+		return JsonError(TEXT("Unknown material property: ") + PropertyName);
+	}
+
+	FExpressionInput* Input = Material->GetExpressionInputForProperty(Property);
+	if (!Input)
+	{
+		return JsonError(TEXT("Material property input is unavailable: ") + PropertyName);
+	}
+
+	Material->Modify();
+	Input->Expression = nullptr;
+	Input->OutputIndex = 0;
+	Material->PostEditChange();
+	Material->MarkPackageDirty();
+
+	return TEXT("{\"status\":\"ok\",\"action\":\"disconnect\",\"to\":\"MaterialOutput.")
+		+ JsonEscape(PropertyName)
+		+ TEXT("\"}");
 }
 
 FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)
@@ -413,8 +550,12 @@ TArray<FString> UCliAnythingBridgeLibrary::GetMaterialHLSLCode(UMaterialInterfac
 	if (!Material || OutputPath.IsEmpty()) return Result;
 	UMaterial* BaseMat = Material->GetMaterial();
 	if (!BaseMat) return Result;
+#if ENGINE_MAJOR_VERSION >= 5
 	const EShaderPlatform Platform = GMaxRHIShaderPlatform;
 	FMaterialResource* Resource = BaseMat->GetMaterialResource(Platform);
+#else
+	FMaterialResource* Resource = BaseMat->GetMaterialResource(GMaxRHIFeatureLevel);
+#endif
 	if (!Resource) return Result;
 	FString Source;
 	if (!Resource->GetMaterialExpressionSource(Source)) return Result;
@@ -434,9 +575,17 @@ TArray<FString> UCliAnythingBridgeLibrary::GetMaterialShaderSource(UMaterialInte
 	const EShaderPlatform Platform = GMaxRHIShaderPlatform;
 
 	FMaterialResourceExtractSource* ExtractResource = new FMaterialResourceExtractSource();
+#if ENGINE_MAJOR_VERSION >= 5
 	ExtractResource->SetMaterial(BaseMat, nullptr, Platform, EMaterialQualityLevel::High);
+#else
+	ExtractResource->SetMaterial(BaseMat, nullptr, GMaxRHIFeatureLevel, EMaterialQualityLevel::High);
+#endif
 	BaseMat->UpdateCachedExpressionData();
+#if ENGINE_MAJOR_VERSION >= 5
 	ExtractResource->CacheShaders(EMaterialShaderPrecompileMode::Default);
+#else
+	ExtractResource->CacheShaders(Platform);
+#endif
 	GShaderCompilingManager->FinishAllCompilation();
 
 	const bool bFinished = ExtractResource->IsCompilationFinished();
@@ -449,8 +598,12 @@ TArray<FString> UCliAnythingBridgeLibrary::GetMaterialShaderSource(UMaterialInte
 		{
 			const FShaderId& ShaderId = Pair.Key;
 			const TShaderRef<FShader>& ShaderRef = Pair.Value;
+#if ENGINE_MAJOR_VERSION >= 5
 			const FMemoryImageString* Source = ShaderMap->GetShaderSource(
 				ShaderRef.GetVertexFactoryType(), ShaderRef.GetType(), ShaderId.PermutationId);
+#else
+			const FMemoryImageString* Source = ShaderMap->GetShaderSource(ShaderRef.GetType()->GetFName());
+#endif
 			if (!Source || Source->Len() == 0) continue;
 
 			FString ShaderName = ShaderRef.GetType()->GetName();
@@ -484,6 +637,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetMaterialShaderSource(UMaterialInte
 		}
 	}
 
+#if ENGINE_MAJOR_VERSION >= 5
 	TArray<TRefCountPtr<FMaterial>> MaterialsToDelete;
 	if (ExtractResource->PrepareDestroy_GameThread())
 	{
@@ -494,6 +648,9 @@ TArray<FString> UCliAnythingBridgeLibrary::GetMaterialShaderSource(UMaterialInte
 	{
 		delete ExtractResource;
 	}
+#else
+	delete ExtractResource;
+#endif
 	return Result;
 }
 
@@ -603,7 +760,11 @@ static FString WidgetJson(UWidget* Widget, UWidgetBlueprint* Blueprint)
 
 	if (UImage* Image = Cast<UImage>(Widget))
 	{
+#if ENGINE_MAJOR_VERSION >= 5
 		const FSlateBrush& Brush = Image->GetBrush();
+#else
+		const FSlateBrush& Brush = Image->Brush;
+#endif
 		UObject* Resource = Brush.GetResourceObject();
 		const FVector2D BrushSize = Brush.GetImageSize();
 		Json += TEXT(",\"brush\":{");
@@ -649,25 +810,60 @@ FString UCliAnythingBridgeLibrary::SetWidgetBlueprintRoot(UWidgetBlueprint* Blue
 {
 	if (!Blueprint) return JsonError(TEXT("WidgetBlueprint is null."));
 	if (!Blueprint->WidgetTree) return JsonError(TEXT("WidgetBlueprint has no WidgetTree."));
-	if (Blueprint->WidgetTree->RootWidget) return JsonError(TEXT("WidgetBlueprint already has a root widget."));
 
 	UClass* RootClass = FindWidgetClassByName(RootWidgetClassName.IsEmpty() ? TEXT("CanvasPanel") : RootWidgetClassName);
 	if (!RootClass) return JsonError(TEXT("Root widget class not found or not a UWidget: ") + RootWidgetClassName);
 
 	const FName RootName = RootWidgetName.IsEmpty() ? FName(TEXT("RootCanvas")) : FName(*RootWidgetName);
+	UWidget* Root = Blueprint->WidgetTree->RootWidget;
+	if (Root)
+	{
+		if (Root->GetClass() != RootClass)
+		{
+			return JsonError(
+				TEXT("WidgetBlueprint already has a root widget of class ")
+				+ Root->GetClass()->GetName()
+				+ TEXT("; requested ")
+				+ RootClass->GetName()
+			);
+		}
+
+		UWidget* NameOwner = Blueprint->WidgetTree->FindWidget(RootName);
+		if (NameOwner && NameOwner != Root)
+		{
+			return JsonError(TEXT("Widget name already exists: ") + RootName.ToString());
+		}
+
+		Root->Modify();
+		if (Root->GetFName() != RootName && !Root->Rename(*RootName.ToString(), Blueprint->WidgetTree))
+		{
+			return JsonError(TEXT("Failed to rename existing root widget to: ") + RootName.ToString());
+		}
+		Root->bIsVariable = bIsVariable;
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		Blueprint->MarkPackageDirty();
+
+		FString ExistingJson = TEXT("{\"status\":\"ok\",\"action\":\"set_root\",\"root\":");
+		ExistingJson += WidgetJson(Root, Blueprint);
+		ExistingJson += TEXT("}");
+		return ExistingJson;
+	}
+
 	if (Blueprint->WidgetTree->FindWidget(RootName))
 	{
 		return JsonError(TEXT("Widget name already exists: ") + RootName.ToString());
 	}
 
-	UWidget* Root = Blueprint->WidgetTree->ConstructWidget<UWidget>(RootClass, RootName);
+	Root = Blueprint->WidgetTree->ConstructWidget<UWidget>(RootClass, RootName);
 	if (!Root) return JsonError(TEXT("Failed to construct root widget."));
 
 	Root->bIsVariable = bIsVariable;
 	Blueprint->WidgetTree->RootWidget = Root;
 	if (bIsVariable)
 	{
+#if ENGINE_MAJOR_VERSION >= 5
 		Blueprint->OnVariableAdded(Root->GetFName());
+#endif
 	}
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 	Blueprint->MarkPackageDirty();
@@ -734,7 +930,9 @@ FString UCliAnythingBridgeLibrary::AddWidgetToCanvas(UWidgetBlueprint* Blueprint
 
 	if (bIsVariable)
 	{
+#if ENGINE_MAJOR_VERSION >= 5
 		Blueprint->OnVariableAdded(Child->GetFName());
+#endif
 	}
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 	Blueprint->MarkPackageDirty();
@@ -772,7 +970,11 @@ FString UCliAnythingBridgeLibrary::SetWidgetImageProperties(UWidgetBlueprint* Bl
 		{
 			return JsonError(TEXT("Brush ImageSize must be non-negative."));
 		}
+#if ENGINE_MAJOR_VERSION >= 5
 		FSlateBrush Brush = Image->GetBrush();
+#else
+		FSlateBrush Brush = Image->Brush;
+#endif
 		Brush.ImageSize = FVector2D(ImageWidth, ImageHeight);
 		Image->SetBrush(Brush);
 	}

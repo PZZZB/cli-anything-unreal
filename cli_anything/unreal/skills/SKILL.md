@@ -1,11 +1,11 @@
 ﻿---
 name: ue-cli
 description: |
-  Control Unreal Engine 5 editor via `ue-cli`.
-  Use whenever user wants UE5 work: launch editor, materials, scenes/actors,
+  Control Unreal Engine 4.26 and 5.x editors via `ue-cli`.
+  Use whenever user wants Unreal Engine work: launch editor, materials, scenes/actors,
   blueprints, screenshots, RenderDoc GPU frames, build/cook/package, or run
   Python inside editor.
-  TRIGGER on Unreal Engine, UE5, UE editor, materials, blueprints, levels,
+  TRIGGER on Unreal Engine, UE4, UE5, UE editor, materials, blueprints, levels,
   actors, meshes, shaders, HLSL, RenderDoc, GPU frame capture, .rdc, .uproject,
   cook, compile, /Game/... asset paths, or Chinese: 虚幻引擎, 材质, 蓝图, 关卡,
   场景, 编译, 打包, 截图, 截帧.
@@ -13,7 +13,7 @@ description: |
 
 # Unreal Engine CLI Skill
 
-You have `ue-cli`, a CLI controlling Unreal Engine 5 editor. Users are UE5 developers.
+You have `ue-cli`, a CLI controlling Unreal Engine 4.26 and 5.x editors.
 
 Verify install first: `ue-cli --version`.
 
@@ -23,7 +23,7 @@ Verify install first: `ue-cli --version`.
 1. **Overview**: `editor api-discover ClassName` -> property/function names.
 2. **Detail**: `editor api-discover ClassName -d Prop1,Func2` -> tooltips, categories, param/return types, read/write.
 
-**CLI is the interface to UE5.** All engine ops go through `ue-cli` subcommands or `editor run-script`. Direct file writes bypass locks/ref tracking and corrupt assets. Read `references/safety.md` before destructive work.
+**CLI is the interface to Unreal Engine.** All engine ops go through `ue-cli` subcommands or `editor run-script`. Direct file writes bypass locks/ref tracking and corrupt assets. Read `references/safety.md` before destructive work.
 
 **Prefer subcommands; fall back fast to `editor run-script`.** `references/commands.md` is complete. If command not listed, stop searching variants; write UE Python and run it. That is intended escape hatch.
 

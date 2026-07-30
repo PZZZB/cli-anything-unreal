@@ -24,6 +24,23 @@ def _cli_parse_bridge(raw):
         return json.loads(raw or "{}")
     except Exception as exc:
         return {"error": "Bridge returned invalid JSON: " + str(exc), "raw": str(raw)}
+
+
+def _cli_compile_blueprint(bp):
+    blueprint_library = getattr(unreal, "BlueprintEditorLibrary", None)
+    if blueprint_library is not None:
+        blueprint_library.compile_blueprint(bp)
+        return
+    bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+    compile_method = getattr(bridge, "compile_blueprint", None) if bridge else None
+    if compile_method is None:
+        raise RuntimeError(
+            "CliAnythingBridgeLibrary is missing compile_blueprint. "
+            "Run editor plugin-upgrade, then relaunch the editor."
+        )
+    compile_result = _cli_parse_bridge(compile_method(bp))
+    if "error" in compile_result:
+        raise RuntimeError(compile_result["error"])
 """
 
 
@@ -34,6 +51,13 @@ def _cli_candidate_package_name(candidate):
     if "." in leaf:
         package_name = package_name.rsplit(".", 1)[0]
     return package_name
+
+
+def _cli_asset_class_name(asset_data):
+    try:
+        return str(asset_data.asset_class_path.asset_name)
+    except Exception:
+        return str(asset_data.asset_class)
 
 
 def _cli_load_widget_blueprint(asset_candidates):
@@ -62,7 +86,7 @@ def _cli_load_widget_blueprint(asset_candidates):
             package_name = _cli_candidate_package_name(candidate)
             for data in registry.get_assets_by_package_name(package_name, False):
                 try:
-                    if str(data.asset_class_path.asset_name) != "WidgetBlueprint":
+                    if _cli_asset_class_name(data) != "WidgetBlueprint":
                         continue
                     object_path = str(data.package_name) + "." + str(data.asset_name)
                     if object_path not in tried:
@@ -177,7 +201,7 @@ else:
             if result.get("status") == "ok":
                 result["action"] = "create"
                 result["widget"] = asset_path
-                unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+                _cli_compile_blueprint(bp)
                 EAL.save_asset(asset_path, only_if_is_dirty=False)
 """
     return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
@@ -237,7 +261,7 @@ else:
             )
         )
         if result.get("status") == "ok":
-            unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+            _cli_compile_blueprint(bp)
             unreal.EditorAssetLibrary.save_asset(loaded_asset_path, only_if_is_dirty=False)
 """
     return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
@@ -357,7 +381,7 @@ else:
                     raise
             if result.get("status") == "ok":
                 result["widget_blueprint"] = loaded_asset_path
-                unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+                _cli_compile_blueprint(bp)
                 unreal.EditorAssetLibrary.save_asset(loaded_asset_path, only_if_is_dirty=False)
 """
     return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)

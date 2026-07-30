@@ -609,9 +609,13 @@ if _cli_resolve_ok:
 
 _RESOLVE_ACTOR = '''\
 _cli_resolve_ok = False
-_sub = _cli_unreal.get_editor_subsystem(_cli_unreal.EditorActorSubsystem)
+_subsystem_class = getattr(_cli_unreal, "EditorActorSubsystem", None)
+if _subsystem_class is not None:
+    _level_actors = _cli_unreal.get_editor_subsystem(_subsystem_class).get_all_level_actors()
+else:
+    _level_actors = _cli_unreal.EditorLevelLibrary.get_all_level_actors()
 _target = None
-for _a in _sub.get_all_level_actors():
+for _a in _level_actors:
     if _a.get_path_name() == {actor_path!r}:
         _target = _a
         break
@@ -770,9 +774,13 @@ if len(_cli_split) != 2:
     result = {{"error": "Invalid component path: " + _cli_comp_path}}
 else:
     _cli_actor_path, _cli_comp_name = _cli_split
-    _sub = _cli_unreal.get_editor_subsystem(_cli_unreal.EditorActorSubsystem)
+    _subsystem_class = getattr(_cli_unreal, "EditorActorSubsystem", None)
+    if _subsystem_class is not None:
+        _level_actors = _cli_unreal.get_editor_subsystem(_subsystem_class).get_all_level_actors()
+    else:
+        _level_actors = _cli_unreal.EditorLevelLibrary.get_all_level_actors()
     _cli_actor = None
-    for _a in _sub.get_all_level_actors():
+    for _a in _level_actors:
         if _a.get_path_name() == _cli_actor_path:
             _cli_actor = _a
             break

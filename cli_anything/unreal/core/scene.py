@@ -90,6 +90,12 @@ def _cli_actor_label(_actor):
     except Exception:
         return _actor.get_name()
 
+def _cli_all_level_actors():
+    _subsystem_class = getattr(_u, "EditorActorSubsystem", None)
+    if _subsystem_class is not None:
+        return _u.get_editor_subsystem(_subsystem_class).get_all_level_actors()
+    return _u.EditorLevelLibrary.get_all_level_actors()
+
 def _actor_row(_actor):
     _name = _actor.get_name()
     _label = _cli_actor_label(_actor)
@@ -139,9 +145,8 @@ elif _actor_class:
             _actors.append(_row)
         result = {{"actors": _actors, "count": len(_actors)}}
 else:
-    _sub = _u.get_editor_subsystem(_u.EditorActorSubsystem)
     _actors = []
-    for _a in _sub.get_all_level_actors():
+    for _a in _cli_all_level_actors():
         _matched, _row = _matches_actor(_a)
         if not _matched:
             continue
@@ -286,13 +291,17 @@ def get_actor_components(api: UEEditorAPI, actor_path: str) -> dict:
 import unreal as _u
 
 _actor_path = {actor_path!r}
-_sub = _u.get_editor_subsystem(_u.EditorActorSubsystem)
+_subsystem_class = getattr(_u, "EditorActorSubsystem", None)
+if _subsystem_class is not None:
+    _level_actors = _u.get_editor_subsystem(_subsystem_class).get_all_level_actors()
+else:
+    _level_actors = _u.EditorLevelLibrary.get_all_level_actors()
 try:
     _actor = _u.load_object(None, _actor_path)
 except Exception:
     _actor = None
 if _actor is None:
-    for _candidate in _sub.get_all_level_actors():
+    for _candidate in _level_actors:
         if _candidate.get_path_name() == _actor_path:
             _actor = _candidate
             break
@@ -413,13 +422,17 @@ def get_actor_transform(api: UEEditorAPI, actor_path: str) -> dict:
 import unreal as _u
 
 _actor_path = {actor_path!r}
-_sub = _u.get_editor_subsystem(_u.EditorActorSubsystem)
+_subsystem_class = getattr(_u, "EditorActorSubsystem", None)
+if _subsystem_class is not None:
+    _level_actors = _u.get_editor_subsystem(_subsystem_class).get_all_level_actors()
+else:
+    _level_actors = _u.EditorLevelLibrary.get_all_level_actors()
 try:
     _actor = _u.load_object(None, _actor_path)
 except Exception:
     _actor = None
 if _actor is None:
-    for _candidate in _sub.get_all_level_actors():
+    for _candidate in _level_actors:
         if _candidate.get_path_name() == _actor_path:
             _actor = _candidate
             break

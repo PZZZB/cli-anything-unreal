@@ -915,6 +915,7 @@ class TestMaterialEditing:
         api = MagicMock()
         result = recompile_material(api, "/Game/M_Test")
         assert result["status"] == "ok"
+        assert mock_exec.call_args.kwargs["timeout"] == 120.0
 
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_recompile_uses_material_resolver(self, mock_run):

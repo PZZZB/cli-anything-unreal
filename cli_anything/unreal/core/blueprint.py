@@ -41,6 +41,9 @@ def _blueprint_asset_path_candidates(blueprint_path: str) -> list[str]:
 
 
 _BLUEPRINT_RESOLVER = '''
+import unreal
+
+
 def _cli_load_blueprint(asset_path, asset_candidates):
     tried = []
 
@@ -121,6 +124,117 @@ def _cli_load_blueprint(asset_path, asset_candidates):
         pass
 
     return None, None, tried
+
+
+def _cli_blueprint_bridge_call(method_name, *args):
+    import json as _cli_json
+
+    bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+    method = getattr(bridge, method_name, None) if bridge else None
+    if method is None:
+        return {
+            "error": (
+                "CliAnythingBridgeLibrary is missing " + method_name + ". "
+                "Run editor plugin-upgrade, then relaunch the editor."
+            )
+        }
+    try:
+        return _cli_json.loads(method(*args) or "{}")
+    except Exception as exc:
+        return {"error": "Blueprint bridge call failed: " + str(exc)}
+
+
+def _cli_blueprint_bridge_ok(method_name, *args):
+    bridge_result = _cli_blueprint_bridge_call(method_name, *args)
+    if "error" in bridge_result:
+        raise RuntimeError(bridge_result["error"])
+    return bridge_result
+
+
+if not hasattr(unreal, "BlueprintEditorLibrary"):
+    class _CliBlueprintGraph:
+        def __init__(self, name):
+            self._name = str(name)
+
+        def get_name(self):
+            return self._name
+
+        def get_outer(self):
+            return None
+
+    class _CliBlueprintEditorLibrary:
+        @staticmethod
+        def _graph(bp, name=None, graph_type=None):
+            info = _cli_blueprint_bridge_ok("get_blueprint_info", bp)
+            for graph in info.get("graphs", []):
+                if name is not None and graph.get("name") != name:
+                    continue
+                if graph_type is not None and graph.get("type") != graph_type:
+                    continue
+                return _CliBlueprintGraph(graph.get("name", ""))
+            return None
+
+        @staticmethod
+        def find_event_graph(bp):
+            return _CliBlueprintEditorLibrary._graph(bp, graph_type="EventGraph")
+
+        @staticmethod
+        def find_graph(bp, name):
+            return _CliBlueprintEditorLibrary._graph(bp, name=name)
+
+        @staticmethod
+        def add_function_graph(bp, name):
+            bridge_result = _cli_blueprint_bridge_ok(
+                "add_blueprint_function", bp, name
+            )
+            return _CliBlueprintGraph(bridge_result.get("graph_name", name))
+
+        @staticmethod
+        def remove_function_graph(bp, name):
+            _cli_blueprint_bridge_ok("remove_blueprint_function", bp, name)
+            return True
+
+        @staticmethod
+        def get_basic_type_by_name(type_name):
+            normalized = str(type_name).strip().lower()
+            valid = {
+                "bool", "int", "float", "string", "text",
+                "name", "vector", "rotator", "transform",
+            }
+            return normalized if normalized in valid else None
+
+        @staticmethod
+        def add_member_variable(bp, name, pin_type):
+            _cli_blueprint_bridge_ok(
+                "add_blueprint_variable", bp, name, pin_type
+            )
+            return True
+
+        @staticmethod
+        def remove_member_variable(bp, name):
+            _cli_blueprint_bridge_ok("remove_blueprint_variable", bp, name)
+            return True
+
+        @staticmethod
+        def remove_unused_variables(bp):
+            bridge_result = _cli_blueprint_bridge_ok(
+                "remove_unused_blueprint_variables", bp
+            )
+            return int(bridge_result.get("removed_count", 0))
+
+        @staticmethod
+        def compile_blueprint(bp):
+            _cli_blueprint_bridge_ok("compile_blueprint", bp)
+
+        @staticmethod
+        def rename_graph(bp, graph, new_name):
+            _cli_blueprint_bridge_ok(
+                "rename_blueprint_graph", bp, graph.get_name(), new_name
+            )
+
+    _cli_blueprint_editor_library = _CliBlueprintEditorLibrary
+else:
+    _cli_blueprint_editor_library = unreal.BlueprintEditorLibrary
 '''
 
 
@@ -142,7 +256,7 @@ else:
         "class": bp.get_class().get_name(),
     }}
 
-    bel = unreal.BlueprintEditorLibrary
+    bel = _cli_blueprint_editor_library
 
     # ── Graphs ────────────────────────────────────────────────────
     graphs = []
@@ -194,7 +308,15 @@ else:
     # so we gather what we can from the generated class
     variables = []
     try:
-        gen_class = bp.generated_class()
+        try:
+            gen_class = bp.generated_class()
+        except Exception:
+            try:
+                gen_class = bp.get_editor_property("generated_class")
+            except Exception:
+                gen_class = unreal.load_object(
+                    None, bp.get_path_name() + "_C"
+                )
         if gen_class is not None:
             cdo = gen_class.get_default_object()
             if cdo is not None:
@@ -217,7 +339,7 @@ bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset
 if bp is None:
     result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
-    bel = unreal.BlueprintEditorLibrary
+    bel = _cli_blueprint_editor_library
     try:
         graph = bel.add_function_graph(bp, func_name)
         if graph is not None:
@@ -246,7 +368,7 @@ bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset
 if bp is None:
     result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
-    bel = unreal.BlueprintEditorLibrary
+    bel = _cli_blueprint_editor_library
     try:
         graph = bel.find_graph(bp, func_name)
         if graph is None:
@@ -276,7 +398,7 @@ bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset
 if bp is None:
     result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
-    bel = unreal.BlueprintEditorLibrary
+    bel = _cli_blueprint_editor_library
     try:
         pin_type = bel.get_basic_type_by_name(var_type)
         if pin_type is None:
@@ -310,7 +432,7 @@ bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset
 if bp is None:
     result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
-    bel = unreal.BlueprintEditorLibrary
+    bel = _cli_blueprint_editor_library
     try:
         success = bel.remove_member_variable(bp, var_name)
         if success:
@@ -337,7 +459,7 @@ bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset
 if bp is None:
     result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
-    bel = unreal.BlueprintEditorLibrary
+    bel = _cli_blueprint_editor_library
     try:
         count = bel.remove_unused_variables(bp)
         result = {{
@@ -361,7 +483,7 @@ bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset
 if bp is None:
     result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
-    bel = unreal.BlueprintEditorLibrary
+    bel = _cli_blueprint_editor_library
     try:
         bel.compile_blueprint(bp)
         result = {{
@@ -386,7 +508,7 @@ bp, loaded_asset_path, tried_asset_paths = _cli_load_blueprint(asset_path, asset
 if bp is None:
     result = {{"error": "Blueprint not found: " + asset_path, "tried": tried_asset_paths}}
 else:
-    bel = unreal.BlueprintEditorLibrary
+    bel = _cli_blueprint_editor_library
     try:
         graph = bel.find_graph(bp, old_name)
         if graph is None:

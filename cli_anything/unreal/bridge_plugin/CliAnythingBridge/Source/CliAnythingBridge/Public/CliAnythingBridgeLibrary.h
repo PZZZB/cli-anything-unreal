@@ -8,6 +8,7 @@
 class UMaterial;
 class UMaterialExpression;
 class UMaterialInterface;
+class UBlueprint;
 class UTexture2D;
 class UScriptStruct;
 class UWidgetBlueprint;
@@ -36,12 +37,22 @@ public:
 	static FString DisconnectMaterialExpressionInput(UMaterial* Material, UMaterialExpression* ToExpression, const FString& ToInputName);
 
 	/**
+	 * Connects or disconnects a material output by stable display name.
+	 * UE 4.26 omits some EMaterialProperty values from its Python enum.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString ConnectMaterialOutput(UMaterialExpression* FromExpression, const FString& FromOutputName, const FString& PropertyName);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString DisconnectMaterialOutput(UMaterial* Material, const FString& PropertyName);
+
+	/**
 	 * Gets the absolute screen coordinates (X, Y, Width, Height) of the active level viewport.
 	 * If no viewport is active or found, returns all zeros.
 	 * Allows Python scripts to crop a full-screen screenshot to just the viewport.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
-	static FIntVector4 GetActiveViewportScreenBounds();
+	static FVector4 GetActiveViewportScreenBounds();
 
 	/**
 	 * Redraws the active Level Viewport and synchronously writes a PNG.
@@ -143,6 +154,35 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString GetActorComponentTree(AActor* Actor, bool bIncludeVisualization = false);
+
+	/**
+	 * Blueprint editing compatibility surface. UE 4.26 does not expose
+	 * BlueprintEditorLibrary to Python, so shared operations use native editor
+	 * utilities through the bridge when that Python library is unavailable.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|Blueprint")
+	static FString GetBlueprintInfo(UBlueprint* Blueprint);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|Blueprint")
+	static FString AddBlueprintFunction(UBlueprint* Blueprint, const FString& FunctionName);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|Blueprint")
+	static FString RemoveBlueprintFunction(UBlueprint* Blueprint, const FString& FunctionName);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|Blueprint")
+	static FString AddBlueprintVariable(UBlueprint* Blueprint, const FString& VariableName, const FString& VariableType);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|Blueprint")
+	static FString RemoveBlueprintVariable(UBlueprint* Blueprint, const FString& VariableName);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|Blueprint")
+	static FString RemoveUnusedBlueprintVariables(UBlueprint* Blueprint);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|Blueprint")
+	static FString RenameBlueprintGraph(UBlueprint* Blueprint, const FString& OldName, const FString& NewName);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything|Blueprint")
+	static FString CompileBlueprint(UBlueprint* Blueprint);
 
 	/**
 	 * Sets the design-time root widget for a Widget Blueprint.

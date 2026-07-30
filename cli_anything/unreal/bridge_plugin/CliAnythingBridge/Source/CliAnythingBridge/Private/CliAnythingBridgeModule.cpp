@@ -5,6 +5,7 @@
 #include "Containers/Array.h"
 #include "Containers/StringConv.h"
 #include "HAL/CriticalSection.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 // Global buffer for captured errors
 TArray<FString> GCapturedEngineErrors;
@@ -31,7 +32,11 @@ public:
 			// Keep only the last 500 errors to avoid unbounded memory growth
 			if (GCapturedEngineErrors.Num() > 500)
 			{
+#if ENGINE_MAJOR_VERSION >= 5
 				GCapturedEngineErrors.RemoveAt(0, GCapturedEngineErrors.Num() - 500, EAllowShrinking::No);
+#else
+				GCapturedEngineErrors.RemoveAt(0, GCapturedEngineErrors.Num() - 500, false);
+#endif
 			}
 		}
 	}

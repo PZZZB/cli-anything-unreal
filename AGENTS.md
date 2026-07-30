@@ -6,14 +6,14 @@ it into the compatibility entrypoints.
 
 ## Repository Purpose
 
-`ue-cli` is a Python CLI for AI agents controlling Unreal Engine 5 editors. It
+`ue-cli` is a Python CLI for AI agents controlling Unreal Engine 4.26 and 5.x editors. It
 wraps UAT/UBT subprocesses, the UE Remote Control HTTP API, and editor Python
 behind structured, token-light commands.
 
 Requirements:
 
 - Python 3.10+
-- Unreal Engine 5.x for editor and build operations
+- Unreal Engine 4.26 or 5.x for editor and build operations
 - Remote Control enabled for commands that talk to a running editor
 
 ## Setup
@@ -189,8 +189,9 @@ is replaced while sibling skills remain untouched.
 
 ## Known Unreal Behavior
 
-- `editor enable-remote` edits project settings; restart the editor before
-  expecting Remote Control console or Python calls to work.
+- `editor enable-remote` enables RemoteControl, PythonScriptPlugin, and
+  EditorScriptingUtilities and edits project settings; restart the editor
+  before expecting Remote Control console, Python, or asset calls to work.
 - Raw Remote Control reads of intrinsic transforms can fail; scene transform
   reads already use editor Python.
 - UE 5.7 `DeleteAllMaterialExpressions` can skip expressions while deleting.

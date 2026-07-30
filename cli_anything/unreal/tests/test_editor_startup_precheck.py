@@ -2853,8 +2853,8 @@ def test_run_editor_launch_task_fails_when_requested_map_is_not_active(tmp_path,
     assert result["result"]["next_command"].endswith(f"editor open-level {requested_map}")
 
 
-def test_run_editor_launch_task_skips_bridge_for_ue4(tmp_path):
-    """UE4 launch should not deploy or enable the UE5 bridge plugin."""
+def test_run_editor_launch_task_deploys_bridge_for_ue4(tmp_path):
+    """UE4 launch deploys and enables the cross-version bridge plugin."""
     from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
 
     mock_proc = MagicMock()
@@ -2879,26 +2879,29 @@ def test_run_editor_launch_task_skips_bridge_for_ue4(tmp_path):
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockUE4/Binaries/UE4Editor.exe"), \
          patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
          patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge") as mock_deploy, \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True,
+             "action": "already_up_to_date",
+         }) as mock_deploy, \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled") as mock_enable, \
-         patch("cli_anything.unreal.core.plugin_bridge.ensure_project_bridge_disabled_by_default", return_value={
-             "status": "ok",
-             "changed": True,
-         }) as mock_normalize_bridge, \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+         }), \
          patch("cli_anything.unreal.core.build.compile_project") as mock_compile, \
          patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
          patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
-    mock_deploy.assert_not_called()
-    mock_enable.assert_not_called()
+    mock_deploy.assert_called_once()
+    mock_enable.assert_called_once_with(str(project_dir), "CliAnythingBridge")
     mock_compile.assert_not_called()
-    mock_normalize_bridge.assert_called_once()
     assert result["status"] == "completed"
-    assert result["result"]["bridge_deploy"]["action"] == "skipped_ue4"
+    assert result["result"]["bridge_deploy"]["action"] == "already_up_to_date"
+    assert result["result"]["bridge_binary_status"]["ready"] is True
 
 
-def test_run_editor_launch_task_normalizes_ue4_bridge_before_preflight_failure(tmp_path):
+def test_run_editor_launch_task_does_not_deploy_ue4_bridge_before_preflight_failure(tmp_path):
     from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
 
     project_dir = tmp_path / "UE4UnavailableRemote"
@@ -2922,16 +2925,12 @@ def test_run_editor_launch_task_normalizes_ue4_bridge_before_preflight_failure(t
              "status": "unavailable",
              "changes": [],
          }) as mock_prepare_remote, \
-         patch("cli_anything.unreal.core.plugin_bridge.ensure_project_bridge_disabled_by_default", return_value={
-             "status": "ok",
-             "changed": True,
-         }) as mock_normalize_bridge:
+         patch("cli_anything.unreal.commands.editor._deploy_bridge") as mock_deploy:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
-    mock_normalize_bridge.assert_called_once()
+    mock_deploy.assert_not_called()
     mock_prepare_remote.assert_not_called()
     assert result["status"] == "failed"
-    assert result["result"]["bridge_launch_prepare"]["changed"] is True
 
 
 def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
