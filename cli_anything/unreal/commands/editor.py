@@ -2603,6 +2603,72 @@ finally:
     }
 
 
+def _editor_exec_request_failure(result: dict) -> dict | None:
+    """Return structured request failure details from an exec result."""
+    if not isinstance(result, dict):
+        return None
+    raw = result.get("raw")
+    if isinstance(raw, dict) and raw.get("error"):
+        return raw
+    if result.get("error") and "raw" not in result:
+        return result
+    return None
+
+
+def _can_safely_fallback_editor_exec(result: dict) -> bool:
+    """Only retry when Remote Control explicitly rejected the first request."""
+    failure = _editor_exec_request_failure(result)
+    if not failure:
+        return False
+    if failure.get("error_type") == "HTTPError":
+        return failure.get("status_code") in {400, 404}
+    return bool(re.search(r"\b(?:400|404) Client Error\b", str(failure.get("error", ""))))
+
+
+def _raise_editor_exec_failure(
+    result: dict,
+    command: str,
+    timeout: int,
+    *,
+    dispatch_mode: str,
+    fallback_attempted: bool,
+) -> None:
+    """Report failed or ambiguous dispatch without repeating the command."""
+    request_failure = _editor_exec_request_failure(result)
+    delivery_unknown = request_failure is not None
+    details = {
+        "status": "unknown" if delivery_unknown else "failed",
+        "command": command,
+        "dispatch_mode": dispatch_mode,
+        "delivery_state": "unknown" if delivery_unknown else "attempted",
+        "fallback_attempted": fallback_attempted,
+        "timeout_seconds": timeout,
+        "error": result.get("error") or "Console command execution failed",
+    }
+    if request_failure:
+        details["request_error"] = request_failure
+
+    if delivery_unknown:
+        raise AppError(
+            "EDITOR_EXEC_DELIVERY_UNKNOWN",
+            "Editor command delivery or completion is unknown; ue-cli did not retry it.",
+            exit_code=3,
+            suggestion=(
+                "Inspect the editor state and project log before deciding whether to retry. "
+                "The command may already have run, especially if it is non-idempotent."
+            ),
+            details=details,
+        )
+
+    raise AppError(
+        "EDITOR_EXEC_FAILED",
+        "Editor command execution failed; ue-cli did not retry it.",
+        exit_code=3,
+        suggestion="Inspect the command error and editor log before retrying.",
+        details=details,
+    )
+
+
 def _resolve_editor_log_file(state: AppState) -> Path | None:
     """Find the active editor log file for the current project/port."""
     project_path = getattr(state.session, "project_path", None)
@@ -2823,9 +2889,25 @@ def editor_exec(state: AppState, timeout, log_wait, command):
     if result.get("error"):
         log_begin_marker = None
         log_end_marker = None
-        result = api.exec_console(command)
+        if not _can_safely_fallback_editor_exec(result):
+            _raise_editor_exec_failure(
+                result,
+                command,
+                timeout,
+                dispatch_mode="python_log_output",
+                fallback_attempted=False,
+            )
+        result = api.exec_console(command, timeout=timeout)
         if not isinstance(result, dict):
             result = {"raw": result}
+        if result.get("error"):
+            _raise_editor_exec_failure(
+                result,
+                command,
+                timeout,
+                dispatch_mode="remote_console",
+                fallback_attempted=True,
+            )
         if result:
             result.setdefault("capture_mode", "remote_console")
 

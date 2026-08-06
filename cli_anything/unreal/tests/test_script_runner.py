@@ -2007,14 +2007,16 @@ result = {'status': 'live_editor_ok'}
         assert "RuntimeError: sentinel" in data["details"]["python_error"]
 
     def test_editor_exec_falls_back_to_remote_console(self):
-        """If Python log capture is unavailable, keep old remote-console behavior."""
+        """An explicit pre-dispatch rejection may use remote-console fallback."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
         runner = CliRunner()
         with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
             mock_api = MagicMock()
-            mock_api.exec_python_ex.return_value = {"error": "python disabled"}
+            mock_api.exec_python_ex.return_value = {
+                "error": "400 Client Error: Bad Request",
+            }
             mock_api.exec_console.return_value = {}
             mock_editor.return_value = mock_api
 
@@ -2025,7 +2027,59 @@ result = {'status': 'live_editor_ok'}
             data = json.loads(result.output)
             assert data["result"]["status"] == "executed"
             assert data["result"]["capture_mode"] == "remote_console"
-            mock_api.exec_console.assert_called_once_with("stat fps")
+            mock_api.exec_console.assert_called_once_with("stat fps", timeout=15)
+
+    def test_editor_exec_does_not_retry_after_read_timeout(self):
+        """A timed-out non-idempotent command may have run and must not be resent."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.return_value = {
+                "error": "HTTPConnectionPool: Read timed out. (read timeout=1)",
+            }
+            mock_editor.return_value = mock_api
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "--timeout", "1",
+                "MutationCommand",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_EXEC_DELIVERY_UNKNOWN"
+        assert data["details"]["delivery_state"] == "unknown"
+        assert data["details"]["fallback_attempted"] is False
+        assert data["details"]["timeout_seconds"] == 1
+        mock_api.exec_python_ex.assert_called_once()
+        mock_api.exec_console.assert_not_called()
+
+    def test_editor_exec_does_not_retry_after_python_dispatch_failure(self):
+        """A failed Python wrapper may have partial effects and must not be resent."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.return_value = {
+                "ReturnValue": False,
+                "CommandResult": "wrapper failed",
+            }
+            mock_editor.return_value = mock_api
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "MutationCommand",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_EXEC_FAILED"
+        assert data["details"]["delivery_state"] == "attempted"
+        assert data["details"]["fallback_attempted"] is False
+        mock_api.exec_console.assert_not_called()
 
     def test_editor_exec_uses_editor_log_delta_when_python_log_is_empty(self, tmp_path):
         from click.testing import CliRunner
