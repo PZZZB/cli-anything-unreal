@@ -110,6 +110,7 @@ ue-cli --project F:/path/to/Project.uproject build compile --config Development 
 ue-cli --project F:/path/to/Project.uproject build cook --platform Win64 --no-wait
 ue-cli --project F:/path/to/Project.uproject build package --config Development --platform Win64 --output-dir F:/path/to/out --no-wait
 ue-cli --project F:/path/to/Project.uproject build status <task_id>
+ue-cli task wait <task_id> --timeout 600
 ue-cli build cancel <task_id>
 
 # Bridge maintenance
@@ -155,7 +156,8 @@ becomes `{"status": "ok"}`. Use `--no-save` deliberately.
 
 Long operations use `core/tasks.py`. `submit_task()` writes task JSON, starts a
 detached `_task-worker`, and returns a task ID. Poll with `task status`,
-`editor status <task_id>`, or `build status <task_id>`. Final states include
+block with `task wait <task_id> --timeout <seconds>`, or use
+`editor status <task_id>` / `build status <task_id>`. Final states include
 `completed`, `failed`, `timeout`, and `cancelled`.
 
 ### Bridge Plugin

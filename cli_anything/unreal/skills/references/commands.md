@@ -243,6 +243,7 @@ Generic async task polling/cancel.
 | Command | Description |
 |---------|-------------|
 | `task status TASK_ID` | Check progress/result |
+| `task wait TASK_ID [--timeout SEC]` | Block until final state; caller timeout reports `TASK_WAIT_TIMEOUT` without cancelling the task |
 | `task cancel TASK_ID` | Cancel pending/running task |
 
 ## install-skills - IDE Skill Installation

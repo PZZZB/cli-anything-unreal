@@ -49,6 +49,118 @@ class TestCLI:
         assert "-c, --code" in result.output
         assert "--timeout" in result.output
 
+    def test_task_wait_returns_completed_task(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        completed = {
+            "task_id": "t-completed",
+            "command": "editor.launch",
+            "status": "completed",
+            "result": {"status": "online"},
+        }
+        with patch(
+            "cli_anything.unreal.unreal_cli.reconcile_task_state",
+            return_value=completed,
+        ), patch(
+            "cli_anything.unreal.unreal_cli.wait_for_task",
+            return_value=completed,
+        ) as wait:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "task", "wait", "t-completed",
+                "--timeout", "55",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["task_id"] == "t-completed"
+        assert data["status"] == "completed"
+        assert data["result"]["status"] == "online"
+        wait.assert_called_once_with("t-completed", 55)
+
+    def test_task_wait_propagates_failed_task_as_nonzero(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        running = {
+            "task_id": "t-failed",
+            "command": "build.compile",
+            "status": "running",
+        }
+        failed = {
+            **running,
+            "status": "failed",
+            "error": {"code": "COMPILE_FAILED", "message": "Build failed."},
+        }
+        with patch(
+            "cli_anything.unreal.unreal_cli.reconcile_task_state",
+            return_value=running,
+        ), patch(
+            "cli_anything.unreal.unreal_cli.wait_for_task",
+            return_value=failed,
+        ):
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "task", "wait", "t-failed",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "failed"
+        assert data["error"]["code"] == "COMPILE_FAILED"
+
+    def test_task_wait_timeout_keeps_task_running(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        running = {
+            "task_id": "t-running",
+            "command": "build.compile",
+            "status": "running",
+            "worker_pid": 41001,
+        }
+        with patch(
+            "cli_anything.unreal.unreal_cli.reconcile_task_state",
+            side_effect=[running, running],
+        ), patch(
+            "cli_anything.unreal.unreal_cli.wait_for_task",
+            return_value=None,
+        ):
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "task", "wait", "t-running",
+                "--timeout", "1",
+            ])
+
+        assert result.exit_code == 4
+        data = json.loads(result.output)
+        assert data["status"] == "running"
+        assert data["worker_pid"] == 41001
+        assert data["wait"] == {
+            "status": "timeout",
+            "code": "TASK_WAIT_TIMEOUT",
+            "timeout_seconds": 1,
+            "task_continues": True,
+        }
+        assert data["next_command"] == "ue-cli task status t-running"
+
+    def test_task_wait_missing_task_is_structured(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        with patch(
+            "cli_anything.unreal.unreal_cli.reconcile_task_state",
+            return_value=None,
+        ), patch("cli_anything.unreal.unreal_cli.wait_for_task") as wait:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "task", "wait", "t-missing",
+                "--timeout", "1",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "TASK_NOT_FOUND"
+        wait.assert_not_called()
+
     def test_version_option(self):
         from click.testing import CliRunner
         from cli_anything.unreal.core.plugin_bridge import get_bundled_version

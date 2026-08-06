@@ -77,6 +77,14 @@ Commit or back up the project before first launch if these project-file changes 
 ue-cli --output json --project "$Project" editor status <task_id>
 ```
 
+Or block until any asynchronous task finishes, with an optional caller-side timeout:
+
+```powershell
+ue-cli --output json task wait <task_id> --timeout 300
+```
+
+`task wait` exits 0 for a completed task, 3 for a failed/task-timeout result, and 4 for cancellation or caller wait timeout. A caller timeout never cancels the task; output keeps the current task status and adds `wait.status=timeout` plus a follow-up command.
+
 Controlled launch requires WebRemoteControl, which Unreal does not start under `-NullRHI`. `editor launch` rejects that extra argument before creating a task or starting UnrealEditor. When launch receives `--extra-arg=-abslog=PATH`, task status and startup diagnostics report and inspect that explicit log file.
 
 After status becomes `online`, run a read-only editor query:

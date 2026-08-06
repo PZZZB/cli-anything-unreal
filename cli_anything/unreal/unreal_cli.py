@@ -19,6 +19,7 @@ from cli_anything.unreal._version import __version__
 from cli_anything.unreal.commands import AppError, AppState, emit_json, error_payload, register_commands
 from cli_anything.unreal.core.plugin_bridge import get_bundled_version
 from cli_anything.unreal.core.tasks import (
+    FINAL_TASK_STATUSES,
     cancel_task,
     load_task,
     reconcile_task_state,
@@ -496,6 +497,48 @@ def task_status_cmd(task_id):
         emit_json(error_payload("TASK_NOT_FOUND", f"Task not found: {task_id}"))
         raise SystemExit(3)
     emit_json(task_progress(task))
+
+
+@task_group.command("wait")
+@click.argument("task_id")
+@click.option(
+    "--timeout",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Maximum seconds to wait; omit to wait indefinitely.",
+)
+def task_wait_cmd(task_id, timeout):
+    task = reconcile_task_state(task_id)
+    if task is None:
+        emit_json(error_payload("TASK_NOT_FOUND", f"Task not found: {task_id}"))
+        raise SystemExit(3)
+
+    final_task = wait_for_task(task_id, timeout)
+    if final_task is None:
+        task = reconcile_task_state(task_id)
+        if task is None:
+            emit_json(error_payload("TASK_NOT_FOUND", f"Task not found: {task_id}"))
+            raise SystemExit(3)
+        if task.get("status") in FINAL_TASK_STATUSES:
+            final_task = task
+        else:
+            progress = task_progress(task)
+            progress["wait"] = {
+                "status": "timeout",
+                "code": "TASK_WAIT_TIMEOUT",
+                "timeout_seconds": timeout,
+                "task_continues": True,
+            }
+            progress["next_command"] = f"ue-cli task status {task_id}"
+            emit_json(progress)
+            raise SystemExit(4)
+
+    progress = task_progress(final_task)
+    emit_json(progress)
+    if final_task.get("status") in {"failed", "timeout"}:
+        raise SystemExit(3)
+    if final_task.get("status") == "cancelled":
+        raise SystemExit(4)
 
 
 @task_group.command("cancel")

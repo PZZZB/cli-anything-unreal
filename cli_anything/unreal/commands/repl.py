@@ -72,6 +72,7 @@ def _print_repl_help(state: AppState):
         "build status <task_id>": "Query a build task",
         "editor launch --no-wait": "Launch the editor asynchronously",
         "task status <task_id>": "Query any async task",
+        "task wait <task_id> --timeout <seconds>": "Wait for any async task",
         "task cancel <task_id>": "Cancel any async task",
         "help": "Show this help",
         "quit": "Exit REPL",
