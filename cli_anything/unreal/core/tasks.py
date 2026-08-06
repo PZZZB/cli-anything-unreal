@@ -1099,6 +1099,8 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         _check_already_running,
         _check_port_in_use,
         _deploy_bridge,
+        _remote_control_launch_error,
+        _resolve_launch_log_file,
         _summarize_startup_precheck,
         _wait_for_api,
     )
@@ -1115,6 +1117,12 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     state.session.load_project(payload["project_path"])
     if payload.get("port") is not None:
         state.session.port = int(payload["port"])
+
+    launch_error = _remote_control_launch_error(payload.get("extra_args"))
+    if launch_error:
+        task["status"] = "failed"
+        task["error"] = launch_error
+        return save_task(task)
 
     launch_binary_prefix = (
         get_editor_binary_prefix(state.session.engine_root)
@@ -1279,10 +1287,16 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         payload.get("extra_args"),
         unattended=bool(payload.get("unattended", False)),
     )
+    log_file = _resolve_launch_log_file(
+        state.session.project_dir,
+        state.session.project_name,
+        payload.get("extra_args"),
+    )
     proc = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
 
     task = load_task(task["task_id"]) or task
     task["pid"] = proc.pid
+    task["log_file"] = str(log_file)
     task["estimated_total_seconds"] = estimated_total_seconds
     task["status"] = "running"
     task_result = dict(task.get("result", {}))
@@ -1290,6 +1304,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         "pid": proc.pid,
         "project": state.session.project_name,
         "editor_exe": editor_exe,
+        "log_file": str(log_file),
         "startup_precheck": startup_precheck,
         "remote_control_prepare": remote_control_prepare,
         "bridge_deploy": deploy_result,
@@ -1300,8 +1315,6 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         task["result"]["compile_reason"] = compile_reason
         task["result"]["precompiled_bridge"] = True
     save_task(task)
-
-    log_file = Path(state.session.project_dir) / "Saved" / "Logs" / f"{state.session.project_name}.log"
 
     def _record_launch_progress(progress: dict) -> None:
         latest = load_task(task["task_id"]) or task

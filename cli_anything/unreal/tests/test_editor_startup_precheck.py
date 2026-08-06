@@ -1519,6 +1519,50 @@ def test_build_launch_cmd_filters_empty_extra_args():
     assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-server"]
 
 
+def test_resolve_launch_log_file_uses_case_insensitive_quoted_abslog(tmp_path):
+    from cli_anything.unreal.commands.editor import _resolve_launch_log_file
+
+    custom_log = tmp_path / "Custom Logs" / "Startup.log"
+    result = _resolve_launch_log_file(
+        tmp_path / "Project",
+        "Project",
+        [f'-ABSLOG="{custom_log}"'],
+    )
+
+    assert result == custom_log
+
+
+def test_resolve_launch_log_file_defaults_to_project_log(tmp_path):
+    from cli_anything.unreal.commands.editor import _resolve_launch_log_file
+
+    result = _resolve_launch_log_file(tmp_path, "Project", ["-nosound"])
+
+    assert result == tmp_path / "Saved" / "Logs" / "Project.log"
+
+
+def test_editor_launch_rejects_nullrhi_before_submitting_task(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    with patch("cli_anything.unreal.commands.editor.submit_task") as mock_submit, \
+         patch("cli_anything.unreal.commands.editor._check_already_running") as mock_running:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--extra-arg=-NullRHI",
+        ])
+
+    assert result.exit_code == 2
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_LAUNCH_NULLRHI_UNSUPPORTED"
+    assert data["details"] == {
+        "incompatible_argument": "-NullRHI",
+        "required_service": "WebRemoteControl",
+        "editor_started": False,
+    }
+    mock_submit.assert_not_called()
+    mock_running.assert_not_called()
+
+
 def test_editor_launch_extra_args_propagate_to_payload(mini_project):
     """--extra-arg values must be persisted into the task payload so the worker forwards them."""
     from click.testing import CliRunner
@@ -3201,15 +3245,18 @@ def test_run_editor_launch_task_persists_wait_progress(tmp_path, monkeypatch):
         '{"FileVersion": 3, "EngineAssociation": "5.7"}',
         encoding="utf-8",
     )
+    custom_log = tmp_path / "Custom Logs" / "Startup.log"
     task = create_task("editor.launch", {
         "project_path": str(uproject),
         "port": 30010,
+        "extra_args": [f"-abslog={custom_log}"],
     })
     proc = MagicMock()
     proc.pid = 4242
 
     def report_progress(_proc, port, _timeout, log_file, _state, on_progress=None):
         assert on_progress is not None
+        assert log_file == custom_log
         on_progress({
             "startup_phase": "waiting_for_remote_control",
             "elapsed_seconds": 15,
@@ -3241,9 +3288,39 @@ def test_run_editor_launch_task_persists_wait_progress(tmp_path, monkeypatch):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     assert result["status"] == "completed"
+    assert Path(result["log_file"]) == custom_log
+    assert Path(result["result"]["log_file"]) == custom_log
     assert result["result"]["startup_phase"] == "waiting_for_remote_control"
     assert result["result"]["elapsed_seconds"] == 15
     assert result["result"]["process_alive"] is True
+
+
+def test_run_editor_launch_task_rejects_nullrhi_before_preflight(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text(
+        '{"FileVersion": 3, "EngineAssociation": "5.7"}',
+        encoding="utf-8",
+    )
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+        "extra_args": ["-nullrhi"],
+    })
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check") as mock_preflight, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen") as mock_popen:
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "EDITOR_LAUNCH_NULLRHI_UNSUPPORTED"
+    assert result["error"]["details"]["editor_started"] is False
+    mock_preflight.assert_not_called()
+    mock_popen.assert_not_called()
 
 
 def test_run_editor_launch_task_timeout_returns_exact_poll_command(tmp_path, monkeypatch):

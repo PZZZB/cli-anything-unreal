@@ -77,6 +77,8 @@ Commit or back up the project before first launch if these project-file changes 
 ue-cli --output json --project "$Project" editor status <task_id>
 ```
 
+Controlled launch requires WebRemoteControl, which Unreal does not start under `-NullRHI`. `editor launch` rejects that extra argument before creating a task or starting UnrealEditor. When launch receives `--extra-arg=-abslog=PATH`, task status and startup diagnostics report and inspect that explicit log file.
+
 After status becomes `online`, run a read-only editor query:
 
 ```powershell

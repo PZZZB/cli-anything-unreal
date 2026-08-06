@@ -1448,6 +1448,46 @@ def _deploy_bridge(session, state) -> dict:
     return ensure_plugin_deployed(session.project_dir)
 
 
+def _launch_extra_arg_parts(arg) -> tuple[str, str | None]:
+    raw = str(arg).strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        raw = raw[1:-1].strip()
+    token = raw.lstrip("-/")
+    name, separator, value = token.partition("=")
+    if not separator:
+        return name.casefold(), None
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return name.casefold(), value
+
+
+def _remote_control_launch_error(extra_args) -> dict | None:
+    for arg in extra_args or ():
+        name, _ = _launch_extra_arg_parts(arg)
+        if name != "nullrhi":
+            continue
+        return {
+            "code": "EDITOR_LAUNCH_NULLRHI_UNSUPPORTED",
+            "message": "editor launch cannot use Remote Control with -NullRHI.",
+            "suggestion": "Remove -NullRHI; controlled editor launch requires a render-capable UnrealEditor process.",
+            "details": {
+                "incompatible_argument": str(arg),
+                "required_service": "WebRemoteControl",
+                "editor_started": False,
+            },
+        }
+    return None
+
+
+def _resolve_launch_log_file(project_dir, project_name, extra_args=None) -> Path:
+    for arg in extra_args or ():
+        name, value = _launch_extra_arg_parts(arg)
+        if name == "abslog" and value:
+            return Path(value)
+    return Path(project_dir) / "Saved" / "Logs" / f"{project_name}.log"
+
+
 def _build_launch_cmd(
     editor_exe,
     project_path,
@@ -1974,6 +2014,16 @@ def editor_launch(
     _load_command_project(state, project_path)
     require_project(state)
     map_path = _normalize_launch_map_path(map_path, state.session.project_dir)
+    extra_args = list(extra_args) if extra_args else []
+    launch_error = _remote_control_launch_error(extra_args)
+    if launch_error:
+        raise AppError(
+            launch_error["code"],
+            launch_error["message"],
+            exit_code=2,
+            suggestion=launch_error["suggestion"],
+            details=launch_error["details"],
+        )
     foreground_timeout, worker_timeout = _launch_wait_timeouts(timeout)
     duplicate = _check_already_running(state.session, state)
     if duplicate is not None:
@@ -1991,7 +2041,7 @@ def editor_launch(
         "port": state.session.port,
         "map_path": map_path,
         "timeout": worker_timeout,
-        "extra_args": list(extra_args) if extra_args else [],
+        "extra_args": extra_args,
         "unattended": unattended,
     }
     task = submit_task("editor.launch", payload)
