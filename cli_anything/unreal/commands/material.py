@@ -519,4 +519,13 @@ def material_shader_source(state: AppState, material_path):
 
     result = get_material_shader_source(api, material_path,
                                          project_dir=state.session.project_dir)
+    if "error" in result:
+        details = {key: value for key, value in result.items() if key != "error"}
+        raise AppError(
+            "MATERIAL_SHADER_SOURCE_FAILED",
+            str(result["error"]),
+            exit_code=3,
+            suggestion="Check material compile errors and the editor shader compiler log, then retry.",
+            details=details or None,
+        )
     output(result, state)

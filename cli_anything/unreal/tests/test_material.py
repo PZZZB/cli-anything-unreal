@@ -203,7 +203,36 @@ class TestMaterials:
         script = mock_run.call_args.args[1]
         assert "mat, loaded_asset_path, tried_asset_paths = _cli_load_material" in script
         assert '"material": loaded_asset_path' in script
+        assert '"shader_cache_refresh": "changed"' in script
+        assert "if not shaders:" in script
         compile(script, "<material-shader-source-script>", "exec")
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_shader_source_cli_promotes_empty_extraction_error(self, mock_exec):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec.return_value = {
+            "error": "Shader source extraction returned no shaders after refreshing changed shader files.",
+            "material": "/Game/M_Test.M_Test",
+            "output_dir": "F:/Proj/Saved/CliAnything/M_Test_shaders",
+        }
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.material.require_editor",
+            return_value=MagicMock(),
+        ), patch("cli_anything.unreal.commands.material.require_project"):
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "material", "shader-source", "/Game/M_Test",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "MATERIAL_SHADER_SOURCE_FAILED"
+        assert data["details"]["material"] == "/Game/M_Test.M_Test"
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_get_material_info_script_fallback(self, mock_exec_script):

@@ -1171,13 +1171,21 @@ else:
             shaders.append({{"name": parts[0], "file": parts[1], "lines": int(parts[2])}})
         elif len(parts) >= 2:
             shaders.append({{"name": parts[0], "file": parts[1]}})
-    result = {{
-        "material": loaded_asset_path,
-        "shader_count": len(shaders),
-        "shaders": shaders,
-        "output_dir": output_dir,
-        "source": "plugin",
-    }}
+    if not shaders:
+        result = {{
+            "error": "Shader source extraction returned no shaders after refreshing changed shader files.",
+            "material": loaded_asset_path,
+            "output_dir": output_dir,
+        }}
+    else:
+        result = {{
+            "material": loaded_asset_path,
+            "shader_count": len(shaders),
+            "shaders": shaders,
+            "output_dir": output_dir,
+            "shader_cache_refresh": "changed",
+            "source": "plugin",
+        }}
 '''
 
 

@@ -156,7 +156,7 @@ ue-cli material hlsl-code /Game/M_Custom
 
 ### `material shader-source` - Full Source with cbuffers
 
-Triggers sync recompile, returns compiled `.usf` files with cbuffers/structs including `cbuffer View`, `FPrimitiveConstants`.
+Refreshes changed engine shader files, triggers a synchronous recompile, then returns compiled `.usf` files with cbuffers/structs including `cbuffer View`, `FPrimitiveConstants`. Success includes `"shader_cache_refresh": "changed"`; a refresh or extraction that yields no shaders fails instead of returning stale validation evidence.
 
 ```bash
 ue-cli material shader-source /Game/M_Custom
@@ -206,4 +206,4 @@ Full command reference: `commands.md` -> `material`.
 - `Material.expressions` protected in UE5.7+. Read nodes with `material info`; edit via `add-node`, `connect`, `delete-node`.
 - Custom node internal HLSL variable names are `inputs[].input_name`; use `material rename-custom-input` for persistent HLSL variable renames. Do not rely on display-label-only edits.
 - Existing node prop edits: use `MaterialEditingLibrary.get_material_property_input_node()`; avoid `find_object` and direct `expressions`.
-- `material shader-source` always sync recompiles to guarantee latest source; complex materials may take time.
+- `material shader-source` first runs the engine's changed-shader refresh, then sync recompiles the extraction resource to guarantee current `.usf`/`.ush` source; complex materials may take time.

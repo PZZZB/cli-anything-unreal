@@ -500,7 +500,26 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.23"
+        assert version == "1.24"
+
+    def test_bridge_shader_source_refreshes_changed_files_before_extraction(self):
+        """Shader extraction must invalidate changed engine shader sources first."""
+        plugin_dir = Path(__file__).resolve().parents[1] / "bridge_plugin" / "CliAnythingBridge"
+        cpp = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+        function = cpp.split(
+            "TArray<FString> UCliAnythingBridgeLibrary::GetMaterialShaderSource",
+            1,
+        )[1].split("// Escape a string", 1)[0]
+
+        refresh = 'HandleRecompileShadersCommand(TEXT("Changed"), *GLog)'
+        assert refresh in function
+        assert function.index(refresh) < function.index("ExtractResource->CacheShaders")
 
     def test_bridge_composed_viewport_capture_uses_slate_screenshot(self):
         """HUD-inclusive capture must read the composed Slate viewport region."""

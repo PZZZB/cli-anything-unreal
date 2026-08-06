@@ -4,6 +4,7 @@
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialInterface.h"
 #include "MaterialEditingLibrary.h"
+#include "Engine/Engine.h"
 #include "Engine/Texture2D.h"
 #include "Engine/Texture.h"
 #include "MaterialShared.h"
@@ -453,7 +454,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.23");
+	return TEXT("1.24");
 }
 
 static bool ResolveMaterialProperty(const FString& PropertyName, EMaterialProperty& OutProperty)
@@ -573,6 +574,10 @@ TArray<FString> UCliAnythingBridgeLibrary::GetMaterialShaderSource(UMaterialInte
 	UMaterial* BaseMat = Material->GetMaterial();
 	if (!BaseMat) return Result;
 	const EShaderPlatform Platform = GMaxRHIShaderPlatform;
+	if (!GEngine || !GEngine->HandleRecompileShadersCommand(TEXT("Changed"), *GLog))
+	{
+		return Result;
+	}
 
 	FMaterialResourceExtractSource* ExtractResource = new FMaterialResourceExtractSource();
 #if ENGINE_MAJOR_VERSION >= 5

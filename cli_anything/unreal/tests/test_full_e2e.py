@@ -1077,6 +1077,7 @@ class TestMaterialHlslShaderSourceE2E:
             pytest.skip("Bridge plugin not loaded in editor")
 
         assert result.get("source") == "plugin"
+        assert result.get("shader_cache_refresh") == "changed"
         assert result.get("shader_count", 0) > 0, "Should have at least one compiled shader"
         assert len(result.get("shaders", [])) > 0, "Shaders list should not be empty"
 
@@ -1148,6 +1149,7 @@ class TestMaterialHlslShaderSourceE2E:
             pytest.skip("Bridge plugin not loaded")
 
         assert result_data.get("source") == "plugin"
+        assert result_data.get("shader_cache_refresh") == "changed"
         assert result_data.get("shader_count", 0) > 0
 # ═══════════════════════════════════════════════════════════════════════
 
