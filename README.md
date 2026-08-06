@@ -85,6 +85,8 @@ ue-cli --output json task wait <task_id> --timeout 300
 
 `task wait` exits 0 for a completed task, 3 for a failed/task-timeout result, and 4 for cancellation or caller wait timeout. A caller timeout never cancels the task; output keeps the current task status and adds `wait.status=timeout` plus a follow-up command.
 
+If crash recovery blocks startup, the launch task returns `EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES` with the matching UnrealEditor PID and window title. Choose **Restore Selected** or **Skip Restore** in that existing editor, then run `editor status`; do not launch a second editor for the project.
+
 Controlled launch requires WebRemoteControl, which Unreal does not start under `-NullRHI`. `editor launch` rejects that extra argument before creating a task or starting UnrealEditor. When launch receives `--extra-arg=-abslog=PATH`, task status and startup diagnostics report and inspect that explicit log file.
 
 After status becomes `online`, run a read-only editor query:

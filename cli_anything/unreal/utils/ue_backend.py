@@ -2469,15 +2469,17 @@ def find_running_editors(timeout: float | None = None) -> list[dict]:
     return editors
 
 
-def detect_ue_dialogs() -> list[dict]:
+def detect_ue_dialogs(process_id: int | None = None) -> list[dict]:
     """Detect modal dialogs blocking a running Unreal Editor on Windows.
 
-    Uses the Windows API (EnumWindows) to find child windows of UE
-    that look like modal dialogs (e.g., "Overwrite", "Save Changes",
-    "Warning", "Fatal Error" popups).
+    Uses the Windows API (EnumWindows) to find top-level and child windows
+    that look like modal dialogs (e.g., "Restore Packages", "Overwrite",
+    "Save Changes", "Warning", "Fatal Error" popups). When ``process_id``
+    is supplied, only windows owned by that process are inspected. This
+    covers early-startup dialogs that appear before the main editor window.
 
     Returns:
-        List of dicts: [{"title": str, "hwnd": int}, ...].
+        List of dicts: [{"title": str, "hwnd": int, "process_id": int}, ...].
         Empty list if no dialogs found or not on Windows.
     """
     if sys.platform != "win32":
@@ -2497,6 +2499,7 @@ def detect_ue_dialogs() -> list[dict]:
         "crash", "restore", "unexpected shutdown",
     ]
 
+    target_pid = int(process_id) if process_id is not None else None
     results: list[dict] = []
     seen_hwnds: set[int] = set()
 
@@ -2508,12 +2511,35 @@ def detect_ue_dialogs() -> list[dict]:
         user32.GetWindowTextW(hwnd, buf, length + 1)
         return buf.value
 
-    ue_main_windows: list[int] = []
+    def _get_process_id(hwnd) -> int:
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
+
+    def _add_if_dialog(hwnd, title: str, pid: int) -> None:
+        if not title or int(hwnd) in seen_hwnds:
+            return
+        title_lower = title.lower()
+        if not any(keyword in title_lower for keyword in DIALOG_KEYWORDS):
+            return
+        seen_hwnds.add(int(hwnd))
+        results.append({"title": title, "hwnd": int(hwnd), "process_id": pid})
+
+    ue_main_windows: list[tuple[int, int]] = []
 
     def _enum_main_windows(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
         title = _get_title(hwnd)
-        if "UnrealEditor" in title or "UE4Editor" in title:
-            ue_main_windows.append(hwnd)
+        pid = _get_process_id(hwnd)
+        if target_pid is not None:
+            if pid != target_pid:
+                return True
+            ue_main_windows.append((int(hwnd), pid))
+            _add_if_dialog(hwnd, title, pid)
+        elif "UnrealEditor" in title or "UE4Editor" in title:
+            ue_main_windows.append((int(hwnd), pid))
+            _add_if_dialog(hwnd, title, pid)
         return True
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(
@@ -2524,21 +2550,11 @@ def detect_ue_dialogs() -> list[dict]:
     def _enum_children(hwnd, _lparam):
         if not user32.IsWindowVisible(hwnd):
             return True
-        if hwnd in seen_hwnds:
-            return True
-        seen_hwnds.add(hwnd)
         title = _get_title(hwnd)
-        if not title:
-            return True
-        title_lower = title.lower()
-        for kw in DIALOG_KEYWORDS:
-            if kw in title_lower:
-                results.append({"title": title, "hwnd": hwnd})
-                break
+        _add_if_dialog(hwnd, title, _get_process_id(hwnd))
         return True
 
-    for main_hwnd in ue_main_windows:
-        seen_hwnds.clear()
+    for main_hwnd, _pid in ue_main_windows:
         user32.EnumChildWindows(main_hwnd, WNDENUMPROC(_enum_children), 0)
 
     return results

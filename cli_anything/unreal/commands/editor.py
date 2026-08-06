@@ -2132,6 +2132,36 @@ def _diagnose_api_unreachable(log_file: Path, port: int, *, since_offset: int | 
     return result
 
 
+def _restore_packages_blocker(proc) -> dict | None:
+    if sys.platform != "win32":
+        return None
+    try:
+        process_id = int(proc.pid)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if process_id <= 0:
+        return None
+
+    from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs
+
+    try:
+        dialogs = detect_ue_dialogs(process_id=process_id)
+    except Exception:
+        return None
+
+    for dialog in dialogs:
+        title = str(dialog.get("title") or "")
+        title_lower = title.casefold()
+        if "restore" not in title_lower or "package" not in title_lower:
+            continue
+        return {
+            "title": title,
+            "hwnd": dialog.get("hwnd"),
+            "process_id": process_id,
+        }
+    return None
+
+
 def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -> dict:
     from cli_anything.unreal.utils.ue_backend import _emit_heartbeat
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
@@ -2207,6 +2237,30 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
                 "process_alive": True,
                 "startup_time_seconds": int(time.time() - start_time),
             }
+
+        restore_blocker = _restore_packages_blocker(proc)
+        if restore_blocker is not None:
+            blocked_result = {
+                "status": "blocked_by_restore_packages",
+                "failure_kind": "blocked_by_restore_packages",
+                "startup_phase": "blocked_by_restore_packages",
+                "port": poll_port,
+                "process_alive": True,
+                "elapsed_seconds": elapsed_seconds,
+                "log_file": str(log_file),
+                "blocking_dialog": restore_blocker,
+                "error": "Editor startup is blocked by the Restore Packages dialog.",
+                "suggestion": (
+                    "Choose Restore Selected or Skip Restore in the Unreal Editor dialog, "
+                    "then run editor status. Do not start a second editor for this project."
+                ),
+            }
+            if on_progress is not None:
+                try:
+                    on_progress(blocked_result)
+                except Exception:
+                    pass
+            return blocked_result
 
         elapsed = time.time() - start_time
         if elapsed > 2:

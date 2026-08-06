@@ -3722,6 +3722,106 @@ def test_wait_for_api_crash_reports_progress_and_bounded_log_tail(tmp_path):
     assert progress[0]["process_alive"] is False
 
 
+def test_detect_ue_dialogs_matches_restore_packages_top_level_for_process(monkeypatch):
+    import ctypes
+
+    from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs
+
+    class FakeUser32:
+        titles = {
+            101: "Restore Packages",
+            202: "Warning",
+        }
+        process_ids = {
+            101: 4242,
+            202: 9999,
+        }
+
+        @staticmethod
+        def EnumWindows(callback, lparam):
+            callback(101, lparam)
+            callback(202, lparam)
+            return True
+
+        @staticmethod
+        def EnumChildWindows(_hwnd, _callback, _lparam):
+            return True
+
+        @staticmethod
+        def IsWindowVisible(_hwnd):
+            return True
+
+        def GetWindowTextLengthW(self, hwnd):
+            return len(self.titles[int(hwnd)])
+
+        def GetWindowTextW(self, hwnd, buffer, _length):
+            buffer.value = self.titles[int(hwnd)]
+            return len(buffer.value)
+
+        def GetWindowThreadProcessId(self, hwnd, pid_pointer):
+            pid_pointer._obj.value = self.process_ids[int(hwnd)]
+            return 1
+
+    monkeypatch.setattr(
+        ctypes,
+        "windll",
+        type("FakeWindll", (), {"user32": FakeUser32()})(),
+    )
+
+    assert detect_ue_dialogs(process_id=4242) == [{
+        "title": "Restore Packages",
+        "hwnd": 101,
+        "process_id": 4242,
+    }]
+
+
+def test_wait_for_api_reports_restore_packages_blocker(tmp_path):
+    from cli_anything.unreal.commands.editor import _wait_for_api
+
+    log_file = tmp_path / "TestProj.log"
+    log_file.write_text("", encoding="utf-8")
+    proc = MagicMock()
+    proc.pid = 4242
+    proc.poll.return_value = None
+    state = MagicMock()
+    state.json_output = True
+    progress = []
+    blocker = {
+        "title": "Restore Packages",
+        "hwnd": 101,
+        "process_id": 4242,
+    }
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive",
+        return_value=False,
+    ), patch(
+        "cli_anything.unreal.commands.editor._restore_packages_blocker",
+        return_value=blocker,
+    ), patch(
+        "cli_anything.unreal.commands.editor.time.time",
+        side_effect=[100.0, 100.1],
+    ), patch(
+        "cli_anything.unreal.commands.editor.time.monotonic",
+        return_value=200.0,
+    ):
+        result = _wait_for_api(
+            proc,
+            30021,
+            120,
+            log_file,
+            state,
+            on_progress=progress.append,
+        )
+
+    assert result["status"] == "blocked_by_restore_packages"
+    assert result["failure_kind"] == "blocked_by_restore_packages"
+    assert result["startup_phase"] == "blocked_by_restore_packages"
+    assert result["blocking_dialog"] == blocker
+    assert result["process_alive"] is True
+    assert progress[-1] == result
+
+
 def test_run_editor_launch_task_persists_wait_progress(tmp_path, monkeypatch):
     from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
 
@@ -3861,6 +3961,64 @@ def test_run_editor_launch_task_timeout_returns_exact_poll_command(tmp_path, mon
     assert result["status"] == "timeout"
     assert result["result"]["next_command"] == expected
     assert result["error"]["details"]["next_command"] == expected
+
+
+def test_run_editor_launch_task_reports_restore_packages_error(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text(
+        '{"FileVersion": 3, "EngineAssociation": "5.7"}',
+        encoding="utf-8",
+    )
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30021,
+        "timeout": 120,
+    })
+    proc = MagicMock()
+    proc.pid = 4242
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=proc), \
+         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={
+             "status": "blocked_by_restore_packages",
+             "startup_phase": "blocked_by_restore_packages",
+             "process_alive": True,
+             "blocking_dialog": {
+                 "title": "Restore Packages",
+                 "hwnd": 101,
+                 "process_id": 4242,
+             },
+             "error": "Editor startup is blocked by the Restore Packages dialog.",
+         }):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    expected = f'ue-cli --project "{uproject}" editor status'
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES"
+    assert result["result"]["status"] == "blocked_by_restore_packages"
+    assert result["result"]["next_command"] == expected
+    assert result["error"]["details"]["blocking_dialog"]["process_id"] == 4242
 
 
 def test_summarize_startup_precheck_includes_bridge_plugin_issues():

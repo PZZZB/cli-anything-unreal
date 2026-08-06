@@ -1660,6 +1660,11 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "next_command",
             f'ue-cli --project "{state.session.project_path}" editor status {task["task_id"]}',
         )
+    elif wait_result.get("status") == "blocked_by_restore_packages":
+        wait_result.setdefault(
+            "next_command",
+            f'ue-cli --project "{state.session.project_path}" editor status',
+        )
 
     task = load_task(task["task_id"]) or task
     task["log_file"] = str(log_file)
@@ -1674,6 +1679,16 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         task["error"] = {
             "code": "TASK_TIMEOUT",
             "message": wait_result.get("error", "Editor startup timed out"),
+            "details": wait_result,
+        }
+    elif wait_status == "blocked_by_restore_packages":
+        task["status"] = "failed"
+        task["error"] = {
+            "code": "EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES",
+            "message": wait_result.get(
+                "error",
+                "Editor startup is blocked by the Restore Packages dialog.",
+            ),
             "details": wait_result,
         }
     elif wait_status == "map_mismatch":
