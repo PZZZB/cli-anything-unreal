@@ -536,6 +536,90 @@ class TestBuildSuccessPaths:
         mock_run_uat.assert_not_called()
         assert result["status"] == "ok"
 
+    def test_compile_rejects_engine_plugin_module_before_ubt(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": (
+                    "$(EngineDir)/Plugins/Editor/AssetReferenceRestrictions/"
+                    "Binaries/Win64/UnrealEditor-AssetReferenceRestrictions.dll"
+                ),
+                "Type": "DynamicLibrary",
+            }],
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+        ) as mock_run_build:
+            result = compile_project(
+                temp_project["uproject"],
+                platform="Win64",
+                config="Development",
+                engine_root=self._mock_engine_root(),
+                modules=("AssetReferenceRestrictions",),
+            )
+
+        mock_run_build.assert_not_called()
+        assert result["status"] == "error"
+        assert result["code"] == "ENGINE_PLUGIN_MODULE_UNSUPPORTED"
+        assert result["failure_kind"] == "unsupported_engine_plugin_module"
+        assert result["modules"] == ["AssetReferenceRestrictions"]
+        assert result["module_products"] == {
+            "AssetReferenceRestrictions": [
+                str(
+                    Path(self._mock_engine_root())
+                    / "Engine"
+                    / "Plugins"
+                    / "Editor"
+                    / "AssetReferenceRestrictions"
+                    / "Binaries"
+                    / "Win64"
+                    / "UnrealEditor-AssetReferenceRestrictions.dll"
+                )
+            ]
+        }
+        assert "--module" not in result["recovery_command"]
+        assert result["recovery_command"] == (
+            f'ue-cli --project "{temp_project["uproject"]}" build compile '
+            "--platform Win64 --config Development"
+        )
+
+    def test_compile_allows_engine_core_module_to_reach_ubt(self, temp_project):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = Path(temp_project["dir"])
+        self._write_editor_receipt(
+            project_dir,
+            [{
+                "Path": "$(EngineDir)/Binaries/Win64/UnrealEditor-Renderer.dll",
+                "Type": "DynamicLibrary",
+            }],
+        )
+
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value={"returncode": 6, "log_file": "compile.log"},
+        ) as mock_run_build:
+            result = compile_project(
+                temp_project["uproject"],
+                platform="Win64",
+                engine_root=self._mock_engine_root(),
+                modules=("Renderer",),
+            )
+
+        mock_run_build.assert_called_once()
+        assert result["status"] == "error"
+        assert result.get("code") != "ENGINE_PLUGIN_MODULE_UNSUPPORTED"
+
     def test_compile_module_preserves_existing_hot_reload_state(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
 

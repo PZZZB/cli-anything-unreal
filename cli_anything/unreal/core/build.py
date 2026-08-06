@@ -647,6 +647,68 @@ def _load_editor_target_receipt(
     return None, None, first_error
 
 
+def _find_engine_plugin_module_products(
+    uproject_path: str,
+    engine_root: str,
+    target: str,
+    config: str,
+    modules: list[str] | tuple[str, ...],
+) -> tuple[Path | None, dict[str, list[str]]]:
+    """Find requested module products owned by Engine plugins in the receipt."""
+    project_dir = Path(uproject_path).parent
+    try:
+        receipt_path, receipt, receipt_error = _load_editor_target_receipt(
+            project_dir,
+            target,
+            config,
+        )
+    except OSError:
+        return None, {}
+    if receipt_error or receipt_path is None or receipt is None:
+        return receipt_path, {}
+
+    products = receipt.get("BuildProducts")
+    if not isinstance(products, list):
+        return receipt_path, {}
+
+    engine_path = Path(engine_root)
+    engine_plugins_prefix = (
+        str(engine_path / "Engine" / "Plugins")
+        .replace("/", "\\")
+        .rstrip("\\")
+        .casefold()
+    )
+    requested_modules = {module.casefold(): module for module in modules}
+    matches: dict[str, list[str]] = {}
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        product_type = str(product.get("Type", "")).casefold()
+        raw_path = str(product.get("Path", ""))
+        if (
+            product_type != "dynamiclibrary"
+            or Path(raw_path).suffix.casefold() != ".dll"
+        ):
+            continue
+        path = _resolve_receipt_product_path(
+            raw_path,
+            project_dir=project_dir,
+            engine_root=engine_path,
+        )
+        if path is None:
+            continue
+        path_text = str(path)
+        normalized_path = path_text.replace("/", "\\").casefold()
+        if not normalized_path.startswith(engine_plugins_prefix + "\\"):
+            continue
+
+        binary_tokens = set(Path(raw_path).stem.casefold().split("-"))
+        for module_key, module in requested_modules.items():
+            if module_key in binary_tokens:
+                matches.setdefault(module, []).append(path_text)
+    return receipt_path, matches
+
+
 def inspect_win64_editor_runtime_dependencies(
     uproject_path: str,
     engine_root: str | None,
@@ -988,6 +1050,37 @@ def compile_project(
         target, target_error = _resolve_editor_target(uproject_path)
         if target_error:
             return {"status": "error", "error": target_error}
+        receipt_path, engine_plugin_products = _find_engine_plugin_module_products(
+            uproject_path,
+            engine_root,
+            target,
+            config,
+            modules,
+        )
+        if engine_plugin_products:
+            unsupported_modules = sorted(engine_plugin_products)
+            recovery_command = (
+                f'ue-cli --project "{uproject_path}" build compile '
+                f"--platform {platform} --config {config}"
+            )
+            return {
+                "status": "error",
+                "code": "ENGINE_PLUGIN_MODULE_UNSUPPORTED",
+                "failure_kind": "unsupported_engine_plugin_module",
+                "modules": unsupported_modules,
+                "module_products": engine_plugin_products,
+                "receipt_file": str(receipt_path),
+                "recovery_command": recovery_command,
+                "error": (
+                    "Module-targeted compile does not support Engine plugin "
+                    "module(s): " + ", ".join(unsupported_modules) + ". UnrealBuildTool "
+                    "may omit their output actions from the project Editor target."
+                ),
+                "suggestion": (
+                    "Run the full Editor target build without --module: "
+                    + recovery_command
+                ),
+            }
         try:
             hot_reload_state_files = _find_module_hot_reload_state_files(
                 uproject_path,
