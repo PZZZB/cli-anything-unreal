@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import uuid
 from pathlib import Path
 
 from cli_anything.unreal.core.script_runner import run_python_code
@@ -64,7 +65,153 @@ def ensure_project_bridge_disabled_by_default(project_dir: str) -> dict:
     }
 
 
-def ensure_plugin_deployed(project_dir: str) -> dict:
+def _bridge_upgrade_transaction_root(project_dir: str, transaction_id: str) -> Path:
+    return (
+        Path(project_dir)
+        / "Saved"
+        / "ue-cli"
+        / "bridge-upgrades"
+        / transaction_id
+    )
+
+
+def rollback_plugin_deployment(deploy_result: dict) -> dict:
+    """Restore the bridge saved by a transactional deployment."""
+    transaction = deploy_result.get("upgrade_transaction")
+    if not isinstance(transaction, dict):
+        return {"status": "not_needed", "restored": False}
+
+    transaction_root_value = transaction.get("transaction_root")
+    backup_dir_value = transaction.get("backup_dir")
+    plugin_dir_value = transaction.get("plugin_dir")
+    if not all(
+        isinstance(value, str) and value
+        for value in (transaction_root_value, backup_dir_value, plugin_dir_value)
+    ):
+        return {
+            "status": "error",
+            "code": "BRIDGE_ROLLBACK_STATE_INVALID",
+            "restored": False,
+            "error": "Bridge upgrade rollback state is incomplete.",
+        }
+
+    transaction_root = Path(transaction_root_value)
+    backup_dir = Path(backup_dir_value)
+    plugin_dir = Path(plugin_dir_value)
+    if (
+        transaction_root.name != transaction.get("transaction_id")
+        or backup_dir.parent != transaction_root
+        or backup_dir.name != _PLUGIN_NAME
+        or plugin_dir.name != _PLUGIN_NAME
+    ):
+        return {
+            "status": "error",
+            "code": "BRIDGE_ROLLBACK_STATE_INVALID",
+            "restored": False,
+            "error": "Bridge upgrade rollback paths failed validation.",
+        }
+
+    if not backup_dir.is_dir():
+        return {
+            "status": "error",
+            "code": "BRIDGE_ROLLBACK_BACKUP_MISSING",
+            "restored": False,
+            "error": f"Bridge upgrade backup is missing: {backup_dir}",
+            "backup_dir": str(backup_dir),
+            "plugin_dir": str(plugin_dir),
+        }
+
+    try:
+        if plugin_dir.exists():
+            shutil.rmtree(plugin_dir)
+        backup_dir.replace(plugin_dir)
+    except OSError as exc:
+        return {
+            "status": "error",
+            "code": "BRIDGE_ROLLBACK_FAILED",
+            "restored": False,
+            "error": f"Could not restore the previous bridge plugin: {exc}",
+            "backup_dir": str(backup_dir),
+            "plugin_dir": str(plugin_dir),
+            "previous_version": transaction.get("previous_version"),
+            "failed_version": transaction.get("new_version"),
+        }
+
+    cleanup_error = None
+    try:
+        transaction_root.rmdir()
+    except OSError as exc:
+        cleanup_error = str(exc)
+
+    result = {
+        "status": "restored",
+        "restored": True,
+        "previous_version": transaction.get("previous_version"),
+        "failed_version": transaction.get("new_version"),
+        "plugin_dir": str(plugin_dir),
+    }
+    if cleanup_error:
+        result["cleanup_error"] = cleanup_error
+    return result
+
+
+def finalize_plugin_deployment(deploy_result: dict) -> dict:
+    """Discard a transactional deployment backup after validation succeeds."""
+    transaction = deploy_result.get("upgrade_transaction")
+    if not isinstance(transaction, dict):
+        return {"status": "not_needed", "committed": False}
+
+    transaction_root_value = transaction.get("transaction_root")
+    backup_dir_value = transaction.get("backup_dir")
+    transaction_id = transaction.get("transaction_id")
+    if not all(
+        isinstance(value, str) and value
+        for value in (transaction_root_value, backup_dir_value, transaction_id)
+    ):
+        return {
+            "status": "cleanup_failed",
+            "committed": True,
+            "error": "Bridge upgrade cleanup state is incomplete.",
+        }
+
+    transaction_root = Path(transaction_root_value)
+    backup_dir = Path(backup_dir_value)
+    if (
+        transaction_root.name != transaction_id
+        or backup_dir.parent != transaction_root
+        or backup_dir.name != _PLUGIN_NAME
+    ):
+        return {
+            "status": "cleanup_failed",
+            "committed": True,
+            "error": "Bridge upgrade cleanup paths failed validation.",
+        }
+    try:
+        if transaction_root.exists():
+            shutil.rmtree(transaction_root)
+    except OSError as exc:
+        return {
+            "status": "cleanup_failed",
+            "committed": True,
+            "error": f"New bridge is valid, but its upgrade backup could not be removed: {exc}",
+            "transaction_root": str(transaction_root),
+            "previous_version": transaction.get("previous_version"),
+            "version": transaction.get("new_version"),
+        }
+    return {
+        "status": "committed",
+        "committed": True,
+        "previous_version": transaction.get("previous_version"),
+        "version": transaction.get("new_version"),
+    }
+
+
+def ensure_plugin_deployed(
+    project_dir: str,
+    *,
+    preserve_existing: bool = False,
+    force_redeploy: bool = False,
+) -> dict:
     """Ensure the bridge plugin source is deployed to the project.
 
     Copies or updates plugin source from the CLI package to
@@ -85,10 +232,11 @@ def ensure_plugin_deployed(project_dir: str) -> dict:
         }
 
     bundled_version = _read_uplugin_version(bundled_uplugin)
+    target_version = None
 
     if target_uplugin.exists():
         target_version = _read_uplugin_version(target_uplugin)
-        if target_version == bundled_version:
+        if target_version == bundled_version and not force_redeploy:
             normalized = _ensure_disabled_by_default(target_uplugin)
             return {
                 "deployed": True,
@@ -97,36 +245,103 @@ def ensure_plugin_deployed(project_dir: str) -> dict:
                 "plugin_dir": str(target_dir),
                 "descriptor_normalized": normalized,
             }
-        action = f"updated_{target_version}_to_{bundled_version}"
+        if target_version == bundled_version:
+            action = f"reinstalled_{bundled_version}"
+        else:
+            action = f"updated_{target_version}_to_{bundled_version}"
     else:
         action = "fresh_install"
 
+    upgrade_transaction = None
     if target_dir.exists():
-        try:
-            shutil.rmtree(target_dir)
-        except PermissionError as exc:
-            return {
-                "deployed": True,
-                "action": "update_pending_locked",
-                "version": target_version,
-                "bundled_version": bundled_version,
+        if preserve_existing:
+            transaction_id = uuid.uuid4().hex
+            transaction_root = _bridge_upgrade_transaction_root(project_dir, transaction_id)
+            backup_dir = transaction_root / _PLUGIN_NAME
+            try:
+                transaction_root.mkdir(parents=True, exist_ok=False)
+                target_dir.replace(backup_dir)
+            except OSError as exc:
+                try:
+                    if transaction_root.exists():
+                        shutil.rmtree(transaction_root)
+                except OSError:
+                    pass
+                return {
+                    "deployed": True,
+                    "action": "update_pending_locked",
+                    "version": target_version,
+                    "bundled_version": bundled_version,
+                    "plugin_dir": str(target_dir),
+                    "error": str(exc),
+                    "warning": "Bridge plugin is in use and could not be updated while the editor is running.",
+                    "suggestion": "Close the editor, then run editor plugin-upgrade to deploy and compile the bundled bridge.",
+                    "retry_suggested": True,
+                }
+            upgrade_transaction = {
+                "transaction_id": transaction_id,
+                "transaction_root": str(transaction_root),
+                "backup_dir": str(backup_dir),
                 "plugin_dir": str(target_dir),
-                "error": str(exc),
-                "warning": "Bridge plugin is in use and could not be updated while the editor is running.",
-                "suggestion": "Close the editor, then run editor plugin-upgrade to deploy and compile the bundled bridge.",
-                "retry_suggested": True,
+                "previous_version": target_version,
+                "new_version": bundled_version,
+                "status": "pending",
             }
+        else:
+            try:
+                shutil.rmtree(target_dir)
+            except PermissionError as exc:
+                return {
+                    "deployed": True,
+                    "action": "update_pending_locked",
+                    "version": target_version,
+                    "bundled_version": bundled_version,
+                    "plugin_dir": str(target_dir),
+                    "error": str(exc),
+                    "warning": "Bridge plugin is in use and could not be updated while the editor is running.",
+                    "suggestion": "Close the editor, then run editor plugin-upgrade to deploy and compile the bundled bridge.",
+                    "retry_suggested": True,
+                }
 
-    shutil.copytree(str(_BUNDLED_PLUGIN_DIR), str(target_dir))
+    try:
+        # copytree defaults to copy2(), which preserves packaged source mtimes.
+        # Fresh mtimes force UBT to rebuild rules after a bridge source upgrade.
+        shutil.copytree(
+            str(_BUNDLED_PLUGIN_DIR),
+            str(target_dir),
+            copy_function=shutil.copy,
+        )
+    except OSError as exc:
+        failed = {
+            "deployed": False,
+            "action": "error",
+            "version": bundled_version,
+            "plugin_dir": str(target_dir),
+            "error": f"Could not deploy bundled bridge source: {exc}",
+        }
+        if upgrade_transaction:
+            failed["upgrade_transaction"] = upgrade_transaction
+            failed["rollback"] = rollback_plugin_deployment(failed)
+        else:
+            try:
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+            except OSError:
+                pass
+        return failed
     normalized = _ensure_disabled_by_default(target_uplugin)
 
-    return {
+    result = {
         "deployed": True,
         "action": action,
         "version": bundled_version,
         "plugin_dir": str(target_dir),
         "descriptor_normalized": normalized,
     }
+    if upgrade_transaction:
+        result["upgrade_transaction"] = upgrade_transaction
+        result["rollback_available"] = True
+    return result
 
 
 def _read_modules_build_id(modules_path: Path) -> str | None:

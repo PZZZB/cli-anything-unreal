@@ -1205,13 +1205,21 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     bridge_enabled_changed = False
     compile_reason = None
     deploy_result = _deploy_bridge(state.session, state)
-    if not deploy_result.get("deployed", False):
+    if (
+        not deploy_result.get("deployed", False)
+        or deploy_result.get("action") == "update_pending_locked"
+    ):
+        deploy_locked = deploy_result.get("action") == "update_pending_locked"
         task["status"] = "failed"
         task["error"] = {
-            "code": "BRIDGE_DEPLOY_FAILED",
-            "message": deploy_result.get("error", "CliAnythingBridge deployment failed"),
+            "code": "BRIDGE_DEPLOY_LOCKED" if deploy_locked else "BRIDGE_DEPLOY_FAILED",
+            "message": deploy_result.get(
+                "warning" if deploy_locked else "error",
+                "CliAnythingBridge deployment failed",
+            ),
             "details": deploy_result,
         }
+        task["result"] = {"bridge_deploy": deploy_result}
         return save_task(task)
 
     # Auto-enable CliAnythingBridge in .uproject
@@ -1244,7 +1252,11 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         }
         save_task(task)
 
-        from cli_anything.unreal.core.plugin_bridge import compile_bridge_plugin
+        from cli_anything.unreal.core.plugin_bridge import (
+            compile_bridge_plugin,
+            finalize_plugin_deployment,
+            rollback_plugin_deployment,
+        )
         compile_result = compile_bridge_plugin(
             state.session.project_path,
             engine_root=state.session.engine_root,
@@ -1253,6 +1265,10 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         task["result"] = dict(task.get("result", {}))
         task["result"]["compile_result"] = compile_result
         if compile_result.get("status") != "ok":
+            rollback = rollback_plugin_deployment(deploy_result)
+            task["result"]["bridge_rollback"] = rollback
+            error_details = dict(compile_result)
+            error_details["bridge_rollback"] = rollback
             task["status"] = "failed"
             task["error"] = {
                 "code": compile_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
@@ -1260,7 +1276,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
                     "error",
                     "Bridge plugin targeted compilation failed.",
                 ),
-                "details": compile_result,
+                "details": error_details,
             }
             return save_task(task)
 
@@ -1270,13 +1286,20 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         )
         task["result"]["bridge_binary_status"] = bridge_binary_status
         if not bridge_binary_status.get("ready", False):
+            rollback = rollback_plugin_deployment(deploy_result)
+            task["result"]["bridge_rollback"] = rollback
+            error_details = dict(bridge_binary_status)
+            error_details["bridge_rollback"] = rollback
             task["status"] = "failed"
             task["error"] = {
                 "code": "BRIDGE_BINARY_NOT_READY",
                 "message": bridge_binary_status.get("message", "Bridge plugin binary is still not ready after compilation."),
-                "details": bridge_binary_status,
+                "details": error_details,
             }
             return save_task(task)
+        task["result"]["bridge_deployment_commit"] = finalize_plugin_deployment(
+            deploy_result
+        )
         task["result"]["precompiled_bridge"] = True
         save_task(task)
 
@@ -1343,12 +1366,19 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         task["result"]["compile_reason"] = "Bridge plugin failed to load"
         save_task(task)
 
-        from cli_anything.unreal.core.plugin_bridge import compile_bridge_plugin
+        from cli_anything.unreal.core.plugin_bridge import (
+            compile_bridge_plugin,
+            finalize_plugin_deployment,
+            rollback_plugin_deployment,
+        )
         compile_result = compile_bridge_plugin(
             state.session.project_path,
             engine_root=state.session.engine_root,
         )
         if compile_result.get("status") != "ok":
+            rollback = rollback_plugin_deployment(deploy_result)
+            error_details = dict(compile_result)
+            error_details["bridge_rollback"] = rollback
             task["status"] = "failed"
             task["error"] = {
                 "code": compile_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
@@ -1356,10 +1386,15 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
                     "error",
                     "Bridge plugin targeted compilation failed.",
                 ),
-                "details": compile_result,
+                "details": error_details,
             }
             task["result"]["compile_result"] = compile_result
+            task["result"]["bridge_rollback"] = rollback
             return save_task(task)
+
+        task["result"]["bridge_deployment_commit"] = finalize_plugin_deployment(
+            deploy_result
+        )
 
         # Relaunch after successful compilation
         cmd = _build_launch_cmd(

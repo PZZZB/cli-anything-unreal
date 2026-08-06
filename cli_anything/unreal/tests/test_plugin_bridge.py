@@ -108,6 +108,127 @@ class TestPluginBridge:
         assert "updated" in result["action"]
         assert result["version"] == get_bundled_version()
 
+    def test_transactional_update_restores_previous_plugin(self, tmp_path):
+        """A failed bridge build can restore the exact pre-upgrade plugin tree."""
+        from cli_anything.unreal.core.plugin_bridge import (
+            ensure_plugin_deployed,
+            get_bundled_version,
+            rollback_plugin_deployment,
+        )
+
+        project_dir = str(tmp_path)
+        ensure_plugin_deployed(project_dir)
+        plugin_dir = tmp_path / "Plugins" / "CliAnythingBridge"
+        uplugin = plugin_dir / "CliAnythingBridge.uplugin"
+        data = json.loads(uplugin.read_text(encoding="utf-8"))
+        data["VersionName"] = "1.20"
+        uplugin.write_text(json.dumps(data), encoding="utf-8")
+        working_dll = plugin_dir / "Binaries" / "Win64" / "UnrealEditor-CliAnythingBridge.dll"
+        working_dll.parent.mkdir(parents=True)
+        working_dll.write_bytes(b"working-1.20")
+
+        deploy = ensure_plugin_deployed(project_dir, preserve_existing=True)
+        transaction_root = Path(deploy["upgrade_transaction"]["transaction_root"])
+
+        assert deploy["action"] == f"updated_1.20_to_{get_bundled_version()}"
+        assert deploy["rollback_available"] is True
+        assert not working_dll.exists()
+        assert transaction_root.is_dir()
+
+        rollback = rollback_plugin_deployment(deploy)
+
+        assert rollback["status"] == "restored"
+        assert rollback["restored"] is True
+        assert rollback["previous_version"] == "1.20"
+        assert working_dll.read_bytes() == b"working-1.20"
+        restored = json.loads(uplugin.read_text(encoding="utf-8"))
+        assert restored["VersionName"] == "1.20"
+        assert not transaction_root.exists()
+
+    def test_transactional_update_discards_backup_after_success(self, tmp_path):
+        from cli_anything.unreal.core.plugin_bridge import (
+            ensure_plugin_deployed,
+            finalize_plugin_deployment,
+            get_bundled_version,
+        )
+
+        project_dir = str(tmp_path)
+        ensure_plugin_deployed(project_dir)
+        uplugin = tmp_path / "Plugins" / "CliAnythingBridge" / "CliAnythingBridge.uplugin"
+        data = json.loads(uplugin.read_text(encoding="utf-8"))
+        data["VersionName"] = "1.20"
+        uplugin.write_text(json.dumps(data), encoding="utf-8")
+
+        deploy = ensure_plugin_deployed(project_dir, preserve_existing=True)
+        transaction_root = Path(deploy["upgrade_transaction"]["transaction_root"])
+        commit = finalize_plugin_deployment(deploy)
+
+        assert commit == {
+            "status": "committed",
+            "committed": True,
+            "previous_version": "1.20",
+            "version": get_bundled_version(),
+        }
+        assert not transaction_root.exists()
+        deployed = json.loads(uplugin.read_text(encoding="utf-8"))
+        assert deployed["VersionName"] == get_bundled_version()
+
+    def test_deployment_refreshes_packaged_source_mtime(self, tmp_path):
+        """UBT must see copied Build.cs as newer than a cached rules assembly."""
+        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+
+        bundled_dir = tmp_path / "Bundled" / "CliAnythingBridge"
+        source_dir = bundled_dir / "Source" / "CliAnythingBridge"
+        source_dir.mkdir(parents=True)
+        (bundled_dir / "CliAnythingBridge.uplugin").write_text(
+            json.dumps({"VersionName": "9.9", "EnabledByDefault": False}),
+            encoding="utf-8",
+        )
+        build_cs = source_dir / "CliAnythingBridge.Build.cs"
+        build_cs.write_text("// synthetic", encoding="utf-8")
+        packaged_mtime = time.time() - 3600
+        os.utime(build_cs, (packaged_mtime, packaged_mtime))
+
+        project_dir = tmp_path / "Project"
+        project_dir.mkdir()
+        with patch(
+            "cli_anything.unreal.core.plugin_bridge._BUNDLED_PLUGIN_DIR",
+            bundled_dir,
+        ):
+            result = ensure_plugin_deployed(str(project_dir))
+
+        deployed_build_cs = (
+            project_dir
+            / "Plugins"
+            / "CliAnythingBridge"
+            / "Source"
+            / "CliAnythingBridge"
+            / "CliAnythingBridge.Build.cs"
+        )
+        assert result["deployed"] is True
+        assert deployed_build_cs.stat().st_mtime > packaged_mtime + 3000
+
+    def test_transactional_copy_failure_restores_previous_plugin(self, tmp_path):
+        from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+
+        project_dir = str(tmp_path)
+        ensure_plugin_deployed(project_dir)
+        uplugin = tmp_path / "Plugins" / "CliAnythingBridge" / "CliAnythingBridge.uplugin"
+        data = json.loads(uplugin.read_text(encoding="utf-8"))
+        data["VersionName"] = "1.20"
+        uplugin.write_text(json.dumps(data), encoding="utf-8")
+
+        with patch(
+            "cli_anything.unreal.core.plugin_bridge.shutil.copytree",
+            side_effect=OSError("synthetic copy failure"),
+        ):
+            result = ensure_plugin_deployed(project_dir, preserve_existing=True)
+
+        assert result["deployed"] is False
+        assert result["rollback"]["status"] == "restored"
+        restored = json.loads(uplugin.read_text(encoding="utf-8"))
+        assert restored["VersionName"] == "1.20"
+
     def test_ensure_plugin_deployed_locked_update_is_pending(self, tmp_path):
         """Online editors can lock bridge DLLs; deploy should report pending update instead of raising."""
         from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed, get_bundled_version

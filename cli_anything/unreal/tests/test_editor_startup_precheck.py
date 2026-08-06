@@ -2549,7 +2549,13 @@ def test_plugin_upgrade_reports_locked_dll_from_compile_log(mini_project, tmp_pa
              "error": "Compile failed (exit 6). See log_file for details.",
              "log_file": str(log_file),
              "returncode": 6,
-         }):
+         }), \
+         patch("cli_anything.unreal.core.plugin_bridge.rollback_plugin_deployment", return_value={
+             "status": "restored",
+             "restored": True,
+             "previous_version": "1.20",
+             "failed_version": "2.0",
+         }) as mock_rollback:
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "plugin-upgrade",
@@ -2560,7 +2566,9 @@ def test_plugin_upgrade_reports_locked_dll_from_compile_log(mini_project, tmp_pa
     assert data["code"] == "BRIDGE_MODULE_COMPILE_FAILED"
     assert data["details"]["locked_file"] == locked
     assert data["details"]["lock_error"] == "LNK1104"
+    assert data["details"]["bridge_rollback"]["status"] == "restored"
     assert "UnrealEditor" in data["suggestion"]
+    mock_rollback.assert_called_once()
 
 
 def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
@@ -2677,6 +2685,105 @@ def test_run_editor_launch_task_precompiles_when_bridge_binary_missing(tmp_path)
     assert result["status"] == "completed"
     assert result["result"].get("precompiled_bridge") is True
     assert result["result"].get("compile_reason") == "Bridge plugin binary is missing."
+
+
+def test_run_editor_launch_task_restores_previous_bridge_on_compile_failure(tmp_path):
+    """Auto-upgrade failure reports the build error and restored bridge state."""
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+    deploy = {
+        "deployed": True,
+        "action": "updated_1.20_to_1.23",
+        "version": "1.23",
+        "upgrade_transaction": {"transaction_id": "synthetic"},
+    }
+    rollback = {
+        "status": "restored",
+        "restored": True,
+        "previous_version": "1.20",
+        "failed_version": "1.23",
+    }
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value=deploy), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": False,
+             "reason": "missing_binary",
+             "message": "Bridge plugin binary is missing.",
+         }), \
+         patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin", return_value={
+             "status": "error",
+             "code": "BUILD_LINK_FAILED",
+             "error": "Bridge link failed.",
+             "returncode": 6,
+         }), \
+         patch("cli_anything.unreal.core.plugin_bridge.rollback_plugin_deployment", return_value=rollback) as mock_rollback, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen") as mock_popen:
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    mock_rollback.assert_called_once_with(deploy)
+    mock_popen.assert_not_called()
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "BUILD_LINK_FAILED"
+    assert result["error"]["details"]["bridge_rollback"] == rollback
+    assert result["result"]["bridge_rollback"] == rollback
+
+
+def test_run_editor_launch_task_stops_when_bridge_upgrade_is_locked(tmp_path):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+    deploy = {
+        "deployed": True,
+        "action": "update_pending_locked",
+        "version": "1.20",
+        "bundled_version": "1.23",
+        "warning": "Bridge plugin is in use and could not be updated.",
+    }
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value=deploy), \
+         patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin") as mock_compile, \
+         patch("cli_anything.unreal.commands.editor.sp.Popen") as mock_popen:
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    mock_compile.assert_not_called()
+    mock_popen.assert_not_called()
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "BRIDGE_DEPLOY_LOCKED"
+    assert result["result"]["bridge_deploy"] == deploy
 
 
 def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):

@@ -1513,7 +1513,7 @@ def _extract_compile_lock_error(log_file: str | None) -> dict:
 def _deploy_bridge(session, state) -> dict:
     from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
 
-    return ensure_plugin_deployed(session.project_dir)
+    return ensure_plugin_deployed(session.project_dir, preserve_existing=True)
 
 
 def _launch_extra_arg_parts(arg) -> tuple[str, str | None]:
@@ -3064,14 +3064,15 @@ def editor_plugin_upgrade(state: AppState):
     """
     from cli_anything.unreal.core.plugin_bridge import (
         ensure_plugin_deployed,
+        finalize_plugin_deployment,
         get_bundled_version,
         get_loaded_plugin_version,
+        rollback_plugin_deployment,
     )
 
     require_project(state)
     project_dir = state.session.project_dir
 
-    plugin_dir = Path(project_dir) / "Plugins" / "CliAnythingBridge"
     bundled = get_bundled_version()
 
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
@@ -3100,19 +3101,24 @@ def editor_plugin_upgrade(state: AppState):
                 details=drain_result,
             )
 
-    if plugin_dir.exists():
-        _remove_tree_with_retries(plugin_dir)
-
-    deploy = ensure_plugin_deployed(project_dir)
+    deploy = ensure_plugin_deployed(
+        project_dir,
+        preserve_existing=True,
+        force_redeploy=True,
+    )
     if not deploy["deployed"]:
-        raise AppError("DEPLOY_FAILED", deploy.get("error", "Deployment failed"))
-
-    plugin_intermediate = plugin_dir / "Intermediate"
-    plugin_binaries = plugin_dir / "Binaries"
-    if plugin_intermediate.exists():
-        _remove_tree_with_retries(plugin_intermediate)
-    if plugin_binaries.exists():
-        _remove_tree_with_retries(plugin_binaries)
+        raise AppError(
+            "DEPLOY_FAILED",
+            deploy.get("error", "Deployment failed"),
+            details=deploy,
+        )
+    if deploy.get("action") == "update_pending_locked":
+        raise AppError(
+            "BRIDGE_DEPLOY_LOCKED",
+            deploy.get("error", "Bridge plugin could not be replaced."),
+            suggestion=deploy.get("suggestion"),
+            details=deploy,
+        )
 
     from cli_anything.unreal.core.plugin_bridge import compile_bridge_plugin
     build_result = compile_bridge_plugin(
@@ -3120,8 +3126,10 @@ def editor_plugin_upgrade(state: AppState):
         engine_root=state.session.engine_root,
     )
     if build_result.get("status") == "error":
+        rollback = rollback_plugin_deployment(deploy)
         details = dict(build_result)
         details.update(_extract_compile_lock_error(build_result.get("log_file", "")))
+        details["bridge_rollback"] = rollback
         suggestion = None
         if details.get("locked_file"):
             suggestion = (
@@ -3136,6 +3144,8 @@ def editor_plugin_upgrade(state: AppState):
             suggestion=suggestion,
             details=details,
         )
+
+    deployment_commit = finalize_plugin_deployment(deploy)
 
     if editor_was_running:
         from cli_anything.unreal.utils.ue_backend import find_editor_exe
@@ -3161,6 +3171,7 @@ def editor_plugin_upgrade(state: AppState):
                     "version": bundled,
                     "previous_version": loaded,
                     "bridge_build": build_result,
+                    "bridge_deployment_commit": deployment_commit,
                 }, state)
             else:
                 output({
@@ -3177,6 +3188,7 @@ def editor_plugin_upgrade(state: AppState):
         "plugin_dir": deploy.get("plugin_dir"),
         "needs_restart": editor_was_running,
         "bridge_build": build_result,
+        "bridge_deployment_commit": deployment_commit,
     }, state)
 
 
