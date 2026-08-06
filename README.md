@@ -151,9 +151,11 @@ ue-cli --output json --project "$Project" editor status
 ue-cli --output json --project "$Project" material analyze /Game/MyMaterial
 ue-cli --output json --project "$Project" screenshot capture --path "F:/output/material_check.png"
 ue-cli --output json --project "$Project" screenshot capture --path "F:/output/stat_evidence.png" --include-ui
+ue-cli --output json --project "$Project" editor run-script --no-save -c 'result={"label":"quoted value"}'
 ```
 
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
+On Windows PowerShell, `editor run-script -c` preserves double-quoted Python string literals that native argument parsing would otherwise strip. Use stdin (`editor run-script -`) or a `.py` file for multiline code.
 
 ## Multiple Editors
 

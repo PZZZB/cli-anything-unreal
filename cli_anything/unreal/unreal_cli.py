@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
@@ -263,6 +264,148 @@ def _fix_argv_msys2():
     sys.argv = fixed
 
 
+def _parse_run_script_option_suffix(text: str) -> list[str] | None:
+    """Parse options that Click permits after ``run-script -c CODE``."""
+    tokens = text.split()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("--no-save", "-h", "--help"):
+            index += 1
+            continue
+        if token == "--timeout":
+            if index + 1 >= len(tokens):
+                return None
+            try:
+                int(tokens[index + 1])
+            except ValueError:
+                return None
+            index += 2
+            continue
+        if token.startswith("--timeout="):
+            try:
+                int(token.partition("=")[2])
+            except ValueError:
+                return None
+            index += 1
+            continue
+        return None
+    return tokens
+
+
+def _decode_windows_inline_code(text: str) -> str:
+    """Decode quote escapes while retaining quotes PowerShell left unescaped."""
+    decoded: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "\\":
+            decoded.append(text[index])
+            index += 1
+            continue
+
+        slash_start = index
+        while index < len(text) and text[index] == "\\":
+            index += 1
+        slash_count = index - slash_start
+        if index < len(text) and text[index] == '"':
+            decoded.append("\\" * (slash_count // 2))
+            decoded.append('"')
+            index += 1
+        else:
+            decoded.append("\\" * slash_count)
+    return "".join(decoded)
+
+
+def _repair_windows_run_script_code_argv(argv: list[str], raw_command_line: str) -> list[str]:
+    """Recover PowerShell-stripped quotes in ``editor run-script -c``.
+
+    Windows PowerShell 5.1 does not escape embedded double quotes when it
+    serializes a native-process argument. The raw command line still contains
+    those quotes, but the C runtime removes them (and can split a quoted Python
+    string containing spaces) before Python populates ``sys.argv``.
+    """
+    command_index = next(
+        (
+            index
+            for index in range(len(argv) - 1)
+            if argv[index:index + 2] == ["editor", "run-script"]
+        ),
+        None,
+    )
+    if command_index is None:
+        return argv
+
+    code_option_index = next(
+        (
+            index
+            for index in range(command_index + 2, len(argv))
+            if argv[index] in ("-c", "--code") or argv[index].startswith("--code=")
+        ),
+        None,
+    )
+    if code_option_index is None:
+        return argv
+
+    command_match = re.search(r"(?<!\S)editor\s+run-script(?=\s|$)", raw_command_line)
+    if command_match is None:
+        return argv
+    option_match = re.search(
+        r"(?<!\S)(?:-c|--code)(?:=|\s+)",
+        raw_command_line[command_match.end():],
+    )
+    if option_match is None:
+        return argv
+
+    value_start = command_match.end() + option_match.end()
+    raw_value = raw_command_line[value_start:]
+    suffix: list[str] | None = None
+    code_text: str | None = None
+
+    if raw_value.startswith('"'):
+        quote_positions = [
+            index for index, char in enumerate(raw_value[1:], start=1) if char == '"'
+        ]
+        for quote_index in reversed(quote_positions):
+            candidate_suffix = _parse_run_script_option_suffix(raw_value[quote_index + 1:])
+            if candidate_suffix is not None:
+                # Two quotes alone are ambiguous and already parse correctly.
+                # A nested quote proves that PowerShell discarded Python syntax.
+                if len(quote_positions) < 3:
+                    return argv
+                code_text = raw_value[1:quote_index]
+                suffix = candidate_suffix
+                break
+    else:
+        value_match = re.match(r"\S+", raw_value)
+        if value_match is not None:
+            candidate_suffix = _parse_run_script_option_suffix(raw_value[value_match.end():])
+            if candidate_suffix is not None:
+                code_text = value_match.group(0)
+                suffix = candidate_suffix
+
+    if code_text is None or suffix is None:
+        return argv
+
+    repaired_prefix = argv[:code_option_index]
+    option = argv[code_option_index]
+    repaired_prefix.append("--code" if option.startswith("--code=") else option)
+    return repaired_prefix + [_decode_windows_inline_code(code_text)] + suffix
+
+
+def _fix_argv_windows_run_script_code():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.GetCommandLineW.restype = ctypes.c_wchar_p
+        raw_command_line = ctypes.windll.kernel32.GetCommandLineW()
+    except (AttributeError, OSError):
+        return
+    if raw_command_line:
+        sys.argv = _repair_windows_run_script_code_argv(sys.argv, raw_command_line)
+
+
 def _default_output_mode() -> str:
     return "text" if sys.stdout.isatty() else "json"
 
@@ -388,6 +531,7 @@ register_commands(cli)
 
 
 def main():
+    _fix_argv_windows_run_script_code()
     _fix_argv_msys2()
     try:
         cli()

@@ -214,6 +214,64 @@ class TestCLI:
         finally:
             sys.argv = original
 
+    def test_windows_run_script_code_recovers_powershell_quotes(self):
+        from cli_anything.unreal.unreal_cli import _repair_windows_run_script_code_argv
+
+        damaged = [
+            "ue-cli",
+            "--project", r"F:\Test574\Test574.uproject",
+            "editor", "run-script", "--no-save", "-c",
+            "result = {label:SDOC_CacheTest_DynamicWall}",
+        ]
+        raw = (
+            '"D:\\Python\\Scripts\\ue-cli.exe" --project F:\\Test574\\Test574.uproject '
+            'editor run-script --no-save -c '
+            '"result = {"label":"SDOC_CacheTest_DynamicWall"}"'
+        )
+
+        repaired = _repair_windows_run_script_code_argv(damaged, raw)
+
+        assert repaired[-1] == 'result = {"label":"SDOC_CacheTest_DynamicWall"}'
+
+    def test_windows_run_script_code_rejoins_string_spaces_and_trailing_options(self):
+        from cli_anything.unreal.unreal_cli import _repair_windows_run_script_code_argv
+
+        damaged = [
+            "ue-cli", "editor", "run-script", "-c",
+            "result = {label:hello", "world}", "--timeout", "45", "--no-save",
+        ]
+        raw = (
+            'ue-cli editor run-script -c '
+            '"result = {"label": "hello world"}" --timeout 45 --no-save'
+        )
+
+        repaired = _repair_windows_run_script_code_argv(damaged, raw)
+
+        assert repaired == [
+            "ue-cli", "editor", "run-script", "-c",
+            'result = {"label": "hello world"}', "--timeout", "45", "--no-save",
+        ]
+
+    def test_windows_run_script_code_accepts_explicit_quote_escapes(self):
+        from cli_anything.unreal.unreal_cli import _repair_windows_run_script_code_argv
+
+        argv = ["ue-cli", "editor", "run-script", "--code=result={label:x}"]
+        raw = 'ue-cli editor run-script --code="result={\\"label\\":\\"x\\"}"'
+
+        repaired = _repair_windows_run_script_code_argv(argv, raw)
+
+        assert repaired == [
+            "ue-cli", "editor", "run-script", "--code", 'result={"label":"x"}',
+        ]
+
+    def test_windows_run_script_code_leaves_other_commands_unchanged(self):
+        from cli_anything.unreal.unreal_cli import _repair_windows_run_script_code_argv
+
+        argv = ["ue-cli", "editor", "exec", "result={label:x}"]
+        raw = 'ue-cli editor exec "result={"label":"x"}"'
+
+        assert _repair_windows_run_script_code_argv(argv, raw) is argv
+
     def test_project_info(self, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
