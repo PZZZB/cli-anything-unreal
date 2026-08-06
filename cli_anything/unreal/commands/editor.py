@@ -26,6 +26,7 @@ from cli_anything.unreal.commands import (
 from cli_anything.unreal.core.tasks import (
     FINAL_TASK_STATUSES,
     TaskLockTimeout,
+    TaskWorkerSpawnError,
     cancel_task,
     iter_tasks,
     load_task,
@@ -2301,7 +2302,16 @@ def editor_launch(
         "extra_args": extra_args,
         "unattended": unattended,
     }
-    task = submit_task("editor.launch", payload)
+    try:
+        task = submit_task("editor.launch", payload)
+    except TaskWorkerSpawnError as error:
+        raise AppError(
+            error.code,
+            str(error),
+            exit_code=3,
+            suggestion="Inspect details for the Windows process-creation failure.",
+            details=error.details,
+        ) from error
     if no_wait:
         output({"task_id": task["task_id"], "status": "submitted", "suggested_poll_interval_seconds": 5}, state)
         return

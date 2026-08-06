@@ -19,6 +19,7 @@ from cli_anything.unreal.core.build import (
 from cli_anything.unreal.commands import AppError, AppState, _same_project_path, handle_error, output, require_project
 from cli_anything.unreal.core.tasks import (
     FINAL_TASK_STATUSES,
+    TaskWorkerSpawnError,
     load_task,
     reconcile_task_state,
     submit_task,
@@ -282,7 +283,16 @@ def _wait_for_task_with_log_stream(task_id: str, timeout: int | None, log_file: 
 
 
 def _run_task(command: str, payload: dict, *, timeout: int | None, no_wait: bool, timeout_code: str):
-    task = submit_task(command, payload)
+    try:
+        task = submit_task(command, payload)
+    except TaskWorkerSpawnError as error:
+        raise AppError(
+            error.code,
+            str(error),
+            exit_code=3,
+            suggestion="Inspect details for the Windows process-creation failure.",
+            details=error.details,
+        ) from error
     if no_wait:
         return {
             "task_id": task["task_id"],

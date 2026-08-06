@@ -30,6 +30,36 @@ class TaskLockTimeout(TimeoutError):
         )
 
 
+class TaskWorkerSpawnError(RuntimeError):
+    """Raised when no background task worker process can be created."""
+
+    code = "TASK_WORKER_SPAWN_FAILED"
+
+    def __init__(self, task_id: str, attempts: list[dict]):
+        self.task_id = task_id
+        self.attempts = attempts
+        self.details = {
+            "task_id": task_id,
+            "fallback_attempted": len(attempts) > 1,
+            "attempts": attempts,
+        }
+        if len(attempts) > 1:
+            message = (
+                "Failed to start background task worker, including retry without "
+                "CREATE_BREAKAWAY_FROM_JOB."
+            )
+        else:
+            message = "Failed to start background task worker."
+        super().__init__(message)
+
+    def as_task_error(self) -> dict:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "details": self.details,
+        }
+
+
 def _task_root() -> Path:
     override = os.environ.get("UE_CLI_TASK_DIR")
     if override:
@@ -627,6 +657,8 @@ def task_progress(task: dict) -> dict:
         result["output_integrity"] = task["output_integrity"]
     if "reconciliation" in task:
         result["reconciliation"] = task["reconciliation"]
+    if "worker_spawn" in task:
+        result["worker_spawn"] = task["worker_spawn"]
     return result
 
 
@@ -637,6 +669,33 @@ def _spawn_creationflags() -> int:
     for name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_BREAKAWAY_FROM_JOB"):
         flags |= getattr(subprocess, name, 0)
     return flags
+
+
+def _worker_spawn_attempt(error: OSError, creationflags: int, *, mode: str) -> dict:
+    return {
+        "mode": mode,
+        "creationflags": creationflags,
+        "breakaway_requested": bool(
+            creationflags & getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+        ),
+        "error": {
+            "type": type(error).__name__,
+            "errno": getattr(error, "errno", None),
+            "winerror": getattr(error, "winerror", None),
+            "message": str(error),
+        },
+    }
+
+
+def _raise_worker_spawn_error(task_id: str, attempts: list[dict]) -> None:
+    error = TaskWorkerSpawnError(task_id, attempts)
+    try:
+        update_task_fields(task_id, status="failed", error=error.as_task_error())
+    except OSError:
+        # Preserve the process-creation failure if task-state persistence is
+        # independently blocked.
+        pass
+    raise error
 
 
 def spawn_worker(task_id: str) -> int:
@@ -656,12 +715,60 @@ def spawn_worker(task_id: str) -> int:
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
     }
+    initial_creationflags = 0
     if sys.platform == "win32":
-        kwargs["creationflags"] = _spawn_creationflags()
+        initial_creationflags = _spawn_creationflags()
+        kwargs["creationflags"] = initial_creationflags
     else:
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(cmd, **kwargs)
+    worker_spawn = None
+    try:
+        proc = subprocess.Popen(cmd, **kwargs)
+    except OSError as initial_error:
+        breakaway_flag = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+        should_retry_without_breakaway = (
+            sys.platform == "win32"
+            and getattr(initial_error, "winerror", None) == 5
+            and bool(breakaway_flag)
+            and bool(initial_creationflags & breakaway_flag)
+        )
+        initial_mode = (
+            "with_breakaway"
+            if breakaway_flag and initial_creationflags & breakaway_flag
+            else "default"
+        )
+        attempts = [
+            _worker_spawn_attempt(
+                initial_error,
+                initial_creationflags,
+                mode=initial_mode,
+            )
+        ]
+        if not should_retry_without_breakaway:
+            _raise_worker_spawn_error(task_id, attempts)
+
+        fallback_creationflags = initial_creationflags & ~breakaway_flag
+        kwargs["creationflags"] = fallback_creationflags
+        try:
+            proc = subprocess.Popen(cmd, **kwargs)
+        except OSError as fallback_error:
+            attempts.append(
+                _worker_spawn_attempt(
+                    fallback_error,
+                    fallback_creationflags,
+                    mode="without_breakaway",
+                )
+            )
+            _raise_worker_spawn_error(task_id, attempts)
+        worker_spawn = {
+            "fallback_used": True,
+            "reason": "breakaway_access_denied",
+            "initial_attempt": attempts[0],
+            "fallback_creationflags": fallback_creationflags,
+        }
     updates = {"worker_pid": proc.pid}
+    if worker_spawn:
+        updates["worker_spawn"] = worker_spawn
     worker_identity = _capture_windows_process_identity(proc.pid)
     if worker_identity:
         updates["worker_process_identity"] = worker_identity

@@ -1869,6 +1869,58 @@ def test_editor_launch_unattended_propagates_to_payload(mini_project):
     assert captured["payload"]["unattended"] is True
 
 
+def test_editor_launch_reports_structured_worker_spawn_failure(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import TaskWorkerSpawnError
+    from cli_anything.unreal.unreal_cli import cli
+
+    error = TaskWorkerSpawnError(
+        "task-failed",
+        [
+            {
+                "mode": "with_breakaway",
+                "creationflags": 16777736,
+                "breakaway_requested": True,
+                "error": {
+                    "type": "PermissionError",
+                    "errno": 13,
+                    "winerror": 5,
+                    "message": "[WinError 5] Access is denied",
+                },
+            },
+            {
+                "mode": "without_breakaway",
+                "creationflags": 520,
+                "breakaway_requested": False,
+                "error": {
+                    "type": "PermissionError",
+                    "errno": 13,
+                    "winerror": 5,
+                    "message": "[WinError 5] Access is denied",
+                },
+            },
+        ],
+    )
+    with patch(
+        "cli_anything.unreal.commands.editor.submit_task",
+        side_effect=error,
+    ), patch(
+        "cli_anything.unreal.commands.editor._check_already_running",
+        return_value=None,
+    ):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--unattended",
+        ])
+
+    assert result.exit_code == 3
+    data = json.loads(result.output)
+    assert data["status"] == "error"
+    assert data["code"] == "TASK_WORKER_SPAWN_FAILED"
+    assert data["details"] == error.details
+    assert data["details"]["fallback_attempted"] is True
+
+
 def test_editor_launch_no_unattended_propagates_to_payload(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

@@ -2200,6 +2200,96 @@ class TestBuildStopAndDetect:
         assert saved["worker_pid"] == 41653
         assert saved["worker_process_identity"] == identity
 
+    def test_spawn_worker_retries_without_breakaway_on_access_denied(
+        self, tmp_path, monkeypatch
+    ):
+        """Restrictive caller jobs still allow a worker inherited into the job."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task("editor.launch", {"project_path": "P.uproject"})
+        access_denied = PermissionError(13, "Access is denied")
+        access_denied.winerror = 5
+        worker = MagicMock(pid=41655)
+
+        with patch.object(tasks.sys, "platform", "win32"), patch.object(
+            tasks.subprocess,
+            "Popen",
+            side_effect=[access_denied, worker],
+        ) as popen, patch.object(
+            tasks,
+            "_capture_windows_process_identity",
+            return_value=None,
+        ):
+            worker_pid = tasks.spawn_worker(task["task_id"])
+
+        breakaway_flag = tasks.subprocess.CREATE_BREAKAWAY_FROM_JOB
+        first_flags = popen.call_args_list[0].kwargs["creationflags"]
+        fallback_flags = popen.call_args_list[1].kwargs["creationflags"]
+        assert worker_pid == 41655
+        assert first_flags & breakaway_flag
+        assert fallback_flags == first_flags & ~breakaway_flag
+        saved = tasks.load_task(task["task_id"])
+        assert saved["worker_pid"] == 41655
+        assert saved["worker_spawn"]["fallback_used"] is True
+        assert saved["worker_spawn"]["initial_attempt"]["error"]["winerror"] == 5
+        assert tasks.task_progress(saved)["worker_spawn"] == saved["worker_spawn"]
+
+    def test_spawn_worker_reports_both_errors_when_breakaway_fallback_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """Both process-creation attempts remain available as structured diagnostics."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task("editor.launch", {"project_path": "P.uproject"})
+        initial_error = PermissionError(13, "Access is denied")
+        initial_error.winerror = 5
+        fallback_error = PermissionError(13, "Fallback access is denied")
+        fallback_error.winerror = 5
+
+        with patch.object(tasks.sys, "platform", "win32"), patch.object(
+            tasks.subprocess,
+            "Popen",
+            side_effect=[initial_error, fallback_error],
+        ) as popen:
+            with pytest.raises(tasks.TaskWorkerSpawnError) as exc_info:
+                tasks.spawn_worker(task["task_id"])
+
+        assert popen.call_count == 2
+        assert exc_info.value.code == "TASK_WORKER_SPAWN_FAILED"
+        assert exc_info.value.details["fallback_attempted"] is True
+        assert [attempt["mode"] for attempt in exc_info.value.attempts] == [
+            "with_breakaway",
+            "without_breakaway",
+        ]
+        saved = tasks.load_task(task["task_id"])
+        assert saved["status"] == "failed"
+        assert saved["error"] == exc_info.value.as_task_error()
+
+    def test_spawn_worker_does_not_retry_unrelated_windows_error(
+        self, tmp_path, monkeypatch
+    ):
+        """Only access denied from breakaway creation gets the compatibility retry."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = tasks.create_task("editor.launch", {"project_path": "P.uproject"})
+        sharing_error = PermissionError(13, "File is in use")
+        sharing_error.winerror = 32
+
+        with patch.object(tasks.sys, "platform", "win32"), patch.object(
+            tasks.subprocess,
+            "Popen",
+            side_effect=sharing_error,
+        ) as popen:
+            with pytest.raises(tasks.TaskWorkerSpawnError) as exc_info:
+                tasks.spawn_worker(task["task_id"])
+
+        assert popen.call_count == 1
+        assert exc_info.value.details["fallback_attempted"] is False
+        assert exc_info.value.attempts[0]["error"]["winerror"] == 32
+
     def test_build_task_persists_native_root_process_identity(
         self, temp_project, tmp_path, monkeypatch
     ):
