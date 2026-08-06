@@ -67,7 +67,7 @@ First launch may:
 - enable `RemoteControl`, `PythonScriptPlugin`, `EditorScriptingUtilities`, and `CliAnythingBridge` in the `.uproject`;
 - create or update `Config/DefaultRemoteControl.ini`;
 - deploy `Plugins/CliAnythingBridge`;
-- compile the bridge when its binary is missing or stale.
+- compile the bridge when its binary is missing or stale, waiting for any active UAT instance to release its mutex.
 
 Commit or back up the project before first launch if these project-file changes need review.
 

@@ -137,6 +137,7 @@ class TestBuildSuccessPaths:
             assert "stdout" not in result
             assert "stderr" not in result
             assert "-utf8output" not in mock_run.call_args.args[2]
+            assert "-WaitForUATMutex" in mock_run.call_args.args[2]
 
     def test_compile_rejects_corrupt_pe_from_editor_target_receipt(
         self, temp_project

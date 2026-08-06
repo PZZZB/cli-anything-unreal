@@ -1021,6 +1021,7 @@ def compile_project(
         f"-clientconfig={config}",
         "-build",
         "-noP4",
+        "-WaitForUATMutex",
     ]
     result = run_uat(
         engine_root,
