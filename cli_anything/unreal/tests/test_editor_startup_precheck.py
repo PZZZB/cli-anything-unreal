@@ -1010,7 +1010,7 @@ def test_editor_close_waits_for_process_exit_after_api_closes(mini_project):
     mock_api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
     mock_wait.assert_called_once()
     assert mock_wait.call_args.args == (mini_project, 30010)
-    assert mock_wait.call_args.kwargs["timeout"] == 60
+    assert mock_wait.call_args.kwargs["timeout"] == 10
     assert mock_wait.call_args.kwargs["targets"] == [{
         "pid": 98364,
         "project": mini_project,
@@ -1019,6 +1019,103 @@ def test_editor_close_waits_for_process_exit_after_api_closes(mini_project):
     assert data["status"] == "success"
     assert data["result"]["status"] == "closed"
     assert data["result"]["method"] == "process_exit"
+
+
+def test_editor_close_terminates_stale_peer_without_waiting_for_it(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    active_target = {"pid": 78808, "project": mini_project}
+    stale_target = {"pid": 79352, "project": mini_project}
+    mock_api = MagicMock()
+    mock_api.is_alive.side_effect = [True, False]
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+        return_value=mock_api,
+    ) as api_class, patch(
+        "cli_anything.unreal.utils.ue_backend.find_running_editors",
+        return_value=[active_target, stale_target],
+    ), patch(
+        "cli_anything.unreal.commands.editor._capture_project_editor_targets",
+        return_value=[active_target, stale_target],
+    ), patch(
+        "cli_anything.unreal.commands.editor._wait_for_project_editor_exit",
+        return_value={
+            "status": "closed",
+            "method": "process_exit",
+            "target_pids": [78808],
+        },
+    ) as wait_for_exit, patch(
+        "cli_anything.unreal.commands.editor._kill_matching_project_editors",
+        return_value={
+            "status": "closed",
+            "method": "process_tree_kill",
+            "closed_processes": [stale_target],
+        },
+    ) as kill_matching:
+        api_class._get_pid_listening_on_port.return_value = 78808
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    wait_for_exit.assert_called_once_with(
+        mini_project,
+        30010,
+        timeout=10,
+        targets=[active_target],
+    )
+    assert kill_matching.call_args.kwargs["expected_targets"] == [stale_target]
+    data = json.loads(result.output)
+    assert data["result"]["status"] == "closed"
+    assert data["result"]["method"] == "graceful_exit_and_stale_process_close"
+    assert data["result"]["target_pids"] == [78808, 79352]
+    assert data["result"]["graceful_close"]["target_pids"] == [78808]
+    assert data["result"]["stale_close"]["closed_processes"] == [stale_target]
+
+
+def test_editor_close_reports_failed_stale_peer_after_active_exit(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    active_target = {"pid": 78808, "project": mini_project}
+    stale_target = {"pid": 79352, "project": mini_project}
+    mock_api = MagicMock()
+    mock_api.is_alive.side_effect = [True, False]
+    stale_failure = {
+        "status": "failed",
+        "failed_processes": [{"pid": 79352, "project": mini_project}],
+    }
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+        return_value=mock_api,
+    ) as api_class, patch(
+        "cli_anything.unreal.utils.ue_backend.find_running_editors",
+        return_value=[active_target, stale_target],
+    ), patch(
+        "cli_anything.unreal.commands.editor._capture_project_editor_targets",
+        return_value=[active_target, stale_target],
+    ), patch(
+        "cli_anything.unreal.commands.editor._wait_for_project_editor_exit",
+        return_value={"status": "closed", "method": "process_exit"},
+    ), patch(
+        "cli_anything.unreal.commands.editor._kill_matching_project_editors",
+        return_value=stale_failure,
+    ):
+        api_class._get_pid_listening_on_port.return_value = 78808
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 3
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_CLOSE_FAILED"
+    assert data["details"]["graceful_close"]["status"] == "closed"
+    assert data["details"]["stale_close"] == stale_failure
 
 
 def test_editor_close_kills_original_pid_after_project_metadata_disappears(

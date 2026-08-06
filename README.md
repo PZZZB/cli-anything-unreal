@@ -176,6 +176,8 @@ ue-cli --output json --port 30011 material list
 
 When `--port` is omitted, ue-cli uses the selected project's `DefaultRemoteControl.ini` or one unambiguous live editor. Multiple matching editors produce a structured ambiguity error instead of choosing silently.
 
+`editor close` targets every running editor for the selected project. The process owning the selected Remote Control port receives a graceful close and up to 10 seconds to exit; additional same-project processes are treated as stale peers and terminated with PID-identity checks. The final payload reports both paths and fails if any original process cannot be verified closed.
+
 ## Output Contract
 
 Non-interactive callers receive JSON by default. `--output json` forces it. JSON mode writes one final machine-readable payload to stdout; progress, heartbeats, and diagnostics go to stderr.

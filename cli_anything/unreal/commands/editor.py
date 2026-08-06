@@ -32,6 +32,7 @@ REMOTE_UNREACHABLE_GRACE_SECONDS = 60
 REMOTE_UNREACHABLE_CACHE_TTL_SECONDS = 7200
 EDITOR_LOG_CAPTURE_LIMIT_BYTES = 2 * 1024 * 1024
 EDITOR_LOG_READ_CHUNK_BYTES = 64 * 1024
+EDITOR_CLOSE_PROCESS_GRACE_SECONDS = 10
 
 
 def _read_stdin_python_code(stream=None) -> str:
@@ -964,6 +965,68 @@ def _capture_project_editor_targets(matches: list[dict]) -> list[dict]:
             }
         targets.append(target)
     return targets
+
+
+def _partition_editor_close_targets(targets: list[dict], port: int) -> tuple[list[dict], list[dict]]:
+    """Separate the editor receiving QUIT_EDITOR from same-project stale peers."""
+    if len(targets) < 2:
+        return targets, []
+
+    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+    try:
+        api_owner_pid = UEEditorAPI._get_pid_listening_on_port(port)
+        api_owner_pid = int(api_owner_pid) if api_owner_pid is not None else None
+    except (OSError, TypeError, ValueError):
+        api_owner_pid = None
+
+    if api_owner_pid is None:
+        return targets, []
+
+    graceful_targets = [target for target in targets if int(target["pid"]) == api_owner_pid]
+    if not graceful_targets:
+        return targets, []
+    stale_targets = [target for target in targets if int(target["pid"]) != api_owner_pid]
+    return graceful_targets, stale_targets
+
+
+def _finish_partitioned_editor_close(
+    project_path: str | None,
+    port: int,
+    target_pids: list[int],
+    graceful_result: dict,
+    stale_targets: list[dict],
+) -> dict:
+    """Close stale peers immediately, then combine all close evidence."""
+    if not stale_targets:
+        result = {"status": "closed", "port": port}
+        result.update(graceful_result)
+        result["port"] = port
+        return result
+
+    stale_result = _kill_matching_project_editors(
+        project_path,
+        port,
+        success_message="Closed stale same-project UnrealEditor processes after the active editor exited.",
+        failure_message="The active editor exited, but stale same-project UnrealEditor processes could not all be terminated.",
+        expected_targets=stale_targets,
+    )
+    result = {
+        "status": "closed" if stale_result and stale_result.get("status") == "closed" else "failed",
+        "port": port,
+        "method": "graceful_exit_and_stale_process_close",
+        "target_pids": target_pids,
+        "graceful_close": graceful_result,
+        "stale_close": stale_result,
+    }
+    if result["status"] != "closed":
+        raise AppError(
+            "EDITOR_CLOSE_FAILED",
+            "The active editor exited, but stale same-project UnrealEditor processes could not all be terminated.",
+            exit_code=3,
+            details=result,
+        )
+    return result
 
 
 def _project_process_exit_evidence(
@@ -2133,6 +2196,8 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
         return {"status": "offline", "port": state.session.port, "message": "No editor running on this port."}
 
     targets = []
+    graceful_targets = []
+    stale_targets = []
     target_pids = []
     if state.session.project_path and sys.platform == "win32":
         running, matches = _find_matching_project_editors(state.session.project_path)
@@ -2151,6 +2216,10 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
                 },
             )
         targets = _capture_project_editor_targets(matches)
+        graceful_targets, stale_targets = _partition_editor_close_targets(
+            targets,
+            state.session.port,
+        )
         target_pids = sorted({int(target["pid"]) for target in targets})
 
     try:
@@ -2174,36 +2243,46 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
             drain_result = _wait_for_project_editor_exit(
                 state.session.project_path,
                 state.session.port,
-                timeout=60,
-                targets=targets,
+                timeout=EDITOR_CLOSE_PROCESS_GRACE_SECONDS,
+                targets=graceful_targets,
             )
             if drain_result is None:
-                return {"status": "closed", "port": state.session.port}
+                drain_result = {"status": "closed", "port": state.session.port}
             if drain_result.get("status") == "closed":
-                result = {"status": "closed", "port": state.session.port}
-                result.update(drain_result)
-                result["port"] = state.session.port
-                return result
+                return _finish_partitioned_editor_close(
+                    state.session.project_path,
+                    state.session.port,
+                    target_pids,
+                    drain_result,
+                    stale_targets,
+                )
             raise AppError(
                 "EDITOR_CLOSE_FAILED",
                 drain_result.get("message", "Editor API closed but UnrealEditor process did not exit."),
                 exit_code=3,
                 details=drain_result,
             )
-        if target_pids:
+        if graceful_targets:
             confirmed_exit, process_evidence = _project_process_exit_evidence(
                 state.session.project_path,
-                targets,
+                graceful_targets,
             )
             last_process_evidence = process_evidence
             if confirmed_exit:
-                return {
+                graceful_result = {
                     "status": "closed",
                     "port": state.session.port,
                     "method": "project_process_exit",
-                    "target_pids": target_pids,
+                    "target_pids": sorted(int(target["pid"]) for target in graceful_targets),
                     "pid_evidence": process_evidence["pids"],
                 }
+                return _finish_partitioned_editor_close(
+                    state.session.project_path,
+                    state.session.port,
+                    target_pids,
+                    graceful_result,
+                    stale_targets,
+                )
         time.sleep(2)
 
     kill_result = _kill_matching_project_editors(
