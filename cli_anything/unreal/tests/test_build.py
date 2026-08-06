@@ -849,6 +849,49 @@ class TestBuildSuccessPaths:
         assert "error C2065" in result["diagnostics"][0]
         assert "fatal error LNK1104" in result["diagnostics"][1]
 
+    def test_package_cook_plugin_failure_takes_priority_over_old_errors(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.build import _normalize_result
+
+        plugin_error = (
+            "LogPluginManager: Error: Plugin 'AssetReferenceRestrictions' failed "
+            "to load because module 'AssetReferenceRestrictions' could not be found."
+        )
+        log_file = tmp_path / "cli_package.log"
+        log_file.write_text(
+            "\n".join([
+                "Source.cpp(42): error C2065: 'OldCompileError': undeclared identifier",
+                (
+                    "[0806/120000.000:ERROR:tcp_socket_win.cc(123)] "
+                    "bind() returned an error"
+                ),
+                plugin_error,
+                "UnrealEditor-Cmd.exe, ExitCode=1",
+                "Cook failed.",
+                (
+                    "AutomationTool exiting with ExitCode=25 "
+                    "(Error_UnknownCookFailure)"
+                ),
+            ]),
+            encoding="utf-8",
+        )
+
+        result = _normalize_result(
+            {"returncode": 25, "log_file": str(log_file)},
+            "Package",
+        )
+
+        assert result["status"] == "error"
+        assert result["code"] == "BUILD_PLUGIN_LOAD_FAILED"
+        assert result["failure_kind"] == "plugin_load_failure"
+        assert result["phase"] == "cook"
+        assert result["plugin"] == "AssetReferenceRestrictions"
+        assert result["module"] == "AssetReferenceRestrictions"
+        assert result["diagnostic"] == plugin_error
+        assert result["diagnostics"] == [plugin_error]
+
     def test_compile_failure_classifies_missing_include_with_engine_context(
         self,
         temp_project,

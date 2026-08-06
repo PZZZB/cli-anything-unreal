@@ -182,6 +182,8 @@ Non-interactive callers receive JSON by default. `--output json` forces it. JSON
 
 Runners should either stream stdout live or replay captured stdout once, never both.
 
+Failed cook/package results prioritize terminal plugin-load failures over compiler-like lines from earlier phases. These failures return `code=BUILD_PLUGIN_LOAD_FAILED`, `failure_kind=plugin_load_failure`, the primary `diagnostic`, plugin/module names when available, and `phase=cook` when the UAT log identifies Cook as the failing phase.
+
 ## Features
 
 - **Project management:** parse `.uproject`, inspect `.ini`, list content assets

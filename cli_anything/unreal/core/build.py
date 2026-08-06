@@ -50,6 +50,18 @@ _MSVC_MISSING_INCLUDE_MESSAGE_PATTERN = re.compile(
 _QUOTED_INCLUDE_PATTERN = re.compile(
     r"""["'“‘](?P<include>[^"'“”‘’]+)["'”’]"""
 )
+_PLUGIN_LOAD_FAILURE_PATTERN = re.compile(
+    r"\bPlugin\s+['\"](?P<plugin>[^'\"]+)['\"]\s+failed to load\b",
+    re.IGNORECASE,
+)
+_PLUGIN_LOAD_MODULE_PATTERN = re.compile(
+    r"\bmodule\s+['\"](?P<module>[^'\"]+)['\"]\s+could not be found\b",
+    re.IGNORECASE,
+)
+_COOK_FAILURE_PATTERN = re.compile(
+    r"\bCook failed\b|\bError_UnknownCookFailure\b",
+    re.IGNORECASE,
+)
 
 _TARGET_LEXICAL_NOISE_PATTERN = re.compile(
     r"//[^\r\n]*|/\*.*?\*/|"
@@ -363,6 +375,35 @@ def _build_failure_diagnostics(
         return {}
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    plugin_load_failures = []
+    for line in lines:
+        match = _PLUGIN_LOAD_FAILURE_PATTERN.search(line)
+        if match:
+            plugin_load_failures.append((line, match))
+    if plugin_load_failures:
+        primary_diagnostic, primary_match = plugin_load_failures[-1]
+        diagnostics = list(dict.fromkeys(
+            line for line, _match in plugin_load_failures
+        ))[-20:]
+        result = {
+            "code": "BUILD_PLUGIN_LOAD_FAILED",
+            "failure_kind": "plugin_load_failure",
+            "diagnostic": primary_diagnostic,
+            "diagnostics": diagnostics,
+            "plugin": primary_match.group("plugin"),
+            "suggestion": (
+                "Verify that the plugin is enabled for this target and that its "
+                "module exists and is built for the selected Unreal Engine before "
+                "retrying the build."
+            ),
+        }
+        module_match = _PLUGIN_LOAD_MODULE_PATTERN.search(primary_diagnostic)
+        if module_match:
+            result["module"] = module_match.group("module")
+        if _COOK_FAILURE_PATTERN.search(text):
+            result["phase"] = "cook"
+        return result
+
     compiler_diagnostics = []
     for line in lines:
         if re.search(
