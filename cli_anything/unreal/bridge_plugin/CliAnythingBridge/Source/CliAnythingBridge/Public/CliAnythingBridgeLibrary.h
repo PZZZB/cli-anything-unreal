@@ -83,6 +83,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString GetConsoleVariableInfo(const FString& Name);
 
+	/** Returns the running editor's active RHI shader format (for example PCD3D_SM6). */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString GetActiveShaderPlatform();
+
+	/**
+	 * Recompiles one material for r.DumpShaderDebugInfo while preserving the
+	 * package's original dirty flag. Returns JSON diagnostics.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString RecompileMaterialShadersForDump(UMaterialInterface* Material);
+
 	/**
 	 * Returns JSON TextureSource metadata for a Texture2D.
 	 * UE Python exposes UTexture2D but not Texture->Source, so SDF/UI

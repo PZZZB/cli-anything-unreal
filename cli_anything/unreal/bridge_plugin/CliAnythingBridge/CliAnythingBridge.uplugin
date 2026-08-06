@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 24,
-	"VersionName": "1.24",
+	"Version": 25,
+	"VersionName": "1.25",
 	"FriendlyName": "CLI Anything Bridge",
 	"Description": "Exposes UE C++ APIs not available to Blueprint/Python alone (e.g. material compile errors, viewport screen bounds, HLSL/shader source code).",
 	"Category": "Editor",

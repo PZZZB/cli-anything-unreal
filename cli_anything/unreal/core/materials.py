@@ -1848,6 +1848,59 @@ SHADER_PLATFORMS = {
 }
 
 
+_PLUGIN_GET_ACTIVE_SHADER_PLATFORM_SCRIPT = r'''import unreal
+
+bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+if bridge is None:
+    result = {{
+        "error": "CliAnythingBridge is not loaded; shader-dump platform validation is unavailable.",
+        "code": "MATERIAL_SHADER_DUMP_BRIDGE_UNAVAILABLE",
+    }}
+else:
+    active_platform = str(bridge.get_active_shader_platform())
+    if active_platform:
+        result = {{"active_platform": active_platform}}
+    else:
+        result = {{
+            "error": "CliAnythingBridge could not determine the active shader platform.",
+            "code": "MATERIAL_SHADER_DUMP_BRIDGE_UNAVAILABLE",
+        }}
+'''
+
+
+_PLUGIN_RECOMPILE_SHADER_DUMP_SCRIPT = r'''import unreal
+import json
+
+material_path = "{material_path}"
+material_candidates = {material_path_candidates_json}
+mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, material_candidates)
+if mat is None:
+    result = {{
+        "error": "Material not found: " + material_path,
+        "code": "MATERIAL_NOT_FOUND",
+        "tried": tried_asset_paths,
+    }}
+else:
+    bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+    if bridge is None:
+        result = {{
+            "error": "CliAnythingBridge is not loaded; package-safe shader recompilation is unavailable.",
+            "code": "MATERIAL_SHADER_DUMP_BRIDGE_UNAVAILABLE",
+        }}
+    else:
+        raw_result = str(bridge.recompile_material_shaders_for_dump(mat))
+        try:
+            result = json.loads(raw_result)
+        except Exception:
+            result = {{
+                "error": "CliAnythingBridge returned an invalid shader-recompile result.",
+                "code": "MATERIAL_SHADER_RECOMPILE_FAILED",
+                "bridge_result": raw_result,
+            }}
+        result.setdefault("material", loaded_asset_path)
+'''
+
+
 def get_material_hlsl(
     api: UEEditorAPI,
     material_path: str,
@@ -1893,9 +1946,36 @@ def get_material_hlsl(
 
     # ── Step 1: Check if dump already exists ───────────────────────
     dump_dir = _find_shader_dump_dir(debug_base, mat_name)
+    if dump_dir and not any(dump_dir.rglob("*.usf")):
+        dump_dir = None
+    recompile_result = None
 
     # ── Step 2: If no dump, trigger one ────────────────────────────
     if not dump_dir:
+        platform_result = _exec_material_script(
+            api,
+            _PLUGIN_GET_ACTIVE_SHADER_PLATFORM_SCRIPT,
+            project_dir=project_dir,
+            timeout=10.0,
+            save=False,
+        )
+        if "error" in platform_result:
+            platform_result.setdefault("code", "MATERIAL_SHADER_DUMP_BRIDGE_UNAVAILABLE")
+            return platform_result
+
+        active_platform = str(platform_result.get("active_platform", ""))
+        if active_platform.casefold() != platform_dir_name.casefold():
+            return {
+                "error": (
+                    f"Requested shader platform '{platform_dir_name}' is not active; "
+                    f"the running editor uses '{active_platform}'. No recompile was started."
+                ),
+                "code": "SHADER_PLATFORM_NOT_ACTIVE",
+                "requested_platform": platform_dir_name,
+                "active_platform": active_platform,
+                "available_platforms": _available_shader_dump_platforms(project_dir),
+            }
+
         # Save original CVar
         old_value = api.get_cvar("r.DumpShaderDebugInfo")
 
@@ -1903,17 +1983,17 @@ def get_material_hlsl(
             api.set_cvar("r.DumpShaderDebugInfo", "1")
             time.sleep(0.5)
 
-            # Load the material asset first
-            api.call_function(
-                "/Script/EditorScriptingUtilities.Default__EditorAssetLibrary",
-                "LoadAsset",
-                {"AssetPath": material_path.rsplit(".", 1)[0]},
+            recompile_result = _exec_material_script(
+                api,
+                _PLUGIN_RECOMPILE_SHADER_DUMP_SCRIPT,
+                project_dir=project_dir,
+                timeout=30.0,
+                save=False,
+                material_path=material_path,
             )
-            time.sleep(0.5)
-
-            # Trigger recompile - use "RecompileShaders material <name>"
-            # for targeted recompile, falls back to "all" if needed
-            api.exec_console(f"RecompileShaders material {mat_name}")
+            if "error" in recompile_result:
+                recompile_result.setdefault("code", "MATERIAL_SHADER_RECOMPILE_FAILED")
+                return recompile_result
 
             # Wait for dump to appear (shader compilation is async)
             deadline = time.time() + 120  # up to 2 min for large materials
@@ -1934,16 +2014,13 @@ def get_material_hlsl(
             api.set_cvar("r.DumpShaderDebugInfo", restore_val)
 
     if not dump_dir or not dump_dir.exists():
-        available = []
-        shader_debug_root = Path(project_dir) / "Saved" / "ShaderDebugInfo"
-        if shader_debug_root.is_dir():
-            available = [d.name for d in shader_debug_root.iterdir() if d.is_dir()]
-
         return {
             "error": f"No shader dump found for '{mat_name}' on platform '{platform_dir_name}'. "
                      "Shader compilation may still be in progress. "
                      "Try again in a minute, or run: RecompileShaders all (with r.DumpShaderDebugInfo=1)",
-            "available_platforms": available,
+            "code": "SHADER_DUMP_NOT_FOUND",
+            "available_platforms": _available_shader_dump_platforms(project_dir),
+            "recompile": recompile_result,
         }
 
     # ── Step 3: Read shader files ──────────────────────────────────
@@ -1965,6 +2042,13 @@ def _find_shader_dump_dir(debug_base: Path, mat_name: str) -> Optional[Path]:
         if d.is_dir() and d.name.startswith(f"{mat_name}_"):
             return d
     return None
+
+
+def _available_shader_dump_platforms(project_dir: str) -> list[str]:
+    shader_debug_root = Path(project_dir) / "Saved" / "ShaderDebugInfo"
+    if not shader_debug_root.is_dir():
+        return []
+    return sorted(d.name for d in shader_debug_root.iterdir() if d.is_dir())
 
 
 def _read_shader_dump(
@@ -2094,6 +2178,7 @@ def _exec_material_script(
     script_template: str,
     project_dir: str | None = None,
     timeout: float = 30.0,
+    save: bool = True,
     **kwargs,
 ) -> dict:
     """Execute a material query Python script in the editor and read results.
@@ -2107,6 +2192,7 @@ def _exec_material_script(
         script_template: Python script template with {placeholders}.
         project_dir: Unused — kept for backwards compatibility.
         timeout: HTTP request timeout in seconds.
+        save: Whether script-runner should auto-save dirty packages.
         **kwargs: Template variables.
 
     Returns:
@@ -2122,4 +2208,4 @@ def _exec_material_script(
             json.dumps(_material_asset_path_candidates(material_path), ensure_ascii=False),
         )
     script_content = _MATERIAL_RESOLVER + "\n" + script_template.format(**kwargs)
-    return run_python_code(api, script_content, timeout=timeout)
+    return run_python_code(api, script_content, timeout=timeout, save=save)

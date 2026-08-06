@@ -500,7 +500,37 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.24"
+        assert version == "1.25"
+
+    def test_bridge_shader_dump_recompile_restores_package_dirty_state(self):
+        """Diagnostic shader dumps must not leave a clean material package dirty."""
+        plugin_dir = Path(__file__).resolve().parents[1] / "bridge_plugin" / "CliAnythingBridge"
+        header = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Public"
+            / "CliAnythingBridgeLibrary.h"
+        ).read_text(encoding="utf-8")
+        cpp = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+        function = cpp.split(
+            "FString UCliAnythingBridgeLibrary::RecompileMaterialShadersForDump",
+            1,
+        )[1].split("TArray<FString> UCliAnythingBridgeLibrary::GetMaterialHLSLCode", 1)[0]
+
+        assert "GetActiveShaderPlatform" in header
+        assert "RecompileMaterialShadersForDump" in header
+        assert "Package->IsDirty()" in function
+        assert "Material->PreEditChange(nullptr)" in function
+        assert "Material->PostEditChange()" in function
+        assert "Package->SetDirtyFlag(bDirtyBefore)" in function
+        assert "package_dirty_restored" in function
 
     def test_bridge_shader_source_refreshes_changed_files_before_extraction(self):
         """Shader extraction must invalidate changed engine shader sources first."""

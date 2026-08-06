@@ -171,6 +171,7 @@ Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem p
 `material info` supports Material and MaterialInstanceConstant assets. Other material asset classes, including MaterialFunction, return `MATERIAL_INFO_UNSUPPORTED_CLASS` instead of an empty successful result.
 `material info`, `material analyze`, and `material get-graph` recognize Material Attributes connections as material outputs and trace their upstream graph.
 `material shader-source` refreshes changed engine `.usf`/`.ush` files before synchronous extraction. Success reports `shader_cache_refresh=changed`; an empty extraction returns `MATERIAL_SHADER_SOURCE_FAILED` instead of stale success.
+`material dump-hlsl` rejects an inactive requested shader platform before recompiling, preserves the material package's original dirty flag, and returns a nonzero structured error when no dump or matching shader stage is available.
 On Windows PowerShell, `editor run-script -c` preserves double-quoted Python string literals that native argument parsing would otherwise strip. Use stdin (`editor run-script -`) or a `.py` file for multiline code.
 A `.py` file passed to `editor run-script` executes with `__name__ == "__main__"` and an absolute `__file__`, so guarded script entrypoints run normally.
 Each `editor run-script` invocation receives fresh globals. Deferred Unreal callbacks retain that invocation's globals after the command returns; store their handles and unregister them when finished because later callback failures appear only in the editor log.

@@ -235,6 +235,138 @@ class TestMaterials:
         assert data["details"]["material"] == "/Game/M_Test.M_Test"
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_dump_hlsl_rejects_inactive_platform_before_recompile(self, mock_exec, tmp_path):
+        from cli_anything.unreal.core.materials import get_material_hlsl
+
+        (tmp_path / "Saved" / "ShaderDebugInfo" / "PCD3D_SM6").mkdir(parents=True)
+        mock_exec.return_value = {"active_platform": "PCD3D_SM6"}
+        mock_api = MagicMock()
+
+        result = get_material_hlsl(
+            mock_api,
+            "/Game/M_Test",
+            project_dir=str(tmp_path),
+            platform="sm5",
+        )
+
+        assert result["code"] == "SHADER_PLATFORM_NOT_ACTIVE"
+        assert result["requested_platform"] == "PCD3D_SM5"
+        assert result["active_platform"] == "PCD3D_SM6"
+        assert result["available_platforms"] == ["PCD3D_SM6"]
+        mock_api.get_cvar.assert_not_called()
+        mock_api.exec_console.assert_not_called()
+        assert mock_exec.call_args.kwargs["save"] is False
+
+    @patch("cli_anything.unreal.core.materials.time.sleep")
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_dump_hlsl_recompile_preserves_dirty_state(self, mock_exec, mock_sleep, tmp_path):
+        from cli_anything.unreal.core.materials import get_material_hlsl
+
+        dump_dir = (
+            tmp_path
+            / "Saved"
+            / "ShaderDebugInfo"
+            / "PCD3D_SM6"
+            / "M_Test_ABC"
+            / "Default"
+            / "FLocalVertexFactory"
+            / "TBasePassPSFNoLightMapPolicy"
+        )
+
+        def run_script(_api, script_template, **kwargs):
+            if "get_active_shader_platform" in script_template:
+                return {"active_platform": "PCD3D_SM6"}
+            dump_dir.mkdir(parents=True)
+            (dump_dir / "M_Test.usf").write_text(
+                "void CalcPixelMaterialInputs()\n{\n}\n",
+                encoding="utf-8",
+            )
+            return {
+                "status": "ok",
+                "package_dirty_before": False,
+                "package_dirty_after_recompile": True,
+                "package_dirty_restored": True,
+            }
+
+        mock_exec.side_effect = run_script
+        mock_api = MagicMock()
+        mock_api.get_cvar.return_value = "0"
+
+        result = get_material_hlsl(
+            mock_api,
+            "/Game/M_Test",
+            project_dir=str(tmp_path),
+            platform="sm6",
+        )
+
+        assert result["platform"] == "PCD3D_SM6"
+        assert result["shader_count"] == 1
+        assert "CalcPixelMaterialInputs" in result["material_code"]
+        assert len(mock_exec.call_args_list) == 2
+        assert all(call.kwargs["save"] is False for call in mock_exec.call_args_list)
+        mock_api.set_cvar.assert_any_call("r.DumpShaderDebugInfo", "1")
+        mock_api.set_cvar.assert_any_call("r.DumpShaderDebugInfo", "0")
+        mock_api.exec_console.assert_not_called()
+
+    @patch("cli_anything.unreal.core.materials.get_material_hlsl")
+    def test_dump_hlsl_cli_promotes_missing_dump_error(self, mock_hlsl, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_hlsl.return_value = {
+            "error": "No shader dump found for 'M_Test' on platform 'PCD3D_SM6'.",
+            "code": "SHADER_DUMP_NOT_FOUND",
+            "available_platforms": ["PCD3D_SM6", "VM"],
+        }
+        output_path = tmp_path / "missing.usf"
+
+        with patch(
+            "cli_anything.unreal.commands.material.require_editor",
+            return_value=MagicMock(),
+        ), patch("cli_anything.unreal.commands.material.require_project"):
+            result = CliRunner().invoke(cli, [
+                "--output", "json",
+                "material", "dump-hlsl", "/Game/M_Test",
+                "--output", str(output_path),
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "SHADER_DUMP_NOT_FOUND"
+        assert data["details"]["available_platforms"] == ["PCD3D_SM6", "VM"]
+        assert not output_path.exists()
+
+    @patch("cli_anything.unreal.core.materials.get_material_hlsl")
+    def test_dump_hlsl_cli_reports_output_write_failure(self, mock_hlsl, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_hlsl.return_value = {
+            "material": "/Game/M_Test.M_Test",
+            "platform": "PCD3D_SM6",
+            "shader_count": 1,
+            "shaders": [{"pass": "TBasePassPS", "code": "shader code"}],
+            "material_code": "material code",
+        }
+        output_path = tmp_path / "missing-directory" / "dump.usf"
+
+        with patch(
+            "cli_anything.unreal.commands.material.require_editor",
+            return_value=MagicMock(),
+        ), patch("cli_anything.unreal.commands.material.require_project"):
+            result = CliRunner().invoke(cli, [
+                "--output", "json",
+                "material", "dump-hlsl", "/Game/M_Test",
+                "--output", str(output_path),
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "SHADER_DUMP_WRITE_FAILED"
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_get_material_info_script_fallback(self, mock_exec_script):
         """Test graceful fallback when Python script is unavailable."""
         from cli_anything.unreal.core.materials import get_material_info

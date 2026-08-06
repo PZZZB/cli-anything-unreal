@@ -192,33 +192,70 @@ def material_hlsl(state: AppState, material_path, output_path, platform, shader_
         shader_type=shader_type,
     )
 
-    if "error" not in result:
-        try:
-            out_path = os.path.abspath(output_path)
-            with open(out_path, "w", encoding="utf-8") as f:
-                if full and result.get("shaders"):
-                    first = result["shaders"][0]
-                    f.write(f"// Full shader: {first.get('pass', 'Unknown')}\n\n")
-                    f.write(first.get("code", "No code"))
-                else:
-                    mat_code = result.get("material_code", "")
-                    if mat_code:
-                        f.write(mat_code)
-                    elif result.get("shaders"):
-                        first = result["shaders"][0]
-                        f.write(first.get("code", "No code"))
+    if "error" in result:
+        details = {
+            key: value
+            for key, value in result.items()
+            if key not in {"code", "error"}
+        }
+        code = result.get("code", "MATERIAL_HLSL_DUMP_FAILED")
+        suggestion = (
+            "Request the running editor's active shader platform or relaunch it with the required RHI."
+            if code == "SHADER_PLATFORM_NOT_ACTIVE"
+            else "Check shader compilation and available_platforms, then retry."
+        )
+        if code == "MATERIAL_SHADER_DUMP_BRIDGE_UNAVAILABLE":
+            suggestion = "Run editor plugin-upgrade, then retry after the editor restarts."
+        raise AppError(
+            code,
+            str(result["error"]),
+            exit_code=3,
+            suggestion=suggestion,
+            details=details or None,
+        )
 
-            result["file"] = out_path
-            if "material_code" in result:
-                result["lines"] = len(result["material_code"].splitlines())
-                del result["material_code"]
-            if "shaders" in result:
-                for shader in result["shaders"]:
-                    if "code" in shader:
-                        del shader["code"]
+    content = ""
+    if full and result.get("shaders"):
+        first = result["shaders"][0]
+        content = (
+            f"// Full shader: {first.get('pass', 'Unknown')}\n\n"
+            + first.get("code", "")
+        )
+    else:
+        content = result.get("material_code", "")
+        if not content and result.get("shaders"):
+            content = result["shaders"][0].get("code", "")
 
-        except Exception as e:
-            result["error"] = f"Failed to write output file: {e}"
+    if not content:
+        raise AppError(
+            "SHADER_STAGE_NOT_FOUND",
+            f"No {shader_type} shader source was found in the material dump.",
+            exit_code=3,
+            suggestion="Retry with --shader-type all or inspect available shader passes.",
+            details={
+                "material": result.get("material", material_path),
+                "platform": result.get("platform"),
+                "shader_count": result.get("shader_count", 0),
+            },
+        )
+
+    try:
+        out_path = os.path.abspath(output_path)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        raise AppError(
+            "SHADER_DUMP_WRITE_FAILED",
+            f"Failed to write output file: {e}",
+            exit_code=3,
+            details={"output": os.path.abspath(output_path)},
+        ) from e
+
+    result["file"] = out_path
+    result["lines"] = len(content.splitlines())
+    result.pop("material_code", None)
+    for shader in result.get("shaders", []):
+        shader.pop("code", None)
 
     output(result, state)
 

@@ -42,6 +42,7 @@
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/TextProperty.h"
+#include "UObject/Package.h"
 
 static FString JsonEscape(const FString& Input);
 static FString JsonError(const FString& Message);
@@ -454,7 +455,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.24");
+	return TEXT("1.25");
 }
 
 static bool ResolveMaterialProperty(const FString& PropertyName, EMaterialProperty& OutProperty)
@@ -541,6 +542,40 @@ FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)
 	Json += TEXT(",\"exists\":true");
 	Json += TEXT(",\"value\":\"") + JsonEscape(Var->GetString()) + TEXT("\"");
 	Json += FString::Printf(TEXT(",\"flags\":%d"), Var->GetFlags());
+	Json += TEXT("}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::GetActiveShaderPlatform()
+{
+	return LegacyShaderPlatformToShaderFormat(GMaxRHIShaderPlatform).ToString();
+}
+
+FString UCliAnythingBridgeLibrary::RecompileMaterialShadersForDump(UMaterialInterface* Material)
+{
+	if (!Material)
+	{
+		return JsonError(TEXT("Material is null"));
+	}
+
+	UPackage* Package = Material->GetOutermost();
+	const bool bDirtyBefore = Package && Package->IsDirty();
+
+	Material->PreEditChange(nullptr);
+	Material->PostEditChange();
+
+	const bool bDirtyAfterRecompile = Package && Package->IsDirty();
+	if (Package && bDirtyAfterRecompile != bDirtyBefore)
+	{
+		Package->SetDirtyFlag(bDirtyBefore);
+	}
+	const bool bDirtyRestored = !Package || Package->IsDirty() == bDirtyBefore;
+
+	FString Json = TEXT("{\"status\":\"ok\",\"active_platform\":\"")
+		+ JsonEscape(GetActiveShaderPlatform()) + TEXT("\"");
+	Json += TEXT(",\"package_dirty_before\":") + FString(bDirtyBefore ? TEXT("true") : TEXT("false"));
+	Json += TEXT(",\"package_dirty_after_recompile\":") + FString(bDirtyAfterRecompile ? TEXT("true") : TEXT("false"));
+	Json += TEXT(",\"package_dirty_restored\":") + FString(bDirtyRestored ? TEXT("true") : TEXT("false"));
 	Json += TEXT("}");
 	return Json;
 }
