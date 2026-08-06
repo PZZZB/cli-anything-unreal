@@ -788,34 +788,36 @@ else:
         found = False
         val = None
         param_type = None
+        requested_name = param_name.casefold()
 
-        # Check scalar
-        for param in mat.get_editor_property("scalar_parameter_values"):
-            if str(param.get_editor_property("parameter_info").get_editor_property("name")) == param_name:
-                val = param.get_editor_property("parameter_value")
-                param_type = "scalar"
-                found = True
-                break
+        # MaterialEditingLibrary enumerates the complete parameter hierarchy,
+        # unlike the instance value arrays, which contain local overrides only.
+        scalar_names = [str(name) for name in mel.get_scalar_parameter_names(mat)]
+        scalar_name = next((name for name in scalar_names if name.casefold() == requested_name), None)
+        if scalar_name is not None:
+            val = mel.get_material_instance_scalar_parameter_value(mat, scalar_name)
+            param_type = "scalar"
+            found = True
         
         # Check vector
         if not found:
-            for param in mat.get_editor_property("vector_parameter_values"):
-                if str(param.get_editor_property("parameter_info").get_editor_property("name")) == param_name:
-                    c = param.get_editor_property("parameter_value")
-                    val = {{"r": c.r, "g": c.g, "b": c.b, "a": c.a}}
-                    param_type = "vector"
-                    found = True
-                    break
+            vector_names = [str(name) for name in mel.get_vector_parameter_names(mat)]
+            vector_name = next((name for name in vector_names if name.casefold() == requested_name), None)
+            if vector_name is not None:
+                c = mel.get_material_instance_vector_parameter_value(mat, vector_name)
+                val = {{"r": c.r, "g": c.g, "b": c.b, "a": c.a}}
+                param_type = "vector"
+                found = True
 
         # Check texture
         if not found:
-            for param in mat.get_editor_property("texture_parameter_values"):
-                if str(param.get_editor_property("parameter_info").get_editor_property("name")) == param_name:
-                    tex = param.get_editor_property("parameter_value")
-                    val = str(tex.get_path_name()) if tex else None
-                    param_type = "texture"
-                    found = True
-                    break
+            texture_names = [str(name) for name in mel.get_texture_parameter_names(mat)]
+            texture_name = next((name for name in texture_names if name.casefold() == requested_name), None)
+            if texture_name is not None:
+                tex = mel.get_material_instance_texture_parameter_value(mat, texture_name)
+                val = str(tex.get_path_name()) if tex else None
+                param_type = "texture"
+                found = True
 
         if found:
             result = {{"status": "ok", "action": "get_param", "material": loaded_asset_path, "param": param_name, "type": param_type, "value": val}}

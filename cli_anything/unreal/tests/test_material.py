@@ -847,6 +847,13 @@ class TestMaterialEditing:
         assert "mat, loaded_asset_path, tried_asset_paths = _cli_load_material" in script
         assert "unreal.EditorAssetLibrary.load_asset(material_path)" not in script
         assert '"material": loaded_asset_path' in script
+        assert "mel.get_scalar_parameter_names(mat)" in script
+        assert "mel.get_material_instance_scalar_parameter_value(mat, scalar_name)" in script
+        assert "mel.get_vector_parameter_names(mat)" in script
+        assert "mel.get_material_instance_vector_parameter_value(mat, vector_name)" in script
+        assert "mel.get_texture_parameter_names(mat)" in script
+        assert "mel.get_material_instance_texture_parameter_value(mat, texture_name)" in script
+        assert 'mat.get_editor_property("scalar_parameter_values")' not in script
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_set_param_vector(self, mock_exec):

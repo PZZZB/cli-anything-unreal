@@ -405,7 +405,9 @@ def material_disconnect(state: AppState, material_path, from_node, from_output, 
 @handle_error
 @click.pass_obj
 def material_get_param(state: AppState, material_path, param_name):
-    """Get a parameter on a MaterialInstanceConstant.
+    """Get an effective parameter on a MaterialInstanceConstant.
+
+    Values inherited from parent instances or materials are included.
 
     Example: material get-param /Game/MI_Test --name Roughness
     """

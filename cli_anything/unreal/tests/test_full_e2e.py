@@ -721,8 +721,9 @@ ATH = unreal.AssetToolsHelpers.get_asset_tools()
 mel = unreal.MaterialEditingLibrary
 mat_path = "/Game/E2E_MIParamMat"
 mi_path = "/Game/E2E_MIParamInst"
+leaf_path = "/Game/E2E_MIParamLeaf"
 
-for _path in [mi_path, mat_path]:
+for _path in [leaf_path, mi_path, mat_path]:
     if EAL.does_asset_exist(_path):
         EAL.delete_asset(_path)
 unreal.SystemLibrary.collect_garbage()
@@ -747,11 +748,22 @@ else:
         mi.set_editor_property("parent", mat)
         mi.modify()
         EAL.save_loaded_asset(mi)
-        unreal.EditorLoadingAndSavingUtils.save_dirty_packages(False, True)
-        result = {"status": "ok"}
+        leaf = ATH.create_asset("E2E_MIParamLeaf", "/Game", unreal.MaterialInstanceConstant, factory)
+        if leaf is None:
+            result = {"error": "Failed to create leaf material instance"}
+        else:
+            leaf.set_editor_property("parent", mi)
+            leaf.modify()
+            EAL.save_loaded_asset(leaf)
+            unreal.EditorLoadingAndSavingUtils.save_dirty_packages(False, True)
+            result = {
+                "status": "ok",
+                "leaf_local_scalar_count": len(leaf.get_editor_property("scalar_parameter_values")),
+            }
 '''
         setup_result = run_python_code(api, setup, timeout=60.0)
         assert setup_result.get("status") == "ok", setup_result
+        assert setup_result.get("leaf_local_scalar_count") == 0, setup_result
 
         result = set_material_param(
             api,
@@ -767,6 +779,11 @@ else:
         value = get_material_param(api, "/Game/E2E_MIParamInst", "Roughness", project_dir=project_dir)
         assert value.get("status") == "ok", value
         assert abs(float(value.get("value")) - 0.77) < 0.001
+
+        inherited = get_material_param(api, "/Game/E2E_MIParamLeaf", "Roughness", project_dir=project_dir)
+        assert inherited.get("status") == "ok", inherited
+        assert inherited.get("type") == "scalar", inherited
+        assert abs(float(inherited.get("value")) - 0.77) < 0.001
 
     def test_add_node_cli(self, cli_runner, project_path, api_port):
         """Test add-node via CLI."""
