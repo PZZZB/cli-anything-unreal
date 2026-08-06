@@ -707,10 +707,13 @@ else:
         result = recompile_material(api, self.TEST_MATERIAL, project_dir=project_dir)
         assert result.get("status") == "ok"
 
-    def test_set_material_instance_param_saves(self, api, project_path):
-        """Setting a MaterialInstance parameter saves the changed package."""
+    def test_material_instance_param_reads_and_material_function_error(
+        self, api, cli_runner, project_path, api_port,
+    ):
+        """Effective parameters and unsupported material classes stay truthful."""
         from cli_anything.unreal.core.materials import get_material_param, set_material_param
         from cli_anything.unreal.core.script_runner import run_python_code
+        from cli_anything.unreal.unreal_cli import cli
 
         project_dir = str(Path(project_path).parent)
         setup = r'''
@@ -722,8 +725,9 @@ mel = unreal.MaterialEditingLibrary
 mat_path = "/Game/E2E_MIParamMat"
 mi_path = "/Game/E2E_MIParamInst"
 leaf_path = "/Game/E2E_MIParamLeaf"
+function_path = "/Game/E2E_MaterialFunction"
 
-for _path in [leaf_path, mi_path, mat_path]:
+for _path in [function_path, leaf_path, mi_path, mat_path]:
     if EAL.does_asset_exist(_path):
         EAL.delete_asset(_path)
 unreal.SystemLibrary.collect_garbage()
@@ -736,6 +740,9 @@ else:
     scalar.set_editor_property("parameter_name", "Roughness")
     scalar.set_editor_property("default_value", 0.1)
     mel.connect_material_property(scalar, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    static_switch = mel.create_material_expression(mat, unreal.MaterialExpressionStaticSwitchParameter, -300, 200)
+    static_switch.set_editor_property("parameter_name", "UseDetail")
+    static_switch.set_editor_property("default_value", False)
     mel.recompile_material(mat)
     mat.modify()
     EAL.save_loaded_asset(mat)
@@ -746,6 +753,7 @@ else:
         result = {"error": "Failed to create material instance"}
     else:
         mi.set_editor_property("parent", mat)
+        static_switch_set = mel.set_material_instance_static_switch_parameter_value(mi, "UseDetail", True)
         mi.modify()
         EAL.save_loaded_asset(mi)
         leaf = ATH.create_asset("E2E_MIParamLeaf", "/Game", unreal.MaterialInstanceConstant, factory)
@@ -755,11 +763,19 @@ else:
             leaf.set_editor_property("parent", mi)
             leaf.modify()
             EAL.save_loaded_asset(leaf)
-            unreal.EditorLoadingAndSavingUtils.save_dirty_packages(False, True)
-            result = {
-                "status": "ok",
-                "leaf_local_scalar_count": len(leaf.get_editor_property("scalar_parameter_values")),
-            }
+            function = ATH.create_asset(
+                "E2E_MaterialFunction", "/Game", unreal.MaterialFunction, unreal.MaterialFunctionFactoryNew()
+            )
+            if function is None:
+                result = {"error": "Failed to create material function"}
+            else:
+                EAL.save_loaded_asset(function)
+                unreal.EditorLoadingAndSavingUtils.save_dirty_packages(False, True)
+                result = {
+                    "status": "ok",
+                    "leaf_local_scalar_count": len(leaf.get_editor_property("scalar_parameter_values")),
+                    "static_switch_set": static_switch_set,
+                }
 '''
         setup_result = run_python_code(api, setup, timeout=60.0)
         assert setup_result.get("status") == "ok", setup_result
@@ -784,6 +800,31 @@ else:
         assert inherited.get("status") == "ok", inherited
         assert inherited.get("type") == "scalar", inherited
         assert abs(float(inherited.get("value")) - 0.77) < 0.001
+
+        static_switch = get_material_param(
+            api, "/Game/E2E_MIParamLeaf", "UseDetail", project_dir=project_dir,
+        )
+        assert static_switch.get("status") == "ok", static_switch
+        assert static_switch.get("type") == "static_switch", static_switch
+        assert static_switch.get("value") is True, static_switch
+
+        cli_switch = cli_runner.invoke(cli, [
+            "--output", "json", "--project", project_path, "--port", str(api_port),
+            "material", "get-param", "/Game/E2E_MIParamLeaf", "--name", "UseDetail",
+        ])
+        assert cli_switch.exit_code == 0, cli_switch.output
+        cli_switch_data = json.loads(cli_switch.output)
+        assert cli_switch_data["result"]["type"] == "static_switch", cli_switch_data
+        assert cli_switch_data["result"]["value"] is True, cli_switch_data
+
+        cli_function = cli_runner.invoke(cli, [
+            "--output", "json", "--project", project_path, "--port", str(api_port),
+            "material", "info", "/Game/E2E_MaterialFunction",
+        ])
+        assert cli_function.exit_code == 3, cli_function.output
+        cli_function_data = json.loads(cli_function.output)
+        assert cli_function_data["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS", cli_function_data
+        assert cli_function_data["details"]["asset_class"] == "MaterialFunction", cli_function_data
 
     def test_add_node_cli(self, cli_runner, project_path, api_port):
         """Test add-node via CLI."""

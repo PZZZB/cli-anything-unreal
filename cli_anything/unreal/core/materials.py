@@ -336,6 +336,17 @@ else:
         except:
             pass
         result["texture_parameters"] = textures
+
+    else:
+        asset_class = mat.get_class().get_name()
+        result = {{
+            "error": "Unsupported material asset class for material info: " + asset_class,
+            "code": "MATERIAL_INFO_UNSUPPORTED_CLASS",
+            "material": loaded_asset_path,
+            "asset_class": asset_class,
+            "supported_classes": ["Material", "MaterialInstanceConstant"],
+            "suggestion": "MaterialFunction graph inspection is not supported by material info.",
+        }}
 '''
 
 
@@ -819,6 +830,15 @@ else:
                 param_type = "texture"
                 found = True
 
+        # Check static switch
+        if not found:
+            static_switch_names = [str(name) for name in mel.get_static_switch_parameter_names(mat)]
+            static_switch_name = next((name for name in static_switch_names if name.casefold() == requested_name), None)
+            if static_switch_name is not None:
+                val = bool(mel.get_material_instance_static_switch_parameter_value(mat, static_switch_name))
+                param_type = "static_switch"
+                found = True
+
         if found:
             result = {{"status": "ok", "action": "get_param", "material": loaded_asset_path, "param": param_name, "type": param_type, "value": val}}
         else:
@@ -1034,6 +1054,8 @@ def get_material_info(
                      "parent"):
             if key in script_result:
                 basic_info[key] = script_result[key]
+    elif script_result.get("code") == "MATERIAL_INFO_UNSUPPORTED_CLASS":
+        return script_result
     else:
         # Python script failed — record as note, RC API data still available
         _raise_if_editor_became_unreachable(api, script_result)

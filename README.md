@@ -166,7 +166,8 @@ ue-cli --output json --project "$Project" editor run-script --no-save -c 'result
 ```
 
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
-`material get-param` returns the effective scalar, vector, or texture value, including values inherited from parent material instances or materials.
+`material get-param` returns the effective scalar, vector, texture, or static-switch value, including values inherited from parent material instances or materials.
+`material info` supports Material and MaterialInstanceConstant assets. Other material asset classes, including MaterialFunction, return `MATERIAL_INFO_UNSUPPORTED_CLASS` instead of an empty successful result.
 On Windows PowerShell, `editor run-script -c` preserves double-quoted Python string literals that native argument parsing would otherwise strip. Use stdin (`editor run-script -`) or a `.py` file for multiline code.
 A `.py` file passed to `editor run-script` executes with `__name__ == "__main__"` and an absolute `__file__`, so guarded script entrypoints run normally.
 Each `editor run-script` invocation receives fresh globals. Deferred Unreal callbacks retain that invocation's globals after the command returns; store their handles and unregister them when finished because later callback failures appear only in the editor log.

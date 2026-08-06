@@ -123,6 +123,25 @@ class TestMaterials:
         assert len(result["texture_parameters"]) == 1
         assert result["texture_parameters"][0]["texture"] == "/Game/Textures/T_Diffuse"
 
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_get_material_info_rejects_unsupported_material_class(self, mock_exec_script):
+        from cli_anything.unreal.core.materials import get_material_info
+
+        mock_api = self._make_mock_api(assets={"Assets": []})
+        mock_exec_script.return_value = {
+            "error": "Unsupported material asset class for material info: MaterialFunction",
+            "code": "MATERIAL_INFO_UNSUPPORTED_CLASS",
+            "material": "/Game/MF_Test.MF_Test",
+            "asset_class": "MaterialFunction",
+            "supported_classes": ["Material", "MaterialInstanceConstant"],
+        }
+
+        result = get_material_info(mock_api, "/Game/MF_Test")
+
+        assert result["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS"
+        assert result["asset_class"] == "MaterialFunction"
+        assert result["material"] == "/Game/MF_Test.MF_Test"
+
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_get_material_info_detail_uses_resolver_for_package_path(self, mock_run):
         from cli_anything.unreal.core.materials import get_material_info
@@ -455,6 +474,32 @@ class TestMaterials:
         assert data["status"] == "error"
         assert data["code"] == "EDITOR_UNREACHABLE"
         assert "WinError 10061" in data["message"]
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_info_cli_rejects_material_function(self, mock_exec_script):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec_script.return_value = {
+            "error": "Unsupported material asset class for material info: MaterialFunction",
+            "code": "MATERIAL_INFO_UNSUPPORTED_CLASS",
+            "material": "/Game/MF_Test.MF_Test",
+            "asset_class": "MaterialFunction",
+            "supported_classes": ["Material", "MaterialInstanceConstant"],
+        }
+        mock_api = self._make_mock_api(assets={"Assets": []})
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.material.require_editor", return_value=mock_api):
+            result = runner.invoke(cli, [
+                "--output", "json", "material", "info", "/Game/MF_Test",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS"
+        assert data["details"]["asset_class"] == "MaterialFunction"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -853,7 +898,10 @@ class TestMaterialEditing:
         assert "mel.get_material_instance_vector_parameter_value(mat, vector_name)" in script
         assert "mel.get_texture_parameter_names(mat)" in script
         assert "mel.get_material_instance_texture_parameter_value(mat, texture_name)" in script
+        assert "mel.get_static_switch_parameter_names(mat)" in script
+        assert "mel.get_material_instance_static_switch_parameter_value(mat, static_switch_name)" in script
         assert 'mat.get_editor_property("scalar_parameter_values")' not in script
+        compile(script, "<material-get-param-script>", "exec")
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_set_param_vector(self, mock_exec):

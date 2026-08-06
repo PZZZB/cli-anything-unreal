@@ -76,6 +76,13 @@ def material_info(state: AppState, material_path):
 
     api = require_editor(state)
     result = get_material_info(api, material_path, state.session.project_dir)
+    if "error" in result:
+        raise AppError(
+            result.get("code", "MATERIAL_INFO_FAILED"),
+            result["error"],
+            exit_code=3,
+            details=result,
+        )
     output(result, state)
 
 
