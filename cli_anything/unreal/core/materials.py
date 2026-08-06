@@ -159,6 +159,12 @@ else:
                 result[_prop] = str(mat.get_editor_property(_prop))
             except:
                 pass
+        try:
+            result["use_material_attributes"] = bool(
+                mat.get_editor_property("use_material_attributes")
+            )
+        except:
+            pass
 
         mel = unreal.MaterialEditingLibrary
 
@@ -240,6 +246,7 @@ else:
                 ("WorldPositionOffset", "MP_WORLD_POSITION_OFFSET"),
                 ("AmbientOcclusion", "MP_AMBIENT_OCCLUSION"),
                 ("SubsurfaceColor", "MP_SUBSURFACE_COLOR"),
+                ("MaterialAttributes", "MP_MATERIAL_ATTRIBUTES"),
             ]
             mat_outputs = {{}}
             for _name, _mp_name in _prop_list:
@@ -1049,6 +1056,7 @@ def get_material_info(
         # Merge deep info into basic_info (script result has nodes, textures, etc.)
         for key in ("nodes", "node_count", "textures", "texture_sample_count",
                      "blend_mode", "material_domain", "shading_model", "two_sided",
+                     "use_material_attributes",
                      "material_outputs", "edges",
                      "scalar_parameters", "vector_parameters", "texture_parameters",
                      "parent"):

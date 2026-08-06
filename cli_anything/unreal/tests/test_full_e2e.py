@@ -231,6 +231,100 @@ class TestMaterialsE2E:
         assert "issues" in result_data
         assert "warnings" in result_data
 
+    def test_material_attributes_output_graph_cli(
+        self, api, cli_runner, project_path, api_port,
+    ):
+        """Material Attributes output is visible to info, graph, and analysis."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+        from cli_anything.unreal.unreal_cli import cli
+
+        material_path = "/Game/E2E_Issue68_Material"
+        delete_script = r'''
+import unreal
+path = "/Game/E2E_Issue68_Material"
+deleted = not unreal.EditorAssetLibrary.does_asset_exist(path)
+if not deleted:
+    unreal.SystemLibrary.collect_garbage()
+    deleted = unreal.EditorAssetLibrary.delete_asset(path)
+result = {"deleted": deleted}
+'''
+        preclean = run_python_code(api, delete_script, timeout=30.0, save=False)
+        assert preclean.get("deleted") is True, f"pre-clean failed: {preclean}"
+
+        setup_script = r'''
+import unreal
+
+mat = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+    "E2E_Issue68_Material", "/Game", unreal.Material, unreal.MaterialFactoryNew()
+)
+if mat is None:
+    result = {"error": "Failed to create E2E_Issue68_Material"}
+else:
+    mel = unreal.MaterialEditingLibrary
+    color = mel.create_material_expression(
+        mat, unreal.MaterialExpressionConstant3Vector, -600, 0
+    )
+    make_attributes = mel.create_material_expression(
+        mat, unreal.MaterialExpressionMakeMaterialAttributes, -300, 0
+    )
+    mat.set_editor_property("use_material_attributes", True)
+    mel.connect_material_expressions(color, "", make_attributes, "BaseColor")
+    mel.connect_material_property(
+        make_attributes, "", unreal.MaterialProperty.MP_MATERIAL_ATTRIBUTES
+    )
+    mel.recompile_material(mat)
+    mat.modify()
+    result = {
+        "status": "ok",
+        "color_node": color.get_name(),
+        "attributes_node": make_attributes.get_name(),
+    }
+'''
+        setup = run_python_code(api, setup_script, timeout=60.0)
+        assert setup.get("status") == "ok", f"setup failed: {setup}"
+
+        try:
+            common = [
+                "--output", "json", "--project", project_path,
+                "--port", str(api_port), "material",
+            ]
+            info_result = cli_runner.invoke(cli, [*common, "info", material_path])
+            graph_result = cli_runner.invoke(cli, [*common, "get-graph", material_path])
+            analyze_result = cli_runner.invoke(cli, [*common, "analyze", material_path])
+
+            assert info_result.exit_code == 0, info_result.output
+            assert graph_result.exit_code == 0, graph_result.output
+            assert analyze_result.exit_code == 0, analyze_result.output
+
+            info = json.loads(info_result.output)["result"]
+            graph = json.loads(graph_result.output)["result"]
+            analysis = json.loads(analyze_result.output)["result"]
+
+            assert info.get("use_material_attributes") is True
+            assert (
+                info["material_outputs"]["MaterialAttributes"]["node"]
+                == setup["attributes_node"]
+            )
+            assert set(graph["connected_nodes"]) == {
+                setup["color_node"], setup["attributes_node"],
+            }
+            assert graph["orphan_nodes"] == []
+            assert analysis["stats"]["connected_outputs"] == ["MaterialAttributes"]
+            assert not any(
+                "No material output connections" in warning
+                for warning in analysis["warnings"]
+            )
+        finally:
+            cleanup = {"deleted": False}
+            for _ in range(10):
+                cleanup = run_python_code(
+                    api, delete_script, timeout=30.0, save=False,
+                )
+                if cleanup.get("deleted") is True:
+                    break
+                time.sleep(1)
+            assert cleanup.get("deleted") is True, f"cleanup failed: {cleanup}"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  E2E: Screenshots

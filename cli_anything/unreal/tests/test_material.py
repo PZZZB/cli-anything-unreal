@@ -353,6 +353,48 @@ class TestMaterials:
                     for issue in result["issues"])
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_analyze_material_attributes_is_connected_output(self, mock_exec_script):
+        """A Material Attributes master must not be reported as output-less."""
+        from cli_anything.unreal.core.materials import analyze_material
+
+        mock_exec_script.return_value = {
+            "name": "M_Attributes",
+            "path": "/Game/M_Attributes",
+            "class": "Material",
+            "use_material_attributes": True,
+            "node_count": 1,
+            "nodes": [
+                {"type": "MaterialExpressionMaterialFunctionCall", "name": "SurfaceFn"},
+            ],
+            "material_outputs": {
+                "MaterialAttributes": {
+                    "node": "SurfaceFn",
+                    "node_type": "MaterialExpressionMaterialFunctionCall",
+                    "output": "MaterialAttributes",
+                },
+            },
+            "edges": [],
+            "textures": [],
+            "texture_sample_count": 0,
+        }
+        mock_api = self._make_mock_api(
+            assets={
+                "Assets": [{
+                    "Name": "M_Attributes",
+                    "Path": "/Game/M_Attributes.M_Attributes",
+                    "Class": "/Script/Engine.Material",
+                    "Metadata": {},
+                }],
+            },
+        )
+
+        result = analyze_material(mock_api, "/Game/M_Attributes")
+
+        assert result["info"]["use_material_attributes"] is True
+        assert result["stats"]["connected_outputs"] == ["MaterialAttributes"]
+        assert not any("No material output connections" in warning for warning in result["warnings"])
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_analyze_material_high_node_count(self, mock_exec_script):
         """Test detection of very high node count."""
         from cli_anything.unreal.core.materials import analyze_material
@@ -569,6 +611,40 @@ class TestMaterialConnections:
         assert result["orphan_nodes"] == ["C_Orphan"]
         assert result["orphan_count"] == 1
         assert len(result["edges"]) == 1
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_connections_material_attributes_reaches_function_chain(self, mock_exec_script):
+        """Material Attributes is a real material-output seed."""
+        from cli_anything.unreal.core.materials import get_material_connections
+
+        mock_api = MagicMock()
+        mock_exec_script.return_value = {
+            "name": "M_Attributes", "path": "/Game/M_Attributes", "class": "Material",
+            "use_material_attributes": True,
+            "nodes": [
+                {"type": "MaterialExpressionMaterialFunctionCall", "name": "SurfaceFn"},
+                {"type": "MaterialExpressionMaterialFunctionCall", "name": "LayerFn"},
+                {"type": "MaterialExpressionConstant", "name": "Unused"},
+            ],
+            "node_count": 3,
+            "material_outputs": {
+                "MaterialAttributes": {
+                    "node": "SurfaceFn",
+                    "node_type": "MaterialExpressionMaterialFunctionCall",
+                    "output": "MaterialAttributes",
+                },
+            },
+            "edges": [
+                {"from_node": "LayerFn", "to_node": "SurfaceFn", "to_input_index": 0},
+            ],
+            "textures": [], "texture_sample_count": 0,
+        }
+
+        result = get_material_connections(mock_api, "/Game/M_Attributes")
+
+        assert set(result["connected_nodes"]) == {"LayerFn", "SurfaceFn"}
+        assert result["orphan_nodes"] == ["Unused"]
+        assert "MaterialAttributes" in result["material_outputs"]
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_connections_custom_output_node(self, mock_exec_script):
