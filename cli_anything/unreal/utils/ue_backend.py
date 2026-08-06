@@ -2383,7 +2383,7 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
     return result
 
 
-def find_running_editors() -> list[dict]:
+def find_running_editors(timeout: float | None = None) -> list[dict]:
     """Find running UnrealEditor processes and their project paths.
 
     Uses PowerShell (preferred) with WMIC fallback on Windows.
@@ -2394,6 +2394,15 @@ def find_running_editors() -> list[dict]:
         return []
 
     editors = []
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def bounded_timeout(limit: float) -> float | None:
+        if deadline is None:
+            return limit
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        return max(0.01, min(limit, remaining))
 
     # ── Method 1: PowerShell (reliable on modern Windows) ──────────
     try:
@@ -2402,9 +2411,12 @@ def find_running_editors() -> list[dict]:
             '| Select-Object ProcessId, CommandLine '
             '| ConvertTo-Json -Compress'
         )
+        process_timeout = bounded_timeout(15)
+        if process_timeout is None:
+            return editors
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=process_timeout,
         )
         if result.returncode == 0 and result.stdout.strip():
             data = json.loads(result.stdout)
@@ -2426,11 +2438,14 @@ def find_running_editors() -> list[dict]:
 
     # ── Method 2: WMIC fallback ────────────────────────────────────
     try:
+        process_timeout = bounded_timeout(10)
+        if process_timeout is None:
+            return editors
         result = subprocess.run(
             ["wmic", "process", "where",
              "(name like '%UnrealEditor%' or name like '%UE4Editor%')",
              "get", "ProcessId,CommandLine", "/format:csv"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=process_timeout,
             shell=True,
         )
         if result.returncode == 0:

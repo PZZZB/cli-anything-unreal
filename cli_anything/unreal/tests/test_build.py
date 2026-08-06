@@ -2133,6 +2133,25 @@ class TestBuildStopAndDetect:
             ("exit", task["task_id"]),
         ]
 
+    def test_load_task_lock_timeout_is_bounded(self, tmp_path, monkeypatch):
+        """Status callers can bound reads while a worker owns the task lock."""
+        from cli_anything.unreal.core import tasks
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        with patch.object(tasks.sys, "platform", "win32"), patch(
+            "msvcrt.locking",
+            side_effect=OSError("locked"),
+        ), patch.object(
+            tasks.time,
+            "monotonic",
+            side_effect=[100.0, 100.2],
+        ):
+            with pytest.raises(tasks.TaskLockTimeout) as exc_info:
+                tasks.load_task("t-blocked", timeout=0.1)
+
+        assert exc_info.value.task_id == "t-blocked"
+        assert exc_info.value.timeout == 0.1
+
     def test_submit_task_keeps_live_worker_after_task_record_permission_error(
         self, tmp_path, monkeypatch
     ):

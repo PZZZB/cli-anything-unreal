@@ -44,6 +44,53 @@ def test_editor_status_offline_api_blocked_includes_log_error(mini_project):
     assert data["result"][0]["log_error"] == "Plugin 'libzstd' failed to load"
 
 
+def test_editor_status_reports_process_discovery_deadline(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch(
+        "cli_anything.unreal.commands.editor.time.monotonic",
+        side_effect=[100.0, 100.0, 101.1],
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend.find_running_editors",
+        return_value=[],
+    ) as find_editors:
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status", "--timeout", "1",
+        ])
+
+    assert result.exit_code == 4, result.output
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_STATUS_TIMEOUT"
+    assert data["details"]["blocking_phase"] == "process_discovery"
+    assert data["details"]["timeout_seconds"] == 1.0
+    assert find_editors.call_args.kwargs["timeout"] == pytest.approx(1.0)
+
+
+def test_editor_task_status_reports_blocked_task_id(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import TaskLockTimeout
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    with patch(
+        "cli_anything.unreal.commands.editor.load_task",
+        side_effect=TaskLockTimeout("t-blocked", 0.1),
+    ):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status", "--timeout", "0.1", "t-blocked",
+        ])
+
+    assert result.exit_code == 4, result.output
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_STATUS_TIMEOUT"
+    assert data["details"]["blocking_phase"] == "task_discovery"
+    assert data["details"]["task_id"] == "t-blocked"
+
+
 def test_editor_status_transient_unreachable_does_not_suggest_relaunch(mini_project, tmp_path, monkeypatch):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
@@ -497,7 +544,7 @@ def test_editor_status_resolves_online_port_owners_concurrently():
     calls_lock = threading.Lock()
     both_started = threading.Event()
 
-    def fake_pid(port):
+    def fake_pid(port, timeout=3):
         with calls_lock:
             calls.append(port)
             if len(calls) == 2:

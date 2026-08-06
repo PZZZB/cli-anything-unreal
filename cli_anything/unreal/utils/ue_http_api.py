@@ -864,14 +864,17 @@ except Exception as _e:
             return False
 
     @staticmethod
-    def _get_pid_listening_on_port(port: int) -> int | None:
+    def _get_pid_listening_on_port(
+        port: int,
+        timeout: float = 3,
+    ) -> int | None:
         """Return the process PID that is LISTENING on a TCP port (Windows)."""
         try:
             proc = subprocess.run(
                 ["netstat", "-ano", "-p", "tcp"],
                 capture_output=True,
                 text=False,
-                timeout=3,
+                timeout=max(0.01, timeout),
                 check=False,
             )
         except Exception:

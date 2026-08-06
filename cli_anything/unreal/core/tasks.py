@@ -19,6 +19,17 @@ _WINDOWS_TASK_IO_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
 _WINDOWS_PROCESS_IDENTITY_QUERY_TIMEOUT_SECONDS = 3
 
 
+class TaskLockTimeout(TimeoutError):
+    """Raised when a bounded task-state read cannot acquire its file lock."""
+
+    def __init__(self, task_id: str, timeout: float):
+        self.task_id = task_id
+        self.timeout = timeout
+        super().__init__(
+            f"Timed out after {timeout:g}s waiting for task lock: {task_id}"
+        )
+
+
 def _task_root() -> Path:
     override = os.environ.get("UE_CLI_TASK_DIR")
     if override:
@@ -43,7 +54,7 @@ def _lock_path(task_id: str) -> Path:
 
 
 @contextmanager
-def _task_lock(task_id: str):
+def _task_lock(task_id: str, timeout: float | None = None):
     """Serialize task read-modify-write updates across CLI/worker processes."""
     lock_path = _lock_path(task_id)
     with lock_path.open("a+b") as lock_file:
@@ -51,14 +62,40 @@ def _task_lock(task_id: str):
             lock_file.write(b"\0")
             lock_file.flush()
         lock_file.seek(0)
+        deadline = time.monotonic() + timeout if timeout is not None else None
         if sys.platform == "win32":
             import msvcrt
 
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            if deadline is None:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                while True:
+                    try:
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TaskLockTimeout(task_id, timeout)
+                        time.sleep(min(0.01, remaining))
         else:
             import fcntl
 
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if deadline is None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            else:
+                while True:
+                    try:
+                        fcntl.flock(
+                            lock_file.fileno(),
+                            fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        )
+                        break
+                    except BlockingIOError:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TaskLockTimeout(task_id, timeout)
+                        time.sleep(min(0.01, remaining))
         try:
             yield
         finally:
@@ -270,8 +307,13 @@ def _load_task_unlocked(task_id: str) -> dict | None:
     return json.loads(text)
 
 
-def load_task(task_id: str) -> dict | None:
-    with _task_lock(task_id):
+def load_task(task_id: str, timeout: float | None = None) -> dict | None:
+    lock = (
+        _task_lock(task_id)
+        if timeout is None
+        else _task_lock(task_id, timeout=timeout)
+    )
+    with lock:
         return _load_task_unlocked(task_id)
 
 
@@ -518,12 +560,20 @@ def task_data_path(name: str) -> Path:
     return _task_root() / name
 
 
-def iter_tasks() -> list[dict]:
+def iter_tasks(timeout: float | None = None) -> list[dict]:
     """Return readable task records, newest first."""
+    deadline = time.monotonic() + timeout if timeout is not None else None
     tasks: list[dict] = []
     for path in _task_root().glob("*.json"):
         try:
-            task = load_task(path.stem)
+            remaining = None
+            if deadline is not None:
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    raise TaskLockTimeout(path.stem, timeout)
+            task = load_task(path.stem, timeout=remaining)
+        except TaskLockTimeout:
+            raise
         except (OSError, json.JSONDecodeError):
             continue
         if task is not None:

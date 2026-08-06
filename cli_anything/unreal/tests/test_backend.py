@@ -21,6 +21,24 @@ class TestBackend:
         assert _validate_engine_root(mock_engine_root) is True
         assert _validate_engine_root("/nonexistent/path") is False
 
+    def test_find_running_editors_bounds_combined_process_queries(self):
+        from cli_anything.unreal.utils import ue_backend
+
+        with patch.object(ue_backend.sys, "platform", "win32"), patch.object(
+            ue_backend.time,
+            "monotonic",
+            side_effect=[100.0, 100.0, 102.0],
+        ), patch.object(
+            ue_backend.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired("powershell", 2.0),
+        ) as run:
+            result = ue_backend.find_running_editors(timeout=2.0)
+
+        assert result == []
+        assert run.call_count == 1
+        assert run.call_args.kwargs["timeout"] == pytest.approx(2.0)
+
     def test_find_editor_exe(self, mock_engine_root):
         from cli_anything.unreal.utils.ue_backend import find_editor_exe
 

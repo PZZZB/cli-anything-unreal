@@ -23,16 +23,51 @@ from cli_anything.unreal.commands import (
     require_editor,
     require_project,
 )
-from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, cancel_task, iter_tasks, load_task, save_task, submit_task, task_data_path, task_progress, wait_for_task
+from cli_anything.unreal.core.tasks import (
+    FINAL_TASK_STATUSES,
+    TaskLockTimeout,
+    cancel_task,
+    iter_tasks,
+    load_task,
+    save_task,
+    submit_task,
+    task_data_path,
+    task_progress,
+    wait_for_task,
+)
 
 
 DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 30
 DEFAULT_EDITOR_LAUNCH_WORKER_TIMEOUT_SECONDS = 300
+DEFAULT_EDITOR_STATUS_TIMEOUT_SECONDS = 15
 REMOTE_UNREACHABLE_GRACE_SECONDS = 60
 REMOTE_UNREACHABLE_CACHE_TTL_SECONDS = 7200
 EDITOR_LOG_CAPTURE_LIMIT_BYTES = 2 * 1024 * 1024
 EDITOR_LOG_READ_CHUNK_BYTES = 64 * 1024
 EDITOR_CLOSE_PROCESS_GRACE_SECONDS = 10
+
+
+def _editor_status_timeout_error(
+    state: AppState,
+    timeout: float,
+    phase: str,
+    *,
+    task_id: str | None = None,
+) -> AppError:
+    details = {
+        "timeout_seconds": timeout,
+        "blocking_phase": phase,
+        "project": state.session.project_path,
+    }
+    if task_id:
+        details["task_id"] = task_id
+    return AppError(
+        "EDITOR_STATUS_TIMEOUT",
+        f"Editor status exceeded its {timeout:g}s deadline during {phase}.",
+        exit_code=4,
+        suggestion="Retry with editor status --timeout <seconds> to allow more time.",
+        details=details,
+    )
 
 
 def _read_stdin_python_code(stream=None) -> str:
@@ -377,11 +412,16 @@ def _add_transient_unreachable_hint(entry: dict, observation: dict) -> None:
         entry["next_command"] = f'ue-cli --project "{project_path}" editor status'
 
 
-def _active_launch_task_for_project(project_path: str | None, pid: int | None = None) -> dict | None:
+def _active_launch_task_for_project(
+    project_path: str | None,
+    pid: int | None = None,
+    *,
+    timeout: float | None = None,
+) -> dict | None:
     if not project_path:
         return None
     now = time.time()
-    for task in iter_tasks():
+    for task in iter_tasks(timeout=timeout):
         if task.get("command") != "editor.launch":
             continue
         if task.get("status") in FINAL_TASK_STATUSES:
@@ -436,7 +476,7 @@ def _add_offline_recovery_hint(entry: dict, observation: dict | None = None) -> 
         entry["suggestion"] = "Run editor launch with --project <path-to.uproject> to start a reachable editor."
 
 
-def _add_online_bridge_status(entry: dict) -> None:
+def _add_online_bridge_status(entry: dict, timeout: float = 5.0) -> None:
     if entry.get("status") != "online" or not entry.get("port"):
         return
 
@@ -447,7 +487,11 @@ def _add_online_bridge_status(entry: dict) -> None:
     loaded = None
     probe_failed = False
     try:
-        loaded = get_loaded_plugin_version(UEEditorAPI(port=int(entry["port"])), timeout=5.0, raise_on_error=True)
+        loaded = get_loaded_plugin_version(
+            UEEditorAPI(port=int(entry["port"])),
+            timeout=timeout,
+            raise_on_error=True,
+        )
     except Exception:
         probe_failed = True
         loaded = None
@@ -512,7 +556,10 @@ def _add_online_bridge_status(entry: dict) -> None:
             entry["upgrade_command"] = f'ue-cli --project "{project_path}" editor plugin-upgrade'
 
 
-def _add_online_bridge_statuses(entries: list[dict]) -> None:
+def _add_online_bridge_statuses(
+    entries: list[dict],
+    timeout: float = 5.0,
+) -> None:
     targets = [
         entry for entry in entries
         if entry.get("status") == "online" and entry.get("port")
@@ -520,13 +567,16 @@ def _add_online_bridge_statuses(entries: list[dict]) -> None:
     if not targets:
         return
     if len(targets) == 1:
-        _add_online_bridge_status(targets[0])
+        _add_online_bridge_status(targets[0], timeout=timeout)
         return
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     with ThreadPoolExecutor(max_workers=min(8, len(targets))) as executor:
-        futures = [executor.submit(_add_online_bridge_status, entry) for entry in targets]
+        futures = [
+            executor.submit(_add_online_bridge_status, entry, timeout=timeout)
+            for entry in targets
+        ]
         for future in as_completed(futures):
             try:
                 future.result()
@@ -539,11 +589,21 @@ def _scan_editor_status_instances(
     scan_range: str,
     *,
     include_bridge_status: bool = True,
+    timeout: float | None = None,
 ) -> list[dict]:
     from cli_anything.unreal.utils.ue_backend import find_running_editors
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI, scan_editor_ports
 
     start, end = _parse_scan_range(scan_range)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def remaining_timeout(phase: str) -> float | None:
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _editor_status_timeout_error(state, timeout, phase)
+        return max(0.01, remaining)
     extra_ports: set[int] = set()
     if state.session.port:
         extra_ports.add(int(state.session.port))
@@ -551,7 +611,13 @@ def _scan_editor_status_instances(
     if configured_port and int(configured_port) == int(state.session.port):
         extra_ports.add(int(configured_port))
 
-    running = find_running_editors() if sys.platform == "win32" else []
+    if sys.platform == "win32":
+        running = find_running_editors(
+            timeout=remaining_timeout("process_discovery")
+        )
+        remaining_timeout("process_discovery")
+    else:
+        running = []
     proc_config_port_by_pid: dict[int, int] = {}
     for proc in running:
         proc_port = _project_config_port(proc.get("project") or None)
@@ -563,13 +629,31 @@ def _scan_editor_status_instances(
                 pass
 
     online_by_port: dict[int, dict] = {}
-    for item in scan_editor_ports(port_range=(start, end)):
+    port_scan_timeout = remaining_timeout("port_scan")
+    if port_scan_timeout is None:
+        port_scan_timeout = 0.35
+    else:
+        port_scan_timeout = min(0.35, port_scan_timeout)
+    for item in scan_editor_ports(
+        port_range=(start, end),
+        timeout=port_scan_timeout,
+    ):
         online_by_port[int(item["port"])] = item
+    remaining_timeout("port_scan")
     for port in sorted(extra_ports):
         if start <= port <= end:
             continue
-        for item in scan_editor_ports(port_range=(port, port)):
+        extra_scan_timeout = remaining_timeout("configured_port_scan")
+        if extra_scan_timeout is None:
+            extra_scan_timeout = 0.35
+        else:
+            extra_scan_timeout = min(0.35, extra_scan_timeout)
+        for item in scan_editor_ports(
+            port_range=(port, port),
+            timeout=extra_scan_timeout,
+        ):
             online_by_port[int(item["port"])] = item
+        remaining_timeout("configured_port_scan")
 
     process_by_pid: dict[int, dict] = {}
     for proc in running:
@@ -581,9 +665,20 @@ def _scan_editor_status_instances(
     pid_by_port: dict[int, int | None] = {}
     port_by_pid: dict[int, int] = {}
     ports_to_resolve = sorted(online_by_port)
+    owner_timeout = remaining_timeout("port_owner_resolution")
+    if owner_timeout is None:
+        owner_timeout = 3
+    else:
+        owner_timeout = min(3, owner_timeout)
     if len(ports_to_resolve) <= 1:
         resolved = [
-            (port, UEEditorAPI._get_pid_listening_on_port(port))
+            (
+                port,
+                UEEditorAPI._get_pid_listening_on_port(
+                    port,
+                    timeout=owner_timeout,
+                ),
+            )
             for port in ports_to_resolve
         ]
     else:
@@ -592,7 +687,11 @@ def _scan_editor_status_instances(
         resolved = []
         with ThreadPoolExecutor(max_workers=min(8, len(ports_to_resolve))) as executor:
             futures = {
-                executor.submit(UEEditorAPI._get_pid_listening_on_port, port): port
+                executor.submit(
+                    UEEditorAPI._get_pid_listening_on_port,
+                    port,
+                    timeout=owner_timeout,
+                ): port
                 for port in ports_to_resolve
             }
             for future in as_completed(futures):
@@ -601,6 +700,7 @@ def _scan_editor_status_instances(
                     resolved.append((port, future.result()))
                 except Exception:
                     resolved.append((port, None))
+    remaining_timeout("port_owner_resolution")
     for port, owner_pid in resolved:
         pid_by_port[port] = owner_pid
         if owner_pid:
@@ -628,15 +728,29 @@ def _scan_editor_status_instances(
             )
             if probe_port not in online_by_port:
                 try:
-                    for item in scan_editor_ports(port_range=(probe_port, probe_port), timeout=3.0):
+                    probe_timeout = remaining_timeout("project_port_scan")
+                    if probe_timeout is None:
+                        probe_timeout = 3.0
+                    else:
+                        probe_timeout = min(3.0, probe_timeout)
+                    for item in scan_editor_ports(
+                        port_range=(probe_port, probe_port),
+                        timeout=probe_timeout,
+                    ):
                         online_by_port[int(item["port"])] = item
                 except Exception:
                     pass
+                remaining_timeout("project_port_scan")
             if probe_port in online_by_port:
                 try:
-                    owner_pid = UEEditorAPI._get_pid_listening_on_port(probe_port)
+                    probe_timeout = remaining_timeout("port_owner_resolution")
+                    owner_pid = UEEditorAPI._get_pid_listening_on_port(
+                        probe_port,
+                        timeout=3 if probe_timeout is None else min(3, probe_timeout),
+                    )
                 except Exception:
                     owner_pid = None
+                remaining_timeout("port_owner_resolution")
                 pid_by_port[probe_port] = owner_pid
                 if owner_pid:
                     port_by_pid[int(owner_pid)] = probe_port
@@ -649,7 +763,19 @@ def _scan_editor_status_instances(
             _clear_remote_unreachable_observation(project_path, pid, port)
         else:
             entry = _compact_editor_entry("offline", pid, _project_config_port(project_path), project_path)
-            active_launch = _active_launch_task_for_project(project_path, pid)
+            try:
+                active_launch = _active_launch_task_for_project(
+                    project_path,
+                    pid,
+                    timeout=remaining_timeout("task_discovery"),
+                )
+            except TaskLockTimeout as exc:
+                raise _editor_status_timeout_error(
+                    state,
+                    timeout,
+                    "task_discovery",
+                    task_id=exc.task_id,
+                ) from exc
             log_error = _editor_log_error(project_path)
             if active_launch:
                 _add_launching_recovery_hint(entry, active_launch)
@@ -682,7 +808,11 @@ def _scan_editor_status_instances(
         instances.append(entry)
 
     if include_bridge_status:
-        _add_online_bridge_statuses(instances)
+        bridge_timeout = remaining_timeout("bridge_status")
+        _add_online_bridge_statuses(
+            instances,
+            timeout=5.0 if bridge_timeout is None else min(5.0, bridge_timeout),
+        )
     return instances
 
 
@@ -707,6 +837,7 @@ def _recover_online_launch_result(
     current_task: dict,
     *,
     recovered_from: str = "launch_task_wait",
+    status_timeout: float | None = None,
 ) -> dict | None:
     payload = current_task.get("payload") or {}
     target_project = payload.get("project_path") or state.session.project_path
@@ -715,10 +846,35 @@ def _recover_online_launch_result(
     if state.session.project_path and not _same_project_path(state.session.project_path, target_project):
         return None
 
+    deadline = (
+        time.monotonic() + status_timeout
+        if status_timeout is not None
+        else None
+    )
+
+    def bounded_timeout(limit: float) -> float | None:
+        if deadline is None:
+            return limit
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        return max(0.01, min(limit, remaining))
+
     try:
         task_port = payload.get("port")
         scan_range = str(task_port) if task_port is not None else "30010-30020"
-        instances = _scan_editor_status_instances(state, scan_range)
+        scan_timeout = (
+            bounded_timeout(status_timeout)
+            if status_timeout is not None
+            else None
+        )
+        if status_timeout is not None and scan_timeout is None:
+            return None
+        instances = _scan_editor_status_instances(
+            state,
+            scan_range,
+            timeout=scan_timeout,
+        )
         instances = _filter_editor_status_instances(instances, target_project)
     except Exception:
         return None
@@ -746,7 +902,13 @@ def _recover_online_launch_result(
     try:
         from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
-        owner_pid = UEEditorAPI._get_pid_listening_on_port(int(online_port))
+        owner_timeout = bounded_timeout(3.0)
+        if owner_timeout is None:
+            return None
+        owner_pid = UEEditorAPI._get_pid_listening_on_port(
+            int(online_port),
+            timeout=owner_timeout,
+        )
     except Exception:
         return None
     if owner_pid is None or int(owner_pid) != int(task_pid):
@@ -758,8 +920,15 @@ def _recover_online_launch_result(
         try:
             from cli_anything.unreal.core.scene import _verify_current_level
 
+            verify_timeout = bounded_timeout(5.0)
+            if verify_timeout is None:
+                return None
             api = UEEditorAPI(port=int(online.get("port") or task_port or state.session.port))
-            map_verification = _verify_current_level(api, requested_map, verify_timeout=5.0)
+            map_verification = _verify_current_level(
+                api,
+                requested_map,
+                verify_timeout=verify_timeout,
+            )
         except Exception:
             return None
         if map_verification.get("status") != "ok":
@@ -783,14 +952,29 @@ def _recover_online_launch_result(
 @editor_group.command("status")
 @click.option("--scan-range", default="30010-30020", help="Port range to scan")
 @click.option("--all", "show_all", is_flag=True, default=False, help="Show all editor instances instead of filtering to --project.")
+@click.option(
+    "--timeout",
+    default=DEFAULT_EDITOR_STATUS_TIMEOUT_SECONDS,
+    type=click.FloatRange(min=0.1),
+    show_default=True,
+    help="Maximum seconds for editor and task discovery.",
+)
 @_project_option
 @click.argument("task_id", required=False)
 @handle_error
 @click.pass_obj
-def editor_status(state: AppState, scan_range, show_all, project_path, task_id):
+def editor_status(state: AppState, scan_range, show_all, timeout, project_path, task_id):
     _load_command_project(state, project_path)
     if task_id:
-        task = load_task(task_id)
+        try:
+            task = load_task(task_id, timeout=timeout)
+        except TaskLockTimeout as exc:
+            raise _editor_status_timeout_error(
+                state,
+                timeout,
+                "task_discovery",
+                task_id=exc.task_id,
+            ) from exc
         if task is None:
             raise AppError("TASK_NOT_FOUND", f"Task not found: {task_id}", exit_code=3)
         if task.get("command") == "editor.launch" and task.get("status") == "timeout":
@@ -799,6 +983,7 @@ def editor_status(state: AppState, scan_range, show_all, project_path, task_id):
                 task_id,
                 task,
                 recovered_from="launch_task_status",
+                status_timeout=timeout,
             )
             if recovered is not None:
                 task["status"] = "completed"
@@ -808,7 +993,11 @@ def editor_status(state: AppState, scan_range, show_all, project_path, task_id):
         output(task_progress(task), state)
         return
 
-    instances = _scan_editor_status_instances(state, scan_range)
+    instances = _scan_editor_status_instances(
+        state,
+        scan_range,
+        timeout=timeout,
+    )
     if not show_all:
         instances = _filter_editor_status_instances(instances, state.session.project_path)
     output(instances, state)
