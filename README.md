@@ -194,7 +194,7 @@ When `--port` is omitted, ue-cli uses the selected project's `DefaultRemoteContr
 
 `editor status` applies a 15-second discovery deadline by default. Use `editor status --timeout <seconds>` when a slow machine needs more time. An exhausted deadline returns `EDITOR_STATUS_TIMEOUT` with the `blocking_phase`; a blocked task read also includes its `task_id`.
 
-`editor close` targets every running editor for the selected project. The process owning the selected Remote Control port receives a graceful close and up to 10 seconds to exit; additional same-project processes are treated as stale peers and terminated with PID-identity checks. The final payload reports both paths and fails if any original process cannot be verified closed.
+`editor close` targets every running editor for the selected project. Without `--project`, it captures the process owning the selected Remote Control port. The active process receives a graceful close and up to 10 seconds to exit; additional same-project processes are treated as stale peers and terminated with PID-identity checks. The final payload reports both paths and fails if any original process cannot be verified closed.
 
 ## Output Contract
 

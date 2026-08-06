@@ -802,6 +802,20 @@ def test_editor_close_recovers_unique_live_port_before_reporting_offline():
     offline_api.is_alive.return_value = False
     live_api = MagicMock()
     live_api.is_alive.side_effect = [True, False]
+    live_identity = {
+        "query_ok": True,
+        "found": True,
+        "pid": 24356,
+        "creation_time": 1001,
+        "image_path": r"F:\UE\Engine\Binaries\Win64\UnrealEditor.exe",
+        "identity_source": "win32_process_times",
+    }
+    exited_identity = {
+        "query_ok": True,
+        "found": False,
+        "pid": 24356,
+        "identity_source": "win32_process_times",
+    }
 
     def create_api(port):
         if port == 30010:
@@ -816,7 +830,12 @@ def test_editor_close_recovers_unique_live_port_before_reporting_offline():
              "pid": 24356,
              "port": 30011,
              "project_path": r"F:\RXGame_2\RXGame.uproject",
-         }]) as scan_status:
+         }]) as scan_status, \
+         patch(
+             "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+             side_effect=[live_identity, exited_identity],
+         ):
+        api_cls._get_pid_listening_on_port.return_value = 24356
         result = CliRunner().invoke(cli, [
             "--output", "json",
             "editor", "close",
@@ -830,7 +849,95 @@ def test_editor_close_recovers_unique_live_port_before_reporting_offline():
     offline_api.exec_console.assert_not_called()
     live_api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
     data = json.loads(result.output)
-    assert data["result"] == {"status": "closed", "port": 30011}
+    assert data["result"]["status"] == "closed"
+    assert data["result"]["port"] == 30011
+    assert data["result"]["method"] == "process_exit"
+    assert data["result"]["target_pids"] == [24356]
+    assert data["result"]["pid_evidence"] == [{
+        "pid": 24356,
+        "project_match": False,
+        "identity_query_ok": True,
+        "exists": False,
+        "identity_matches": False,
+    }]
+
+
+def test_editor_close_without_project_kills_surviving_port_owner():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    live_identity = {
+        "query_ok": True,
+        "found": True,
+        "pid": 180812,
+        "creation_time": 1001,
+        "image_path": r"F:\UE\Engine\Binaries\Win64\UnrealEditor.exe",
+        "identity_source": "win32_process_times",
+    }
+    exited_identity = {
+        "query_ok": True,
+        "found": False,
+        "pid": 180812,
+        "identity_source": "win32_process_times",
+    }
+    api = MagicMock()
+    api.is_alive.side_effect = [True, False]
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+        return_value=api,
+    ) as api_cls, patch(
+        "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+        side_effect=[live_identity, live_identity, exited_identity],
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+        return_value={"ok": True, "pid": 180812, "method": "taskkill"},
+    ) as kill_process, patch(
+        "cli_anything.unreal.commands.editor.time.time",
+        side_effect=[0, 0, 0, 11],
+    ), patch(
+        "cli_anything.unreal.commands.editor.time.sleep",
+    ):
+        api_cls._get_pid_listening_on_port.return_value = 180812
+        result = CliRunner().invoke(cli, [
+            "--output", "json",
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
+    kill_process.assert_called_once_with(180812)
+    data = json.loads(result.output)
+    assert data["result"]["status"] == "closed"
+    assert data["result"]["method"] == "process_tree_kill"
+    assert data["result"]["closed_processes"] == [{
+        "pid": 180812,
+        "project": "",
+    }]
+
+
+def test_editor_close_without_project_rejects_unknown_port_owner():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    api = MagicMock()
+    api.is_alive.return_value = True
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+        return_value=api,
+    ) as api_cls:
+        api_cls._get_pid_listening_on_port.return_value = None
+        result = CliRunner().invoke(cli, [
+            "--output", "json",
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 3
+    api.exec_console.assert_not_called()
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_CLOSE_TARGET_UNKNOWN"
+    assert data["details"] == {"port": 30010}
+    assert "--project" in data["suggestion"]
 
 
 def test_editor_close_rejects_ambiguous_live_ports():

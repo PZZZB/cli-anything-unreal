@@ -1219,7 +1219,7 @@ def _finish_partitioned_editor_close(
 
 
 def _project_process_exit_evidence(
-    project_path: str,
+    project_path: str | None,
     targets: list[dict],
 ) -> tuple[bool, dict]:
     from cli_anything.unreal.utils.ue_backend import (
@@ -1262,7 +1262,7 @@ def _project_process_exit_evidence(
         return True, {"matching_pids": [], "pids": public_evidence}
 
     matching_pids = set()
-    if needs_project_scan:
+    if needs_project_scan and project_path:
         _, matches = _find_matching_project_editors(project_path)
         for proc in matches:
             try:
@@ -1293,7 +1293,7 @@ def _kill_matching_project_editors(
     failure_message: str,
     expected_targets: list[dict] | None = None,
 ) -> dict | None:
-    if not project_path:
+    if not project_path and not expected_targets:
         return None
 
     from cli_anything.unreal.utils.ue_backend import (
@@ -1599,7 +1599,7 @@ def _wait_for_project_editor_exit(
     targets: list[dict] | None = None,
 ) -> dict | None:
     """Wait for same-project UnrealEditor processes to exit, then kill stale lock holders."""
-    if not project_path or sys.platform != "win32":
+    if (not project_path and not targets) or sys.platform != "win32":
         return None
 
     deadline = time.time() + timeout
@@ -2388,27 +2388,49 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
     graceful_targets = []
     stale_targets = []
     target_pids = []
-    if state.session.project_path and sys.platform == "win32":
-        running, matches = _find_matching_project_editors(state.session.project_path)
-        if not matches:
-            raise AppError(
-                "EDITOR_PROJECT_NOT_RUNNING",
-                f"Remote Control API is alive on port {state.session.port}, but no running UnrealEditor process matches this project.",
-                exit_code=3,
-                details={
-                    "port": state.session.port,
-                    "project": state.session.project_path,
-                    "running_editors": [
-                        {"pid": editor.get("pid"), "project": editor.get("project", "")}
-                        for editor in running
-                    ],
-                },
+    if sys.platform == "win32":
+        if state.session.project_path:
+            running, matches = _find_matching_project_editors(state.session.project_path)
+            if not matches:
+                raise AppError(
+                    "EDITOR_PROJECT_NOT_RUNNING",
+                    f"Remote Control API is alive on port {state.session.port}, but no running UnrealEditor process matches this project.",
+                    exit_code=3,
+                    details={
+                        "port": state.session.port,
+                        "project": state.session.project_path,
+                        "running_editors": [
+                            {"pid": editor.get("pid"), "project": editor.get("project", "")}
+                            for editor in running
+                        ],
+                    },
+                )
+            targets = _capture_project_editor_targets(matches)
+            graceful_targets, stale_targets = _partition_editor_close_targets(
+                targets,
+                state.session.port,
             )
-        targets = _capture_project_editor_targets(matches)
-        graceful_targets, stale_targets = _partition_editor_close_targets(
-            targets,
-            state.session.port,
-        )
+        else:
+            from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+            try:
+                api_owner_pid = UEEditorAPI._get_pid_listening_on_port(state.session.port)
+                api_owner_pid = int(api_owner_pid) if api_owner_pid is not None else None
+            except (OSError, TypeError, ValueError):
+                api_owner_pid = None
+            if api_owner_pid is None:
+                raise AppError(
+                    "EDITOR_CLOSE_TARGET_UNKNOWN",
+                    f"Remote Control API is alive on port {state.session.port}, but its owning process could not be identified.",
+                    exit_code=3,
+                    suggestion="Retry with --project so ue-cli can identify and verify the target editor process.",
+                    details={"port": state.session.port},
+                )
+            targets = _capture_project_editor_targets([{
+                "pid": api_owner_pid,
+                "project": "",
+            }])
+            graceful_targets = targets
         target_pids = sorted({int(target["pid"]) for target in targets})
 
     try:
