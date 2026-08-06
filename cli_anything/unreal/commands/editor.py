@@ -2925,7 +2925,7 @@ def editor_plugin_version(state: AppState):
 def editor_plugin_upgrade(state: AppState):
     """Upgrade the CliAnythingBridge plugin if a newer version is available.
 
-    Workflow: deploy updated plugin source, compile the project,
+    Workflow: deploy updated plugin source, compile the bridge module,
     restart the editor if it was running, verify the new version.
     """
     from cli_anything.unreal.core.plugin_bridge import (
@@ -2937,7 +2937,6 @@ def editor_plugin_upgrade(state: AppState):
     require_project(state)
     project_dir = state.session.project_dir
 
-    import shutil
     plugin_dir = Path(project_dir) / "Plugins" / "CliAnythingBridge"
     bundled = get_bundled_version()
 
@@ -2981,13 +2980,13 @@ def editor_plugin_upgrade(state: AppState):
     if plugin_binaries.exists():
         _remove_tree_with_retries(plugin_binaries)
 
-    from cli_anything.unreal.core.build import compile_project
-    build_result = compile_project(state.session.project_path, engine_root=state.session.engine_root)
+    from cli_anything.unreal.core.plugin_bridge import compile_bridge_plugin
+    build_result = compile_bridge_plugin(
+        state.session.project_path,
+        engine_root=state.session.engine_root,
+    )
     if build_result.get("status") == "error":
-        details = {
-            "log_file": build_result.get("log_file", ""),
-            "returncode": build_result.get("returncode"),
-        }
+        details = dict(build_result)
         details.update(_extract_compile_lock_error(build_result.get("log_file", "")))
         suggestion = None
         if details.get("locked_file"):
@@ -2995,8 +2994,10 @@ def editor_plugin_upgrade(state: AppState):
                 "A DLL is locked during compile. Close all UnrealEditor processes for this project "
                 "or stop the process holding the DLL, then retry editor plugin-upgrade."
             )
+        elif build_result.get("recovery_command"):
+            suggestion = f"Run: {build_result['recovery_command']}"
         raise AppError(
-            "COMPILE_FAILED",
+            build_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
             build_result.get("error", "Build failed"),
             suggestion=suggestion,
             details=details,
@@ -3025,6 +3026,7 @@ def editor_plugin_upgrade(state: AppState):
                     "status": "upgraded",
                     "version": bundled,
                     "previous_version": loaded,
+                    "bridge_build": build_result,
                 }, state)
             else:
                 output({
@@ -3040,6 +3042,7 @@ def editor_plugin_upgrade(state: AppState):
         "version": deploy.get("version", bundled),
         "plugin_dir": deploy.get("plugin_dir"),
         "needs_restart": editor_was_running,
+        "bridge_build": build_result,
     }, state)
 
 

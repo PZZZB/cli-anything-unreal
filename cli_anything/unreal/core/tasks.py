@@ -1028,16 +1028,6 @@ def _run_build_task(task: dict, func_name: str, *, estimated_total_seconds: int)
     return _finalize_build_task(task["task_id"], result) or task
 
 
-def _clean_bridge_build_outputs(project_dir: str) -> None:
-    import shutil
-
-    plugin_dir = Path(project_dir) / "Plugins" / "CliAnythingBridge"
-    for sub in ("Intermediate", "Binaries"):
-        path = plugin_dir / sub
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-
-
 def _looks_like_transport_disconnect(result: dict) -> bool:
     text = " ".join(str(result.get(key, "")) for key in ("error", "message", "traceback")).lower()
     markers = (
@@ -1246,10 +1236,8 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         }
         save_task(task)
 
-        _clean_bridge_build_outputs(state.session.project_dir)
-
-        from cli_anything.unreal.core.build import compile_project
-        compile_result = compile_project(
+        from cli_anything.unreal.core.plugin_bridge import compile_bridge_plugin
+        compile_result = compile_bridge_plugin(
             state.session.project_path,
             engine_root=state.session.engine_root,
         )
@@ -1259,8 +1247,11 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         if compile_result.get("status") != "ok":
             task["status"] = "failed"
             task["error"] = {
-                "code": "COMPILE_FAILED",
-                "message": f"Bridge plugin compilation failed: {compile_result.get('error', 'Unknown error')}",
+                "code": compile_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
+                "message": compile_result.get(
+                    "error",
+                    "Bridge plugin targeted compilation failed.",
+                ),
                 "details": compile_result,
             }
             return save_task(task)
@@ -1333,24 +1324,25 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     # Auto-compile and retry if plugin failed to load
     if wait_result.get("status") == "error_dialog" and "failed to load" in wait_result.get("error", ""):
-        _clean_bridge_build_outputs(state.session.project_dir)
-
         task = load_task(task["task_id"]) or task
         task["status"] = "compiling"
         task["result"] = dict(task.get("result", {}))
         task["result"]["compile_reason"] = "Bridge plugin failed to load"
         save_task(task)
 
-        from cli_anything.unreal.core.build import compile_project
-        compile_result = compile_project(
+        from cli_anything.unreal.core.plugin_bridge import compile_bridge_plugin
+        compile_result = compile_bridge_plugin(
             state.session.project_path,
             engine_root=state.session.engine_root,
         )
         if compile_result.get("status") != "ok":
             task["status"] = "failed"
             task["error"] = {
-                "code": "COMPILE_FAILED",
-                "message": f"Bridge plugin compilation failed: {compile_result.get('error', 'Unknown error')}",
+                "code": compile_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
+                "message": compile_result.get(
+                    "error",
+                    "Bridge plugin targeted compilation failed.",
+                ),
                 "details": compile_result,
             }
             task["result"]["compile_result"] = compile_result

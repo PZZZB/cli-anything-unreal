@@ -159,6 +159,193 @@ class TestPluginBridge:
         assert result["editor_binary_prefix"] == "UE4Editor"
         assert result["dll_path"].endswith("UE4Editor-CliAnythingBridge.dll")
 
+    def test_get_plugin_binary_status_uses_manifest_mapped_binary(self, tmp_path):
+        """Hot-reload suffixes in the modules manifest must select the real DLL."""
+        from cli_anything.unreal.core.plugin_bridge import (
+            ensure_plugin_deployed,
+            get_plugin_binary_status,
+        )
+
+        engine_root = tmp_path / "EngineRoot"
+        engine_bin = engine_root / "Engine" / "Binaries" / "Win64"
+        engine_bin.mkdir(parents=True)
+        (engine_bin / "UnrealEditor.exe").write_text("fake", encoding="utf-8")
+        (engine_bin / "UnrealEditor.modules").write_text(
+            json.dumps({"BuildId": "engine-build", "Modules": {}}),
+            encoding="utf-8",
+        )
+        ensure_plugin_deployed(str(tmp_path))
+        plugin_bin = tmp_path / "Plugins" / "CliAnythingBridge" / "Binaries" / "Win64"
+        plugin_bin.mkdir(parents=True)
+        dll = plugin_bin / "UnrealEditor-CliAnythingBridge-1234.dll"
+        dll.write_bytes(b"MZ")
+        (plugin_bin / "UnrealEditor.modules").write_text(
+            json.dumps({
+                "BuildId": "engine-build",
+                "Modules": {"CliAnythingBridge": dll.name},
+            }),
+            encoding="utf-8",
+        )
+
+        result = get_plugin_binary_status(
+            str(tmp_path),
+            engine_root=str(engine_root),
+        )
+
+        assert result["ready"] is True
+        assert result["dll_path"] == str(dll)
+
+    def test_repair_bridge_modules_manifest_uses_engine_build_id(self, tmp_path):
+        from cli_anything.unreal.core.plugin_bridge import repair_bridge_modules_manifest
+
+        engine_root = tmp_path / "EngineRoot"
+        engine_bin = engine_root / "Engine" / "Binaries" / "Win64"
+        engine_bin.mkdir(parents=True)
+        (engine_bin / "UnrealEditor.exe").write_text("fake", encoding="utf-8")
+        (engine_bin / "UnrealEditor.modules").write_text(
+            json.dumps({"BuildId": "engine-build", "Modules": {}}),
+            encoding="utf-8",
+        )
+        plugin_bin = tmp_path / "Plugins" / "CliAnythingBridge" / "Binaries" / "Win64"
+        plugin_bin.mkdir(parents=True)
+        dll = plugin_bin / "UnrealEditor-CliAnythingBridge.dll"
+        dll.write_bytes(b"MZ")
+
+        result = repair_bridge_modules_manifest(
+            str(tmp_path),
+            str(engine_root),
+        )
+
+        assert result["status"] == "ok"
+        assert result["action"] == "created"
+        modules = json.loads(
+            (plugin_bin / "UnrealEditor.modules").read_text(encoding="utf-8")
+        )
+        assert modules == {
+            "BuildId": "engine-build",
+            "Modules": {"CliAnythingBridge": dll.name},
+        }
+
+    def test_compile_bridge_plugin_repairs_missing_manifest_after_targeted_build(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.plugin_bridge import (
+            compile_bridge_plugin,
+            ensure_plugin_deployed,
+        )
+
+        project_dir = tmp_path / "Project"
+        project_dir.mkdir()
+        uproject = project_dir / "Project.uproject"
+        uproject.write_text('{"FileVersion": 3}', encoding="utf-8")
+        ensure_plugin_deployed(str(project_dir))
+        engine_root = tmp_path / "EngineRoot"
+        engine_bin = engine_root / "Engine" / "Binaries" / "Win64"
+        engine_bin.mkdir(parents=True)
+        (engine_bin / "UnrealEditor.exe").write_text("fake", encoding="utf-8")
+        (engine_bin / "UnrealEditor.modules").write_text(
+            json.dumps({"BuildId": "engine-build", "Modules": {}}),
+            encoding="utf-8",
+        )
+
+        def targeted_compile(*args, **kwargs):
+            plugin_bin = (
+                project_dir
+                / "Plugins"
+                / "CliAnythingBridge"
+                / "Binaries"
+                / "Win64"
+            )
+            plugin_bin.mkdir(parents=True)
+            (plugin_bin / "UnrealEditor-CliAnythingBridge.dll").write_bytes(b"MZ")
+            return {
+                "status": "error",
+                "code": "INVALID_BUILD_OUTPUT",
+                "failure_kind": "missing_editor_module_manifests",
+                "returncode": 0,
+            }
+
+        with patch(
+            "cli_anything.unreal.core.build.compile_project",
+            side_effect=targeted_compile,
+        ) as mock_compile, patch(
+            "cli_anything.unreal.core.build._validate_win64_editor_build_products",
+            return_value={},
+        ):
+            result = compile_bridge_plugin(
+                str(uproject),
+                engine_root=str(engine_root),
+            )
+
+        assert result["status"] == "ok"
+        assert result["build_scope"] == "bridge_module"
+        assert result["full_editor_build_started"] is False
+        assert result["full_editor_build_required"] is False
+        assert result["metadata_repair"]["action"] == "created"
+        _, kwargs = mock_compile.call_args
+        assert kwargs["modules"] == ["CliAnythingBridge"]
+        assert kwargs["platform"] == "Win64"
+
+    def test_compile_bridge_plugin_stops_before_full_build_when_target_invalid(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.plugin_bridge import (
+            compile_bridge_plugin,
+            ensure_plugin_deployed,
+        )
+
+        project_dir = tmp_path / "Project"
+        project_dir.mkdir()
+        uproject = project_dir / "Project.uproject"
+        uproject.write_text('{"FileVersion": 3}', encoding="utf-8")
+        ensure_plugin_deployed(str(project_dir))
+        engine_root = tmp_path / "EngineRoot"
+        engine_bin = engine_root / "Engine" / "Binaries" / "Win64"
+        engine_bin.mkdir(parents=True)
+        (engine_bin / "UnrealEditor.exe").write_text("fake", encoding="utf-8")
+        (engine_bin / "UnrealEditor.modules").write_text(
+            json.dumps({"BuildId": "engine-build", "Modules": {}}),
+            encoding="utf-8",
+        )
+
+        def targeted_compile(*args, **kwargs):
+            plugin_bin = (
+                project_dir
+                / "Plugins"
+                / "CliAnythingBridge"
+                / "Binaries"
+                / "Win64"
+            )
+            plugin_bin.mkdir(parents=True)
+            (plugin_bin / "UnrealEditor-CliAnythingBridge.dll").write_bytes(b"MZ")
+            return {"status": "ok", "returncode": 0}
+
+        invalid = {
+            "status": "error",
+            "code": "INVALID_BUILD_OUTPUT",
+            "failure_kind": "missing_editor_module_manifests",
+        }
+        with patch(
+            "cli_anything.unreal.core.build.compile_project",
+            side_effect=targeted_compile,
+        ), patch(
+            "cli_anything.unreal.core.build._validate_win64_editor_build_products",
+            return_value=invalid,
+        ):
+            result = compile_bridge_plugin(
+                str(uproject),
+                engine_root=str(engine_root),
+            )
+
+        assert result["status"] == "error"
+        assert result["code"] == "BRIDGE_TARGETED_BUILD_INCOMPLETE"
+        assert result["full_editor_build_started"] is False
+        assert result["full_editor_build_required"] is True
+        assert result["fallback_reason"] == "missing_editor_module_manifests"
+        assert "--module" not in result["recovery_command"]
+
     def test_is_plugin_loaded_true(self):
         """is_plugin_loaded returns True when probe script succeeds."""
         from cli_anything.unreal.core.plugin_bridge import is_plugin_loaded

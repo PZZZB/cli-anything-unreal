@@ -137,6 +137,260 @@ def _read_modules_build_id(modules_path: Path) -> str | None:
         return None
 
 
+def _clean_bridge_build_outputs(project_dir: str) -> dict:
+    plugin_dir = Path(project_dir) / "Plugins" / _PLUGIN_NAME
+    removed = []
+    for subdir in ("Intermediate", "Binaries"):
+        path = plugin_dir / subdir
+        if not path.exists():
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            return {
+                "status": "error",
+                "code": "BRIDGE_OUTPUT_CLEAN_FAILED",
+                "error": f"Could not remove stale bridge build output {path}: {exc}",
+                "path": str(path),
+            }
+        removed.append(str(path))
+    return {"status": "ok", "removed": removed}
+
+
+def repair_bridge_modules_manifest(project_dir: str, engine_root: str) -> dict:
+    """Create the plugin module manifest omitted by module-targeted UBT builds."""
+    from cli_anything.unreal.utils.ue_backend import get_editor_binary_prefix
+
+    editor_binary_prefix = get_editor_binary_prefix(engine_root)
+    engine_modules_path = (
+        Path(engine_root)
+        / "Engine"
+        / "Binaries"
+        / "Win64"
+        / f"{editor_binary_prefix}.modules"
+    )
+    try:
+        engine_modules = json.loads(
+            engine_modules_path.read_text(encoding="utf-8-sig")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "status": "error",
+            "code": "BRIDGE_ENGINE_BUILD_ID_UNAVAILABLE",
+            "error": f"Could not read engine module metadata {engine_modules_path}: {exc}",
+            "engine_modules_path": str(engine_modules_path),
+        }
+
+    build_id = engine_modules.get("BuildId")
+    if not isinstance(build_id, str) or not build_id:
+        return {
+            "status": "error",
+            "code": "BRIDGE_ENGINE_BUILD_ID_UNAVAILABLE",
+            "error": f"Engine module metadata has no BuildId: {engine_modules_path}",
+            "engine_modules_path": str(engine_modules_path),
+        }
+
+    bin_dir = Path(project_dir) / "Plugins" / _PLUGIN_NAME / "Binaries" / "Win64"
+    try:
+        binaries = sorted(
+            bin_dir.glob(f"{editor_binary_prefix}-{_PLUGIN_NAME}*.dll"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError as exc:
+        return {
+            "status": "error",
+            "code": "BRIDGE_BINARY_PROBE_FAILED",
+            "error": f"Could not inspect bridge binaries in {bin_dir}: {exc}",
+            "binary_directory": str(bin_dir),
+        }
+    if not binaries:
+        return {
+            "status": "error",
+            "code": "BRIDGE_BINARY_MISSING_AFTER_COMPILE",
+            "error": "Bridge module compile exited 0, but no bridge DLL was produced.",
+            "binary_directory": str(bin_dir),
+        }
+
+    binary_path = binaries[0]
+    modules_path = bin_dir / f"{editor_binary_prefix}.modules"
+    expected = {
+        "BuildId": build_id,
+        "Modules": {_PLUGIN_NAME: binary_path.name},
+    }
+    current = None
+    try:
+        current = json.loads(modules_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    if current == expected:
+        return {
+            "status": "ok",
+            "action": "already_valid",
+            "modules_path": str(modules_path),
+            "binary_path": str(binary_path),
+            "build_id": build_id,
+        }
+
+    action = "repaired" if modules_path.exists() else "created"
+    temp_path = modules_path.with_name(modules_path.name + ".tmp")
+    try:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        temp_path.write_text(json.dumps(expected, indent="\t") + "\n", encoding="utf-8")
+        temp_path.replace(modules_path)
+    except OSError as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return {
+            "status": "error",
+            "code": "BRIDGE_MODULES_WRITE_FAILED",
+            "error": f"Could not write bridge module metadata {modules_path}: {exc}",
+            "modules_path": str(modules_path),
+        }
+    return {
+        "status": "ok",
+        "action": action,
+        "modules_path": str(modules_path),
+        "binary_path": str(binary_path),
+        "build_id": build_id,
+    }
+
+
+def compile_bridge_plugin(
+    uproject_path: str,
+    *,
+    engine_root: str | None = None,
+    config: str = "Development",
+    log_file: str | None = None,
+    on_start=None,
+) -> dict:
+    """Build only CliAnythingBridge, repair metadata, then prove launchability."""
+    from cli_anything.unreal.core.build import (
+        _validate_win64_editor_build_products,
+        compile_project,
+    )
+    from cli_anything.unreal.utils.ue_backend import find_engine_root
+
+    resolved_engine_root = engine_root or find_engine_root(uproject_path)
+    recovery_command = (
+        f'ue-cli --project "{uproject_path}" build compile '
+        f"--platform Win64 --config {config}"
+    )
+    base = {
+        "build_scope": "bridge_module",
+        "module": _PLUGIN_NAME,
+        "full_editor_build_started": False,
+    }
+    if not resolved_engine_root:
+        return {
+            **base,
+            "status": "error",
+            "code": "ENGINE_NOT_FOUND",
+            "error": "Could not find engine root for bridge module compile.",
+        }
+
+    project_dir = str(Path(uproject_path).parent)
+    clean_result = _clean_bridge_build_outputs(project_dir)
+    if clean_result.get("status") != "ok":
+        return {**base, **clean_result}
+
+    compile_result = compile_project(
+        uproject_path,
+        config=config,
+        platform="Win64",
+        engine_root=resolved_engine_root,
+        log_file=log_file,
+        on_start=on_start,
+        modules=[_PLUGIN_NAME],
+    )
+    result = {
+        **base,
+        "cleanup": clean_result,
+        "compile_result": compile_result,
+    }
+    for key in ("command", "log_file", "returncode", "duration_seconds"):
+        if key in compile_result:
+            result[key] = compile_result[key]
+
+    ubt_succeeded = compile_result.get("status") == "ok" or (
+        compile_result.get("code") == "INVALID_BUILD_OUTPUT"
+    )
+    if not ubt_succeeded:
+        return {
+            **result,
+            "status": "error",
+            "code": compile_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
+            "error": compile_result.get("error", "Bridge module compile failed."),
+        }
+
+    metadata_repair = repair_bridge_modules_manifest(project_dir, resolved_engine_root)
+    result["metadata_repair"] = metadata_repair
+    if metadata_repair.get("status") != "ok":
+        return {
+            **result,
+            "status": "error",
+            "code": "BRIDGE_METADATA_REPAIR_FAILED",
+            "error": metadata_repair.get(
+                "error",
+                "Bridge module metadata could not be repaired after compilation.",
+            ),
+            "full_editor_build_required": True,
+            "fallback_reason": metadata_repair.get("code", "metadata_repair_failed"),
+            "recovery_command": recovery_command,
+        }
+
+    output_validation = _validate_win64_editor_build_products(
+        uproject_path,
+        resolved_engine_root,
+        config,
+        [_PLUGIN_NAME],
+    )
+    result["output_validation"] = output_validation or {"status": "ok"}
+    if output_validation.get("status") == "error":
+        return {
+            **result,
+            "status": "error",
+            "code": "BRIDGE_TARGETED_BUILD_INCOMPLETE",
+            "error": (
+                "Bridge module compiled and its metadata was repaired, but the "
+                "Editor target still has invalid build output."
+            ),
+            "full_editor_build_required": True,
+            "fallback_reason": output_validation.get(
+                "failure_kind",
+                "editor_output_validation_failed",
+            ),
+            "recovery_command": recovery_command,
+        }
+
+    binary_status = get_plugin_binary_status(
+        project_dir,
+        engine_root=resolved_engine_root,
+    )
+    result["bridge_binary_status"] = binary_status
+    if not binary_status.get("ready", False):
+        return {
+            **result,
+            "status": "error",
+            "code": "BRIDGE_BINARY_NOT_READY",
+            "error": binary_status.get(
+                "message",
+                "Bridge binary is not ready after targeted compilation.",
+            ),
+            "full_editor_build_required": True,
+            "fallback_reason": binary_status.get("reason", "bridge_binary_not_ready"),
+            "recovery_command": recovery_command,
+        }
+
+    return {
+        **result,
+        "status": "ok",
+        "full_editor_build_required": False,
+    }
+
+
 def _newest_plugin_source_mtime(plugin_dir: Path) -> float:
     newest = 0.0
     source_dir = plugin_dir / "Source"
@@ -191,7 +445,7 @@ def get_plugin_binary_status(project_dir: str, engine_root: str | None = None) -
             "message": "Bridge plugin source is not deployed.",
         }
 
-    if not dll_path.is_file():
+    if not dll_path.is_file() and not modules_path.is_file():
         return {
             **base,
             "ready": False,
@@ -211,12 +465,30 @@ def get_plugin_binary_status(project_dir: str, engine_root: str | None = None) -
         modules = json.loads(modules_path.read_text(encoding="utf-8-sig")).get("Modules", {})
     except (OSError, json.JSONDecodeError):
         modules = {}
-    if _PLUGIN_NAME not in modules:
+    module_binary = modules.get(_PLUGIN_NAME)
+    if not isinstance(module_binary, str) or not module_binary:
         return {
             **base,
             "ready": False,
             "reason": "missing_module_entry",
             "message": "Bridge plugin modules file does not list CliAnythingBridge.",
+        }
+
+    if Path(module_binary).name != module_binary or Path(module_binary).suffix.casefold() != ".dll":
+        return {
+            **base,
+            "ready": False,
+            "reason": "invalid_module_entry",
+            "message": "Bridge plugin modules file contains an invalid CliAnythingBridge binary path.",
+        }
+    dll_path = bin_dir / module_binary
+    base["dll_path"] = str(dll_path)
+    if not dll_path.is_file():
+        return {
+            **base,
+            "ready": False,
+            "reason": "missing_binary",
+            "message": "Bridge plugin binary is missing.",
         }
 
     newest_source = _newest_plugin_source_mtime(plugin_dir)
