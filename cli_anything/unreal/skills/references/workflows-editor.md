@@ -257,13 +257,13 @@ Known UE issue: Adreno + RenderDoc Android loader + `VK_KHR_buffer_device_addres
 | Can't find `.rdc` | Unknown capture dir | Check `<ProjectDir>/Saved/RenderDocCaptures/` |
 | RenderDoc UI doesn't open | RenderDoc not installed | Install from [renderdoc.org](https://renderdoc.org) |
 
-### Synchronous Execution - No Tick Callbacks
+### Synchronous Results and Deferred Callbacks
 
 `editor run-script` is synchronous: CLI waits for Python main thread, returns result, disconnects.
 
-1. **No tick-based async callbacks.** By trigger time, CLI connection gone.
-2. **Multi-frame ops split into scripts.** One `editor run-script` per frame-bound step.
-3. **Finish all work on main thread before return.**
+1. **Deferred callbacks can outlive the command.** Registered functions retain their invocation globals while Unreal retains the callback.
+2. **Store and unregister callback handles.** Errors raised after the command returns appear only in the editor log and cannot change the completed CLI result.
+3. **Prefer split scripts for observable multi-frame work.** Use one `editor run-script` per frame-bound step when the caller must verify each result.
 
 ### Inline Python Auto-Mode
 

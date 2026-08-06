@@ -99,10 +99,9 @@ else:
         _cli_result["status"] = "ok"
 
 _cli_unreal.log("{marker}" + _cli_json.dumps(_cli_result, default=str))
-try:
-    {user_ns_name}.clear()
-except Exception:
-    pass
+# Drop only the wrapper's reference.  A deferred Unreal callback can retain
+# this namespace through function.__globals__, so clearing it would break the
+# callback after the command returns.
 try:
     del {user_ns_name}
 except Exception:

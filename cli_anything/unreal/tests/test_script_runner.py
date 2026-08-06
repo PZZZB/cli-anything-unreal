@@ -2370,8 +2370,8 @@ result = {'status': 'live_editor_ok'}
         assert first["ok"] is True
         assert second["sticky_present"] is False
 
-    def test_run_python_code_clears_user_namespace_after_execution(self):
-        """Wrapper must not leave user objects referenced in UE Python globals."""
+    def test_run_python_code_removes_user_namespace_from_wrapper_globals(self):
+        """Wrapper globals must not retain the invocation namespace."""
         from cli_anything.unreal.core.script_runner import run_python_code
 
         import sys
@@ -2411,6 +2411,58 @@ result = {'status': 'live_editor_ok'}
         assert "_cli_user_ns" not in persistent_globals
         assert "_cli_user_result" not in persistent_globals
         assert "held_world_like_object" not in persistent_globals
+
+    def test_run_python_code_preserves_globals_for_registered_callback(self):
+        """A retained callback must keep its invocation namespace usable."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        import sys
+        import types
+
+        callbacks = []
+        log_entries = []
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: log_entries.append({"Type": "Info", "Output": msg})
+        fake_unreal.register_slate_post_tick_callback = lambda callback: callbacks.append(callback)
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        persistent_globals = {}
+
+        def _fake_exec_python_ex(code, *, timeout=None):
+            exec(compile(code, "<exec_python_ex>", "exec"), persistent_globals, persistent_globals)
+            return {
+                "ReturnValue": True,
+                "CommandResult": "None",
+                "LogOutput": list(log_entries),
+            }
+
+        mock_api = MagicMock()
+        mock_api.exec_python_ex.side_effect = _fake_exec_python_ex
+        try:
+            result = run_python_code(
+                mock_api,
+                "import unreal\n"
+                "state = {'ticks': 0}\n"
+                "def tick(delta):\n"
+                "    state['ticks'] += 1\n"
+                "unreal.register_slate_post_tick_callback(tick)\n"
+                "result = {'registered': True}",
+                timeout=5,
+                save=False,
+            )
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
+        assert result["registered"] is True
+        assert "_cli_user_ns" not in persistent_globals
+        assert len(callbacks) == 1
+
+        callback = callbacks[0]
+        callback(0.016)
+        assert callback.__globals__["state"] == {"ticks": 1}
 
 
 # ═══════════════════════════════════════════════════════════════════════
