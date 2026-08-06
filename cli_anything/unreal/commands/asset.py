@@ -122,6 +122,13 @@ def asset_refs_cmd(state: AppState, asset_path):
 
     api = require_editor(state)
     result = asset_refs(api, asset_path, project_dir=state.session.project_dir)
+    if isinstance(result, dict) and result.get("error"):
+        raise AppError(
+            "ASSET_REFS_FAILED",
+            str(result["error"]),
+            exit_code=3,
+            details=result,
+        )
     output(result, state)
 
 

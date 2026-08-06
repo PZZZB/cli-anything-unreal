@@ -2011,14 +2011,27 @@ class TestAssetsE2E:
         )
         run_python_code(api, cleanup_code, project_dir=project_dir, timeout=15, save=False)
 
-        result = cli_runner.invoke(cli, [
+        for asset_path in (self.TEST_ASSET, self.TEST_ASSET + ".E2E_AssetTest"):
+            result = cli_runner.invoke(cli, [
+                "--output", "json", "--port", str(api_port), "--project", project_path,
+                "asset", "refs", asset_path,
+            ])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["status"] == "success"
+            assert data["result"]["resolved_asset"] == (
+                "/Game/E2E_AssetTest.E2E_AssetTest"
+            )
+            assert "count" in data["result"]
+
+        missing_result = cli_runner.invoke(cli, [
             "--output", "json", "--port", str(api_port), "--project", project_path,
-            "asset", "refs", self.TEST_ASSET,
+            "asset", "refs", "/Game/E2E_AssetRefsMissing",
         ])
-        assert result.exit_code == 0
-        data = json.loads(result.output)
-        assert data["status"] == "success"
-        assert "count" in data["result"]
+        assert missing_result.exit_code == 3
+        missing_data = json.loads(missing_result.output)
+        assert missing_data["status"] == "error"
+        assert missing_data["code"] == "ASSET_REFS_FAILED"
 
     def test_asset_describe_and_property_cli(self, cli_runner, api_port, api, project_path):
         from cli_anything.unreal.unreal_cli import cli

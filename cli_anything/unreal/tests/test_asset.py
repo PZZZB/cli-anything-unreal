@@ -72,48 +72,73 @@ class TestAssets:
         result = asset_exists(api, "/Game/Missing")
         assert result["exists"] is False
 
-    def test_asset_refs_found(self):
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_refs_found(self, mock_exec):
         from cli_anything.unreal.core.assets import asset_refs
 
         api = self._mock_api()
-        api.does_asset_exist.return_value = True
-        api.find_asset_referencers.return_value = ["/Game/MI_Child", "/Game/Maps/Level1"]
+        mock_exec.return_value = {
+            "asset": "/Game/M_Test",
+            "resolved_asset": "/Game/M_Test.M_Test",
+            "referencers": ["/Game/MI_Child", "/Game/Maps/Level1"],
+            "count": 2,
+        }
 
-        result = asset_refs(api, "/Game/M_Test")
+        result = asset_refs(api, "/Game/M_Test", project_dir="F:/Project")
         assert result["count"] == 2
         assert "/Game/MI_Child" in result["referencers"]
+        mock_exec.assert_called_once()
+        assert mock_exec.call_args.args[0] is api
+        assert mock_exec.call_args.args[2] == "F:/Project"
 
-    def test_asset_refs_normalizes_package_path_when_exists_probe_needs_object_path(self):
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_refs_resolves_package_and_object_paths_in_editor(self, mock_exec):
         from cli_anything.unreal.core.assets import asset_refs
 
-        api = self._mock_api()
-        api.does_asset_exist.side_effect = lambda path: path == "/Game/Drone/MI_Drone.MI_Drone"
-        api.find_asset_referencers.return_value = ["/Game/Maps/L_Drone"]
+        mock_exec.return_value = {
+            "asset": "/Game/Drone/MI_Drone",
+            "resolved_asset": "/Game/Drone/MI_Drone.MI_Drone",
+            "referencers": ["/Game/Maps/L_Drone"],
+            "count": 1,
+        }
 
-        result = asset_refs(api, "/Game/Drone/MI_Drone")
+        result = asset_refs(self._mock_api(), "/Game/Drone/MI_Drone")
 
         assert result["asset"] == "/Game/Drone/MI_Drone"
         assert result["resolved_asset"] == "/Game/Drone/MI_Drone.MI_Drone"
         assert result["count"] == 1
-        api.find_asset_referencers.assert_called_once_with("/Game/Drone/MI_Drone.MI_Drone")
+        script = mock_exec.call_args.args[1]
+        assert "unreal.EditorAssetLibrary.load_asset" in script
+        assert "unreal.load_asset" in script
+        assert "unreal.load_object" in script
+        assert "get_assets_by_package_name" in script
+        assert "find_package_referencers_for_asset" in script
 
-    def test_asset_refs_not_found(self):
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_refs_not_found(self, mock_exec):
         from cli_anything.unreal.core.assets import asset_refs
 
-        api = self._mock_api()
-        api.does_asset_exist.return_value = False
+        mock_exec.return_value = {
+            "error": "Asset not found: /Game/Missing",
+            "asset": "/Game/Missing",
+            "tried": ["/Game/Missing", "/Game/Missing.Missing"],
+        }
 
-        result = asset_refs(api, "/Game/Missing")
+        result = asset_refs(self._mock_api(), "/Game/Missing")
         assert "error" in result
 
-    def test_asset_refs_no_refs(self):
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_refs_no_refs(self, mock_exec):
         from cli_anything.unreal.core.assets import asset_refs
 
-        api = self._mock_api()
-        api.does_asset_exist.return_value = True
-        api.find_asset_referencers.return_value = []
+        mock_exec.return_value = {
+            "asset": "/Game/M_Unused",
+            "resolved_asset": "/Game/M_Unused.M_Unused",
+            "referencers": [],
+            "count": 0,
+        }
 
-        result = asset_refs(api, "/Game/M_Unused")
+        result = asset_refs(self._mock_api(), "/Game/M_Unused")
         assert result["count"] == 0
         assert result["referencers"] == []
 
@@ -595,17 +620,48 @@ class TestAssetCLI:
         runner = CliRunner()
         with patch("cli_anything.unreal.commands.asset.require_editor") as mock_editor:
             mock_api = MagicMock()
-            mock_api.does_asset_exist.return_value = True
-            mock_api.find_asset_referencers.return_value = ["/Game/Maps/L1"]
             mock_editor.return_value = mock_api
+            with patch("cli_anything.unreal.core.assets._exec") as mock_exec:
+                mock_exec.return_value = {
+                    "asset": "/Game/M_Test",
+                    "resolved_asset": "/Game/M_Test.M_Test",
+                    "referencers": ["/Game/Maps/L1"],
+                    "count": 1,
+                }
+                result = runner.invoke(cli, [
+                    "--output", "json", "asset", "refs", "/Game/M_Test",
+                ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["count"] == 1
+
+    def test_asset_refs_cli_surfaces_resolution_failure(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.asset.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.assets.asset_refs") as mock_refs:
+            mock_editor.return_value = MagicMock()
+            mock_refs.return_value = {
+                "error": "Asset not found: /Game/Missing",
+                "asset": "/Game/Missing",
+                "tried": ["/Game/Missing", "/Game/Missing.Missing"],
+            }
 
             result = runner.invoke(cli, [
-                "--output", "json", "asset", "refs", "/Game/M_Test",
+                "--output", "json", "asset", "refs", "/Game/Missing",
             ])
-            assert result.exit_code == 0
-            data = json.loads(result.output)
-            assert data["status"] == "success"
-            assert data["result"]["count"] == 1
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "ASSET_REFS_FAILED"
+        assert data["message"] == "Asset not found: /Game/Missing"
+        assert data["details"]["tried"] == [
+            "/Game/Missing", "/Game/Missing.Missing",
+        ]
 
     def test_asset_texture_source_cli(self):
         from click.testing import CliRunner

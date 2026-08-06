@@ -1,7 +1,8 @@
 """assets.py — Asset management commands (exists, delete, rename, duplicate).
 
-Uses EditorAssetLibrary via Remote Control HTTP API for read-only queries
-(exists, refs) — single HTTP call per operation.
+Uses EditorAssetLibrary via Remote Control HTTP API for simple read-only queries.
+Reference lookup runs through editor Python so package and object paths are
+resolved against actual loaded assets before querying referencers.
 
 Mutations (delete, duplicate, rename) go through Python script execution
 inside the editor, because Remote Control's call_function on CDO does
@@ -111,6 +112,100 @@ else:
         "destination": dest,
         "renamed": success,
     }}
+'''
+
+
+_SCRIPT_ASSET_REFS = r'''
+import unreal
+
+requested_path = {asset_path!r}
+base_path = requested_path.strip().split(":", 1)[0]
+leaf = base_path.rsplit("/", 1)[-1]
+path_candidates = [base_path]
+if "." not in leaf:
+    path_candidates.append(base_path + "." + leaf)
+else:
+    package_path = base_path.rsplit(".", 1)[0]
+    if package_path not in path_candidates:
+        path_candidates.append(package_path)
+
+tried = []
+asset = None
+loaded_path = None
+
+def _is_package(obj):
+    try:
+        return obj.__class__.__name__ == "Package"
+    except Exception:
+        return False
+
+def _try_load(candidate):
+    if not candidate or candidate in tried:
+        return None
+    tried.append(candidate)
+    loaders = (
+        unreal.EditorAssetLibrary.load_asset,
+        unreal.load_asset,
+        lambda path: unreal.load_object(None, path),
+    )
+    for loader in loaders:
+        try:
+            loaded = loader(candidate)
+        except Exception:
+            loaded = None
+        if loaded is not None and not _is_package(loaded):
+            return loaded
+    return None
+
+for candidate in path_candidates:
+    asset = _try_load(candidate)
+    if asset is not None:
+        loaded_path = candidate
+        break
+
+if asset is None and base_path:
+    try:
+        registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        package_name = base_path.rsplit(".", 1)[0] if "." in leaf else base_path
+        for asset_data in registry.get_assets_by_package_name(package_name, False):
+            object_path = str(asset_data.package_name) + "." + str(asset_data.asset_name)
+            asset = _try_load(object_path)
+            if asset is not None:
+                loaded_path = object_path
+                break
+    except Exception:
+        asset = None
+
+if asset is None:
+    result = {
+        "error": "Asset not found: " + requested_path,
+        "asset": requested_path,
+        "tried": tried,
+    }
+else:
+    resolved_asset = asset.get_path_name()
+    resolved_package = resolved_asset.split(".", 1)[0]
+    try:
+        referencers = [
+            str(path) for path in unreal.EditorAssetLibrary.find_package_referencers_for_asset(
+                resolved_package, False
+            )
+        ]
+        result = {
+            "asset": requested_path,
+            "resolved_asset": resolved_asset,
+            "referencers": referencers,
+            "count": len(referencers),
+        }
+        if loaded_path is not None:
+            result["loaded_path"] = loaded_path
+    except Exception as exc:
+        result = {
+            "error": "Failed to find referencers for " + requested_path + ": " + str(exc),
+            "asset": requested_path,
+            "resolved_asset": resolved_asset,
+            "tried": tried,
+        }
 '''
 
 
@@ -298,35 +393,15 @@ def _asset_object_path(asset_path: str) -> str:
     return base + (sep + suffix if sep else "")
 
 
-def _asset_reference_path_candidates(asset_path: str) -> list[str]:
-    """Return likely reference-query paths for package/object path inputs."""
-    candidates: list[str] = []
-    for path in (str(asset_path).strip(), _asset_object_path(asset_path)):
-        if path and path not in candidates:
-            candidates.append(path)
-    return candidates
-
-
-def asset_refs(api: "UEEditorAPI", asset_path: str, **_kw) -> dict:
-    """List all assets that reference the given asset."""
-    tried = _asset_reference_path_candidates(asset_path)
-    resolved_asset = None
-    for candidate in tried:
-        if api.does_asset_exist(candidate):
-            resolved_asset = candidate
-            break
-    if resolved_asset is None:
-        return {
-            "error": f"Asset not found: {asset_path}",
-            "asset": asset_path,
-            "tried": tried,
-            "suggestion": "Use a package path like /Game/A or a full object path like /Game/A.A.",
-        }
-    refs = api.find_asset_referencers(resolved_asset)
-    result = {"asset": asset_path, "referencers": refs, "count": len(refs)}
-    if resolved_asset != asset_path:
-        result["resolved_asset"] = resolved_asset
-    return result
+def asset_refs(
+    api: "UEEditorAPI",
+    asset_path: str,
+    *,
+    project_dir: str | None = None,
+) -> dict:
+    """Resolve an asset in-editor and list assets that reference its package."""
+    script = _SCRIPT_ASSET_REFS.replace("{asset_path!r}", repr(asset_path))
+    return _exec(api, script, project_dir)
 
 
 def texture_source_info(
