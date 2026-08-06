@@ -315,6 +315,7 @@ def require_editor(
     state: AppState,
     *,
     timeout: int | float | None = None,
+    accept_listener: bool = False,
 ):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
@@ -325,21 +326,24 @@ def require_editor(
             return None
         return max(0.0, deadline - time.monotonic())
 
-    def is_alive(api) -> bool:
+    def editor_available(api) -> bool:
         remaining = remaining_timeout()
+        if accept_listener:
+            listener_timeout = 0.5 if remaining is None else min(0.5, remaining)
+            return api.is_listening(timeout=listener_timeout)
         if remaining is None:
             return api.is_alive()
         return api.is_alive(timeout=remaining)
 
     api = UEEditorAPI(port=state.session.port)
     api.project_path = state.session.project_path
-    api_alive = is_alive(api)
+    api_alive = editor_available(api)
     if not api_alive:
         live_port = _discover_online_editor_port(state, fail_if_ambiguous=True)
         if live_port is not None:
             live_api = UEEditorAPI(port=live_port)
             live_api.project_path = state.session.project_path
-            if is_alive(live_api):
+            if editor_available(live_api):
                 state.session.port = live_port
                 api = live_api
                 api_alive = True

@@ -164,6 +164,7 @@ ue-cli --output json --project "$Project" material shader-source /Game/MyMateria
 ue-cli --output json --project "$Project" screenshot capture --path "F:/output/material_check.png"
 ue-cli --output json --project "$Project" screenshot capture --path "F:/output/stat_evidence.png" --include-ui
 ue-cli --output json --project "$Project" editor run-script --no-save -c 'result={"label":"quoted value"}'
+ue-cli --output json --project "$Project" editor cvar get r.VSync --timeout 10
 ```
 
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
@@ -175,6 +176,7 @@ Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem p
 On Windows PowerShell, `editor run-script -c` preserves double-quoted Python string literals that native argument parsing would otherwise strip. Use stdin (`editor run-script -`) or a `.py` file for multiline code.
 A `.py` file passed to `editor run-script` executes with `__name__ == "__main__"` and an absolute `__file__`, so guarded script entrypoints run normally.
 Each `editor run-script` invocation receives fresh globals. Deferred Unreal callbacks retain that invocation's globals after the command returns; store their handles and unregister them when finished because later callback failures appear only in the editor log.
+`editor cvar get` confirms the selected editor's TCP listener, then uses the remaining timeout for the requested CVar. It does not spend the budget on a duplicate functional readiness call. Query timeouts report the actual request stage; verified missing CVars return `CVAR_NOT_FOUND`.
 
 ## Multiple Editors
 

@@ -3444,7 +3444,7 @@ def cvar_group():
     default=10,
     show_default=True,
     type=click.IntRange(min=1),
-    help="Total seconds allowed for editor readiness and the CVar query.",
+    help="Total seconds allowed for editor selection and the CVar query.",
 )
 @handle_error
 @click.pass_obj
@@ -3452,7 +3452,7 @@ def cvar_get(state: AppState, name, timeout):
     """Get a console variable value."""
     deadline = time.monotonic() + timeout
     try:
-        api = require_editor(state, timeout=timeout)
+        api = require_editor(state, timeout=timeout, accept_listener=True)
     except AppError as error:
         if error.code != "EDITOR_UNREACHABLE" or time.monotonic() < deadline:
             raise
@@ -3467,7 +3467,7 @@ def cvar_get(state: AppState, name, timeout):
             details={
                 "name": name,
                 "timeout_seconds": timeout,
-                "request_stage": "editor_readiness",
+                "request_stage": "editor_selection",
             },
         )
 
@@ -3476,7 +3476,7 @@ def cvar_get(state: AppState, name, timeout):
         info = {
             "name": name,
             "error": f"CVar query timed out after {timeout} seconds.",
-            "request_stage": "editor_readiness",
+            "request_stage": "editor_selection",
         }
     else:
         info = api.get_cvar_info(name, timeout=remaining)

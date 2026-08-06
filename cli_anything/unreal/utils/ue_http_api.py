@@ -190,6 +190,19 @@ class UEEditorAPI:
 
     # ── Connection ──────────────────────────────────────────────────────
 
+    def is_listening(self, *, timeout: int | float = 0.5) -> bool:
+        """Check whether the selected host and port accept TCP connections."""
+        if timeout <= 0:
+            return False
+        try:
+            with socket.create_connection(
+                (self.host, self.port),
+                timeout=timeout,
+            ):
+                return True
+        except (OSError, TimeoutError):
+            return False
+
     def is_alive(self, *, timeout: int | float | None = None) -> bool:
         """Check Remote Control readiness within an optional total timeout."""
         deadline = time.monotonic() + timeout if timeout is not None else None
@@ -221,13 +234,7 @@ class UEEditorAPI:
         connect_timeout = bounded_timeout(0.5)
         if connect_timeout is None:
             return False
-        try:
-            with socket.create_connection(
-                (self.host, self.port),
-                timeout=connect_timeout,
-            ):
-                pass
-        except (OSError, TimeoutError):
+        if not self.is_listening(timeout=connect_timeout):
             return False
 
         probe = {

@@ -934,6 +934,27 @@ class TestHTTPAPI:
         api = UEEditorAPI(port=19999)  # unlikely to be in use
         assert api.is_alive() is False
 
+    @patch("socket.create_connection")
+    def test_is_listening_true(self, mock_connect):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        api = UEEditorAPI()
+
+        assert api.is_listening(timeout=0.25) is True
+        mock_connect.assert_called_once_with(
+            ("localhost", 30010),
+            timeout=0.25,
+        )
+
+    @patch("socket.create_connection", side_effect=OSError("connection refused"))
+    def test_is_listening_false(self, mock_connect):
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        api = UEEditorAPI()
+
+        assert api.is_listening(timeout=0.25) is False
+        mock_connect.assert_called_once()
+
     @patch("requests.get")
     def test_is_alive_true(self, mock_get):
         from cli_anything.unreal.utils.ue_http_api import UEEditorAPI

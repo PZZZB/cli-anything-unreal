@@ -806,10 +806,11 @@ class TestCLI:
         assert data["details"]["request_stage"] == "bridge_metadata"
         mock_editor.assert_called_once()
         assert mock_editor.call_args.kwargs["timeout"] == 2
+        assert mock_editor.call_args.kwargs["accept_listener"] is True
         request_timeout = api.get_cvar_info.call_args.kwargs["timeout"]
         assert 0 < request_timeout <= 2
 
-    def test_cvar_get_timeout_includes_editor_readiness(self):
+    def test_cvar_get_timeout_during_editor_selection(self):
         from click.testing import CliRunner
         from cli_anything.unreal.commands import AppError
         from cli_anything.unreal.unreal_cli import cli
@@ -836,7 +837,45 @@ class TestCLI:
         assert result.exit_code == 3
         data = json.loads(result.output)
         assert data["code"] == "CVAR_GET_TIMEOUT"
-        assert data["details"]["request_stage"] == "editor_readiness"
+        assert data["details"]["request_stage"] == "editor_selection"
+
+    def test_cvar_get_accepts_listener_without_functional_readiness_probe(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.commands import require_editor
+        from cli_anything.unreal.unreal_cli import cli
+
+        api = MagicMock()
+        api.is_listening.return_value = True
+        api.get_cvar_info.return_value = {
+            "name": "r.__missing__",
+            "exists": False,
+            "value": "",
+        }
+        runner = CliRunner()
+
+        with patch(
+            "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+            return_value=api,
+        ), patch(
+            "cli_anything.unreal.commands._guard_editor_project",
+            return_value=None,
+        ), patch(
+            "cli_anything.unreal.commands.editor.require_editor",
+            side_effect=lambda cli_state, **kwargs: require_editor(cli_state, **kwargs),
+        ):
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "cvar", "get",
+                "r.__missing__",
+                "--timeout", "10",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "CVAR_NOT_FOUND"
+        api.is_listening.assert_called_once()
+        api.is_alive.assert_not_called()
+        api.get_cvar_info.assert_called_once()
 
     def test_viewport_bookmark_jump_cli(self, temp_project):
         from click.testing import CliRunner
