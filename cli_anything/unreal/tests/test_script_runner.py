@@ -81,6 +81,40 @@ class TestScriptRunner:
         assert result["hello"] == "world"
         assert result["count"] == 42
 
+    def test_run_python_script_uses_main_entrypoint_context(self, tmp_path):
+        """Script files execute as ``__main__`` with an absolute ``__file__``."""
+        from cli_anything.unreal.core.script_runner import run_python_script
+
+        script = tmp_path / "entrypoint.py"
+        script.write_text(
+            "if __name__ == '__main__':\n"
+            "    result = {'entrypoint': True, 'name': __name__, 'file': __file__}\n",
+            encoding="utf-8",
+        )
+
+        mock_api = MagicMock()
+        self._make_exec_python_ex_mock(mock_api)
+
+        result = run_python_script(mock_api, str(script), timeout=5, save=False)
+
+        assert result["entrypoint"] is True
+        assert result["name"] == "__main__"
+        assert result["file"] == str(script.resolve())
+
+    def test_run_python_script_traceback_uses_source_path(self, tmp_path):
+        """File-script tracebacks identify the actual source file."""
+        from cli_anything.unreal.core.script_runner import run_python_script
+
+        script = tmp_path / "broken_entrypoint.py"
+        script.write_text("raise RuntimeError('broken')\n", encoding="utf-8")
+
+        mock_api = MagicMock()
+        self._make_exec_python_ex_mock(mock_api)
+
+        result = run_python_script(mock_api, str(script), timeout=5, save=False)
+
+        assert str(script.resolve()) in result["traceback"]
+
     def test_run_python_code_captures_result(self):
         """``run_python_code`` with inline code and a result variable."""
         from cli_anything.unreal.core.script_runner import run_python_code

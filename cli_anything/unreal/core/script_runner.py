@@ -69,7 +69,8 @@ _cli_sys.stdout = _cli_string_io
 
 try:
     {user_ns_name} = {{"__builtins__": __builtins__}}
-    exec(compile({user_code_literal}, "<cli_anything_user_code>", "exec"), {user_ns_name}, {user_ns_name})
+    {user_ns_name}.update({execution_context_literal})
+    exec(compile({user_code_literal}, {source_name_literal}, "exec"), {user_ns_name}, {user_ns_name})
 {save_block}
 except Exception as _cli_exc:
     _cli_error = _cli_exc
@@ -178,8 +179,15 @@ def run_python_script(
     dict
         Parsed JSON produced by the script, or an error dict on failure.
     """
-    code = Path(script_path).read_text(encoding="utf-8")
-    return _execute(api, code, timeout=timeout, save=save)
+    resolved_path = Path(script_path).resolve()
+    code = resolved_path.read_text(encoding="utf-8")
+    return _execute(
+        api,
+        code,
+        timeout=timeout,
+        save=save,
+        source_path=str(resolved_path),
+    )
 
 
 def run_python_code(
@@ -221,6 +229,7 @@ def _execute(
     *,
     timeout: float,
     save: bool = True,
+    source_path: str | None = None,
 ) -> dict:
     """Core execution logic shared by *run_python_script* and *run_python_code*.
 
@@ -229,9 +238,20 @@ def _execute(
     ``PythonScriptLibrary.ExecutePythonCommandEx``), and extracts the
     JSON result from the captured ``LogOutput``.
     """
+    execution_context = {}
+    source_name = "<cli_anything_user_code>"
+    if source_path is not None:
+        execution_context = {
+            "__name__": "__main__",
+            "__file__": source_path,
+        }
+        source_name = source_path
+
     wrapper = _WRAPPER_TEMPLATE.format(
         user_code_literal=json.dumps(code),
         user_ns_name=_USER_NS_NAME,
+        execution_context_literal=json.dumps(execution_context),
+        source_name_literal=json.dumps(source_name),
         save_block=_SAVE_BLOCK if save else "",
         marker=_RESULT_MARKER,
     )
