@@ -272,6 +272,45 @@ def test_editor_status_all_lists_other_project_processes(mini_project):
     assert "editor launch" not in instance["suggestion"]
 
 
+def test_editor_status_all_deduplicates_discovered_editors(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    runner = CliRunner()
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    discovered = [
+        {"pid": 1234, "project": mini_project},
+        {"pid": 5678, "project": other_project},
+    ]
+
+    def fake_owner_pid(port, timeout=3):
+        return {30020: 1234, 30021: 5678}[port]
+
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+            {"port": 30020, "alive": True, "info": {"ok": True}},
+            {"port": 30021, "alive": True, "info": {"ok": True}},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", side_effect=fake_owner_pid), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=discovered + discovered), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=None), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="1.23"), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", return_value="1.23"):
+        result = runner.invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status", "--all",
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert [
+        (item["pid"], item["port"], item["project_path"])
+        for item in data["result"]
+    ] == [
+        (1234, 30020, mini_project),
+        (5678, 30021, other_project),
+    ]
+
+
 def test_editor_status_filters_online_port_owner_when_other_project(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

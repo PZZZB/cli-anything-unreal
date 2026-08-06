@@ -349,6 +349,24 @@ def _compact_editor_entry(status: str, pid: int | None, port: int | None, projec
     }
 
 
+def _deduplicate_editor_status_instances(instances: list[dict]) -> list[dict]:
+    unique: list[dict] = []
+    seen: set[tuple[int | None, int | None, str | None]] = set()
+    for entry in instances:
+        project_path = entry.get("project_path")
+        if project_path:
+            try:
+                project_path = Path(project_path).resolve().as_posix().lower()
+            except Exception:
+                project_path = Path(project_path).as_posix().lower()
+        identity = (entry.get("pid"), entry.get("port"), project_path)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(entry)
+    return unique
+
+
 def _remote_unreachable_cache_path() -> Path:
     return task_data_path("editor_remote_unreachable.json")
 
@@ -808,6 +826,7 @@ def _scan_editor_status_instances(
         )
         instances.append(entry)
 
+    instances = _deduplicate_editor_status_instances(instances)
     if include_bridge_status:
         bridge_timeout = remaining_timeout("bridge_status")
         _add_online_bridge_statuses(
