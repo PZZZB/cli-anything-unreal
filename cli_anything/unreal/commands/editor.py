@@ -67,6 +67,11 @@ def _load_command_project(state: AppState, project_path: str | None) -> None:
             exit_code=3,
             suggestion="Pass --project <path-to.uproject> before or after editor launch.",
         )
+    if not state.port_is_explicit:
+        from cli_anything.unreal.utils.ue_backend import read_rc_port
+
+        configured_port = read_rc_port(state.session.project_dir)
+        state.session.port = configured_port if configured_port is not None else 30010
 
 
 def _project_option(func):

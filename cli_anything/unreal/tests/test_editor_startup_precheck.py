@@ -1706,6 +1706,13 @@ def test_editor_launch_accepts_command_level_project(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
+    config_dir = Path(mini_project).parent / "Config"
+    config_dir.mkdir()
+    (config_dir / "DefaultRemoteControl.ini").write_text(
+        "[/Script/RemoteControlCommon.RemoteControlSettings]\n"
+        "RemoteControlHttpServerPort=30011\n",
+        encoding="utf-8",
+    )
     runner = CliRunner()
     captured = {}
 
@@ -1726,6 +1733,38 @@ def test_editor_launch_accepts_command_level_project(mini_project):
     assert data["status"] == "success"
     assert captured["command"] == "editor.launch"
     assert captured["payload"]["project_path"] == mini_project
+    assert captured["payload"]["port"] == 30011
+
+
+def test_editor_launch_explicit_port_overrides_command_level_project_config(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    config_dir = Path(mini_project).parent / "Config"
+    config_dir.mkdir()
+    (config_dir / "DefaultRemoteControl.ini").write_text(
+        "[/Script/RemoteControlCommon.RemoteControlSettings]\n"
+        "RemoteControlHttpServerPort=30011\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["command"] = command
+        captured["payload"] = payload
+        return {"task_id": "task-xyz", "status": "submitted"}
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--port", "30012",
+            "editor", "launch", "--project", mini_project, "--no-wait",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["command"] == "editor.launch"
+    assert captured["payload"]["project_path"] == mini_project
+    assert captured["payload"]["port"] == 30012
 
 
 def test_editor_launch_help_lists_command_level_project():
