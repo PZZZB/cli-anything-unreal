@@ -505,7 +505,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.27"
+        assert version == "1.28"
 
     def test_disconnect_helpers_defer_post_edit_to_single_recompile(self):
         """Bridge mutation must not duplicate RecompileMaterial notifications."""

@@ -301,6 +301,39 @@ else:
             result["textures"] = []
             result["texture_sample_count"] = 0
 
+    elif isinstance(mat, unreal.MaterialFunctionInterface):
+        bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+        graph_reader = getattr(bridge, "get_material_function_graph", None) if bridge else None
+        if graph_reader is None:
+            result = {{
+                "error": "MaterialFunction graph inspection requires the current CliAnythingBridge.",
+                "code": "MATERIAL_FUNCTION_GRAPH_BRIDGE_REQUIRED",
+                "material": loaded_asset_path,
+                "asset_class": mat.get_class().get_name(),
+                "suggestion": "Run 'editor plugin-upgrade', then retry material info.",
+            }}
+        else:
+            try:
+                graph = json.loads(graph_reader(mat))
+                if not isinstance(graph, dict):
+                    raise TypeError("bridge returned non-object JSON")
+                if graph.get("error"):
+                    graph.setdefault("code", "MATERIAL_FUNCTION_GRAPH_FAILED")
+                    graph.setdefault("material", loaded_asset_path)
+                    graph.setdefault("asset_class", mat.get_class().get_name())
+                    result = graph
+                else:
+                    for key in ["nodes", "node_count", "edges", "function_inputs", "function_outputs"]:
+                        if key in graph:
+                            result[key] = graph[key]
+            except Exception as e:
+                result = {{
+                    "error": "MaterialFunction graph inspection failed: " + str(e),
+                    "code": "MATERIAL_FUNCTION_GRAPH_FAILED",
+                    "material": loaded_asset_path,
+                    "asset_class": mat.get_class().get_name(),
+                }}
+
     elif isinstance(mat, unreal.MaterialInstanceConstant):
         try:
             parent = mat.get_editor_property("parent")
@@ -353,8 +386,7 @@ else:
             "code": "MATERIAL_INFO_UNSUPPORTED_CLASS",
             "material": loaded_asset_path,
             "asset_class": asset_class,
-            "supported_classes": ["Material", "MaterialInstanceConstant"],
-            "suggestion": "MaterialFunction graph inspection is not supported by material info.",
+            "supported_classes": ["Material", "MaterialFunction", "MaterialInstanceConstant"],
         }}
 '''
 
@@ -1003,7 +1035,11 @@ def get_material_info(
 
     search_result = api.search_assets(
         query=search_name,
-        class_names=["/Script/Engine.Material", "/Script/Engine.MaterialInstanceConstant"],
+        class_names=[
+            "/Script/Engine.Material",
+            "/Script/Engine.MaterialFunction",
+            "/Script/Engine.MaterialInstanceConstant",
+        ],
         package_paths=["/Game"],
         recursive=True,
     )
@@ -1035,15 +1071,20 @@ def get_material_info(
 
     if "error" not in script_result:
         # Merge deep info into basic_info (script result has nodes, textures, etc.)
-        for key in ("nodes", "node_count", "textures", "texture_sample_count",
+        for key in ("name", "path", "class",
+                     "nodes", "node_count", "textures", "texture_sample_count",
                      "blend_mode", "material_domain", "shading_model", "two_sided",
                      "use_material_attributes",
-                     "material_outputs", "edges",
+                     "material_outputs", "edges", "function_inputs", "function_outputs",
                      "scalar_parameters", "vector_parameters", "texture_parameters",
                      "parent"):
             if key in script_result:
                 basic_info[key] = script_result[key]
-    elif script_result.get("code") == "MATERIAL_INFO_UNSUPPORTED_CLASS":
+    elif script_result.get("code") in {
+        "MATERIAL_INFO_UNSUPPORTED_CLASS",
+        "MATERIAL_FUNCTION_GRAPH_BRIDGE_REQUIRED",
+        "MATERIAL_FUNCTION_GRAPH_FAILED",
+    }:
         return script_result
     else:
         # Python script failed — record as note, RC API data still available

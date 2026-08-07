@@ -178,10 +178,10 @@ class TestProjectE2E:
 class TestMaterialsE2E:
     """Test material queries against running editor."""
 
-    def test_material_reads_preserve_unrelated_dirty_package_and_report_function_error(
+    def test_material_reads_preserve_unrelated_dirty_package(
         self, api, cli_runner, project_path, api_port,
     ):
-        """Issue #80/#81: reads never save, and unsupported graphs fail truthfully."""
+        """Issue #81: reads never save unrelated dirty packages."""
         import hashlib
 
         from cli_anything.unreal.core.script_runner import run_python_code
@@ -189,8 +189,7 @@ class TestMaterialsE2E:
 
         query_path = "/Game/E2E_Issue81_QueryMaterial"
         dirty_path = "/Game/E2E_Issue81_DirtyMaterial"
-        function_path = "/Game/E2E_Issue80_Function"
-        paths = [function_path, dirty_path, query_path]
+        paths = [dirty_path, query_path]
         cleanup = f'''
 import unreal
 paths = {paths!r}
@@ -213,16 +212,17 @@ query = tools.create_asset(
 dirty = tools.create_asset(
     "E2E_Issue81_DirtyMaterial", "/Game", unreal.Material, unreal.MaterialFactoryNew()
 )
-function = tools.create_asset(
-    "E2E_Issue80_Function", "/Game", unreal.MaterialFunction,
-    unreal.MaterialFunctionFactoryNew()
-)
-assets = [query, dirty, function]
+assets = [query, dirty]
 if any(asset is None for asset in assets):
-    result = {"error": "Failed to create issue #80/#81 E2E assets"}
+    result = {
+        "error": "Failed to create issue #81 E2E assets",
+    }
 else:
     saved = [unreal.EditorAssetLibrary.save_loaded_asset(asset) for asset in assets]
-    result = {"status": "ok", "saved": saved}
+    result = {
+        "status": "ok",
+        "saved": saved,
+    }
 '''
         setup_result = run_python_code(api, setup, timeout=60.0, save=False)
         assert setup_result.get("status") == "ok", setup_result
@@ -259,15 +259,8 @@ else:
                 "--port", str(api_port), "material",
             ]
             supported = cli_runner.invoke(cli, [*common, "info", query_path])
-            unsupported_info = cli_runner.invoke(cli, [*common, "info", function_path])
-            unsupported_graph = cli_runner.invoke(cli, [*common, "get-graph", function_path])
 
             assert supported.exit_code == 0, supported.output
-            for failure in (unsupported_info, unsupported_graph):
-                assert failure.exit_code == 3, failure.output
-                failure_data = json.loads(failure.output)
-                assert failure_data["status"] == "error", failure_data
-                assert failure_data["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS", failure_data
 
             dirty_after = run_python_code(api, '''
 import unreal
@@ -283,6 +276,36 @@ result = {
             assert hashlib.sha256(dirty_file.read_bytes()).hexdigest() == before_hash
         finally:
             run_python_code(api, cleanup, timeout=30.0, save=False)
+
+    def test_material_function_info_and_graph(
+        self, api, cli_runner, project_path, api_port,
+    ):
+        """Issue #88: MaterialFunction reads expose nodes and internal edges."""
+        from cli_anything.unreal.unreal_cli import cli
+
+        function_path = "/Engine/Functions/Engine_MaterialFunctions03/Blends/Blend_Overlay"
+        common = [
+            "--output", "json", "--project", project_path,
+            "--port", str(api_port), "material",
+        ]
+
+        function_info = cli_runner.invoke(cli, [*common, "info", function_path])
+        function_graph = cli_runner.invoke(cli, [*common, "get-graph", function_path])
+
+        assert function_info.exit_code == 0, function_info.output
+        info_data = json.loads(function_info.output)["result"]
+        assert info_data["class"] == "MaterialFunction", info_data
+        assert info_data["node_count"] > 1, info_data
+        assert info_data["edges"], info_data
+        assert info_data["function_inputs"], info_data
+        assert info_data["function_outputs"], info_data
+
+        assert function_graph.exit_code == 0, function_graph.output
+        graph_data = json.loads(function_graph.output)["result"]
+        assert graph_data["node_count"] == info_data["node_count"], graph_data
+        assert graph_data["connected_nodes"], graph_data
+        assert set(info_data["function_outputs"]).issubset(graph_data["connected_nodes"]), graph_data
+        assert api.is_alive()
 
     def test_material_list(self, api, project_path):
         from cli_anything.unreal.core.materials import list_materials
@@ -820,10 +843,10 @@ else:
         result = recompile_material(api, self.TEST_MATERIAL, project_dir=project_dir)
         assert result.get("status") == "ok"
 
-    def test_material_instance_param_reads_and_material_function_error(
+    def test_material_instance_param_reads_and_empty_material_function_info(
         self, api, cli_runner, project_path, api_port,
     ):
-        """Effective parameters and unsupported material classes stay truthful."""
+        """Effective parameters and empty MaterialFunction inspection stay truthful."""
         from cli_anything.unreal.core.materials import get_material_param, set_material_param
         from cli_anything.unreal.core.script_runner import run_python_code
         from cli_anything.unreal.unreal_cli import cli
@@ -934,10 +957,10 @@ else:
             "--output", "json", "--project", project_path, "--port", str(api_port),
             "material", "info", "/Game/E2E_MaterialFunction",
         ])
-        assert cli_function.exit_code == 3, cli_function.output
+        assert cli_function.exit_code == 0, cli_function.output
         cli_function_data = json.loads(cli_function.output)
-        assert cli_function_data["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS", cli_function_data
-        assert cli_function_data["details"]["asset_class"] == "MaterialFunction", cli_function_data
+        assert cli_function_data["result"]["node_count"] == 0, cli_function_data
+        assert cli_function_data["result"]["edges"] == [], cli_function_data
 
     def test_add_node_cli(self, cli_runner, project_path, api_port):
         """Test add-node via CLI."""

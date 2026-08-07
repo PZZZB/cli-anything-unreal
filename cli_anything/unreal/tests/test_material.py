@@ -119,23 +119,36 @@ class TestMaterials:
         assert result["texture_parameters"][0]["texture"] == "/Game/Textures/T_Diffuse"
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
-    def test_get_material_info_rejects_unsupported_material_class(self, mock_exec_script):
+    def test_get_material_info_reads_material_function_graph(self, mock_exec_script):
         from cli_anything.unreal.core.materials import get_material_info
 
-        mock_api = self._make_mock_api(assets={"Assets": []})
+        mock_api = self._make_mock_api(assets={"Assets": [{
+            "Name": "MF_Test",
+            "Path": "/Game/MF_Test.MF_Test",
+            "Class": "/Script/Engine.MaterialFunction",
+            "Metadata": {},
+        }]})
         mock_exec_script.return_value = {
-            "error": "Unsupported material asset class for material info: MaterialFunction",
-            "code": "MATERIAL_INFO_UNSUPPORTED_CLASS",
-            "material": "/Game/MF_Test.MF_Test",
-            "asset_class": "MaterialFunction",
-            "supported_classes": ["Material", "MaterialInstanceConstant"],
+            "name": "MF_Test",
+            "path": "/Game/MF_Test.MF_Test",
+            "class": "MaterialFunction",
+            "nodes": [
+                {"name": "Input", "type": "MaterialExpressionFunctionInput"},
+                {"name": "Output", "type": "MaterialExpressionFunctionOutput"},
+            ],
+            "node_count": 2,
+            "edges": [{"from_node": "Input", "to_node": "Output", "to_input_index": 0}],
+            "function_inputs": ["Input"],
+            "function_outputs": ["Output"],
         }
 
         result = get_material_info(mock_api, "/Game/MF_Test")
 
-        assert result["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS"
-        assert result["asset_class"] == "MaterialFunction"
-        assert result["material"] == "/Game/MF_Test.MF_Test"
+        assert result["class"] == "MaterialFunction"
+        assert result["node_count"] == 2
+        assert result["edges"][0]["from_node"] == "Input"
+        assert result["function_inputs"] == ["Input"]
+        assert result["function_outputs"] == ["Output"]
 
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_get_material_info_detail_uses_resolver_for_package_path(self, mock_run):
@@ -709,16 +722,87 @@ class TestMaterials:
         assert "WinError 10061" in data["message"]
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
-    def test_material_info_cli_rejects_material_function(self, mock_exec_script):
+    def test_material_info_cli_reads_material_function(self, mock_exec_script):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
         mock_exec_script.return_value = {
-            "error": "Unsupported material asset class for material info: MaterialFunction",
-            "code": "MATERIAL_INFO_UNSUPPORTED_CLASS",
+            "name": "MF_Test",
+            "path": "/Game/MF_Test.MF_Test",
+            "class": "MaterialFunction",
+            "nodes": [{"name": "Output", "type": "MaterialExpressionFunctionOutput"}],
+            "node_count": 1,
+            "edges": [],
+            "function_inputs": [],
+            "function_outputs": ["Output"],
+        }
+        mock_api = self._make_mock_api(assets={"Assets": [{
+            "Name": "MF_Test",
+            "Path": "/Game/MF_Test.MF_Test",
+            "Class": "/Script/Engine.MaterialFunction",
+            "Metadata": {},
+        }]})
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.material.require_editor", return_value=mock_api):
+            result = runner.invoke(cli, [
+                "--output", "json", "material", "info", "/Game/MF_Test",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["node_count"] == 1
+        assert data["result"]["function_outputs"] == ["Output"]
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_graph_cli_reads_material_function_topology(self, mock_exec_script):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec_script.return_value = {
+            "name": "MF_Test",
+            "path": "/Game/MF_Test.MF_Test",
+            "class": "MaterialFunction",
+            "nodes": [
+                {"name": "Input", "type": "MaterialExpressionFunctionInput"},
+                {"name": "Output", "type": "MaterialExpressionFunctionOutput"},
+            ],
+            "node_count": 2,
+            "edges": [{"from_node": "Input", "to_node": "Output", "to_input_index": 0}],
+            "function_inputs": ["Input"],
+            "function_outputs": ["Output"],
+        }
+        mock_api = self._make_mock_api(assets={"Assets": [{
+            "Name": "MF_Test",
+            "Path": "/Game/MF_Test.MF_Test",
+            "Class": "/Script/Engine.MaterialFunction",
+            "Metadata": {},
+        }]})
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.material.require_editor", return_value=mock_api):
+            result = runner.invoke(cli, [
+                "--output", "json", "material", "get-graph", "/Game/MF_Test",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        assert data["result"]["connected_nodes"] == ["Input", "Output"]
+        assert data["result"]["orphan_nodes"] == []
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_info_cli_reports_stale_bridge_for_material_function(self, mock_exec_script):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec_script.return_value = {
+            "error": "MaterialFunction graph inspection requires the current CliAnythingBridge.",
+            "code": "MATERIAL_FUNCTION_GRAPH_BRIDGE_REQUIRED",
             "material": "/Game/MF_Test.MF_Test",
             "asset_class": "MaterialFunction",
-            "supported_classes": ["Material", "MaterialInstanceConstant"],
+            "suggestion": "Run 'editor plugin-upgrade', then retry material info.",
         }
         mock_api = self._make_mock_api(assets={"Assets": []})
 
@@ -730,35 +814,8 @@ class TestMaterials:
 
         assert result.exit_code == 3
         data = json.loads(result.output)
-        assert data["status"] == "error"
-        assert data["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS"
-        assert data["details"]["asset_class"] == "MaterialFunction"
-
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
-    def test_material_graph_cli_rejects_material_function_as_top_level_error(self, mock_exec_script):
-        from click.testing import CliRunner
-        from cli_anything.unreal.unreal_cli import cli
-
-        mock_exec_script.return_value = {
-            "error": "Unsupported material asset class for material info: MaterialFunction",
-            "code": "MATERIAL_INFO_UNSUPPORTED_CLASS",
-            "material": "/Game/MF_Test.MF_Test",
-            "asset_class": "MaterialFunction",
-            "supported_classes": ["Material", "MaterialInstanceConstant"],
-        }
-        mock_api = self._make_mock_api(assets={"Assets": []})
-
-        runner = CliRunner()
-        with patch("cli_anything.unreal.commands.material.require_editor", return_value=mock_api):
-            result = runner.invoke(cli, [
-                "--output", "json", "material", "get-graph", "/Game/MF_Test",
-            ])
-
-        assert result.exit_code == 3
-        data = json.loads(result.output)
-        assert data["status"] == "error"
-        assert data["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS"
-        assert data["details"]["asset_class"] == "MaterialFunction"
+        assert data["code"] == "MATERIAL_FUNCTION_GRAPH_BRIDGE_REQUIRED"
+        assert "plugin-upgrade" in data["suggestion"]
 
 
 # ═══════════════════════════════════════════════════════════════════════

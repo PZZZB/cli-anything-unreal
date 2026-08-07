@@ -7,6 +7,7 @@
 
 class UMaterial;
 class UMaterialExpression;
+class UMaterialFunctionInterface;
 class UMaterialInterface;
 class UBlueprint;
 class UTexture2D;
@@ -26,6 +27,14 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static TArray<FString> GetMaterialCompileErrors(UMaterialInterface* Material);
+
+	/**
+	 * Returns MaterialFunction nodes and expression-input edges as JSON.
+	 * Python can enumerate function expressions but cannot read protected
+	 * FExpressionInput connections.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString GetMaterialFunctionGraph(UMaterialFunctionInterface* MaterialFunction);
 
 	/**
 	 * Disconnects a material expression input pin.

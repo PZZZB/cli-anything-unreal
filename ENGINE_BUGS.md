@@ -56,7 +56,7 @@ Known Unreal Engine bugs that affect `ue-cli` automation + Python APIs.
   expression input through the injected Python/bridge path can return success,
   save the asset, and then crash inside Python/MaterialEditor during a later
   material edit.
-- **CLI safety behavior:** bridge 1.27 refuses these two disconnect operations
+- **CLI safety behavior:** bridge 1.28 refuses these two disconnect operations
   before mutation and returns `MATERIAL_DISCONNECT_UNSAFE_ENGINE`. Use the
   Material Editor UI, or an engine version where this workflow has been
   validated.
