@@ -173,6 +173,7 @@ ue-cli --output json --project "$Project" editor cvar get r.VSync --timeout 10
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
 `material get-param` returns the effective scalar, vector, texture, or static-switch value, including values inherited from parent material instances or materials.
 `material info` supports Material, MaterialFunction, and MaterialInstanceConstant assets. MaterialFunction inspection returns function input/output nodes and internal expression edges through the bundled bridge; a stale bridge returns `MATERIAL_FUNCTION_GRAPH_BRIDGE_REQUIRED` with an upgrade command.
+`material get-stats` rejects MaterialInstanceConstant assets with `MATERIAL_STATS_UNSUPPORTED_CLASS`; parent-graph counts are not reported as effective compiled-instance statistics.
 Material inspection commands never save packages. Material mutations save only their explicitly targeted package, leaving unrelated dirty work untouched.
 On Unreal Engine 5.7, `material disconnect` returns `MATERIAL_DISCONNECT_UNSAFE_ENGINE` before mutation because both output-pin and expression-input disconnects can corrupt later MaterialEditor/Python work and crash the editor.
 `material info`, `material analyze`, and `material get-graph` recognize Material Attributes connections as material outputs and trace their upstream graph.

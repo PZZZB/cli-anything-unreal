@@ -1122,6 +1122,25 @@ def get_material_stats(
     info = get_material_info(api, material_path, project_dir, require_deep=True)
     raise_for_legacy_error(info, default_code="MATERIAL_STATS_FAILED")
 
+    asset_class = info.get("class", "")
+    if asset_class == "MaterialInstanceConstant":
+        return {
+            "error": (
+                "Material compilation statistics are unavailable for "
+                "MaterialInstanceConstant because ue-cli cannot inspect its "
+                "compiled static permutation."
+            ),
+            "code": "MATERIAL_STATS_UNSUPPORTED_CLASS",
+            "material": info.get("path") or material_path,
+            "asset_class": asset_class,
+            "parent": info.get("parent"),
+            "supported_classes": ["Material"],
+            "suggestion": (
+                "Run 'material info' for effective instance parameters, or run "
+                "'material get-stats <parent-material>' for parent graph statistics."
+            ),
+        }
+
     return {
         "path": material_path,
         "name": info.get("name", ""),

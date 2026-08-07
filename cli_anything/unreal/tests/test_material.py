@@ -671,6 +671,40 @@ class TestMaterials:
             assert "nodes" in data["result"]
             assert data["result"]["node_count"] == 1
 
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_stats_cli_rejects_material_instance(self, mock_exec_script):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec_script.return_value = {
+            "name": "MI_Test",
+            "path": "/Game/MI_Test.MI_Test",
+            "class": "MaterialInstanceConstant",
+            "parent": "/Game/M_Master.M_Master",
+        }
+        mock_api = self._make_mock_api(assets={"Assets": [{
+            "Name": "MI_Test",
+            "Path": "/Game/MI_Test.MI_Test",
+            "Class": "/Script/Engine.MaterialInstanceConstant",
+            "Metadata": {},
+        }]})
+
+        with patch(
+            "cli_anything.unreal.commands.material.require_editor",
+            return_value=mock_api,
+        ):
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "material", "get-stats", "/Game/MI_Test",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "MATERIAL_STATS_UNSUPPORTED_CLASS"
+        assert data["details"]["asset_class"] == "MaterialInstanceConstant"
+        assert data["details"]["parent"] == "/Game/M_Master.M_Master"
+        assert "material info" in data["suggestion"]
+
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_material_info_is_explicitly_read_only(self, mock_run):
         from cli_anything.unreal.core.materials import get_material_info
