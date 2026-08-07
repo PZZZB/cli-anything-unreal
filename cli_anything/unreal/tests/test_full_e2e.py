@@ -178,6 +178,8 @@ class TestProjectE2E:
 class TestMaterialsE2E:
     """Test material queries against running editor."""
 
+    READ_ONLY_MATERIAL = "/Engine/EngineMaterials/DefaultMaterial"
+
     def test_material_reads_preserve_unrelated_dirty_package(
         self, api, cli_runner, project_path, api_port,
     ):
@@ -187,31 +189,30 @@ class TestMaterialsE2E:
         from cli_anything.unreal.core.script_runner import run_python_code
         from cli_anything.unreal.unreal_cli import cli
 
-        query_path = "/Game/E2E_Issue81_QueryMaterial"
-        dirty_path = "/Game/E2E_Issue81_DirtyMaterial"
-        paths = [dirty_path, query_path]
-        cleanup = f'''
-import unreal
-paths = {paths!r}
-deleted = []
-for path in paths:
-    if unreal.EditorAssetLibrary.does_asset_exist(path):
-        if unreal.EditorAssetLibrary.delete_asset(path):
-            deleted.append(path)
-unreal.SystemLibrary.collect_garbage()
-result = {{"deleted": deleted}}
-'''
-        run_python_code(api, cleanup, timeout=30.0, save=False)
+        query_path = "/Game/__UeCliE2E/M_Issue81_Query"
+        dirty_path = "/Game/__UeCliE2E/BP_Issue81_Dirty"
 
         setup = '''
 import unreal
 tools = unreal.AssetToolsHelpers.get_asset_tools()
-query = tools.create_asset(
-    "E2E_Issue81_QueryMaterial", "/Game", unreal.Material, unreal.MaterialFactoryNew()
+query = unreal.EditorAssetLibrary.load_asset(
+    "/Game/__UeCliE2E/M_Issue81_Query"
 )
-dirty = tools.create_asset(
-    "E2E_Issue81_DirtyMaterial", "/Game", unreal.Material, unreal.MaterialFactoryNew()
+if query is None:
+    query = tools.create_asset(
+        "M_Issue81_Query", "/Game/__UeCliE2E",
+        unreal.Material, unreal.MaterialFactoryNew()
+    )
+dirty = unreal.EditorAssetLibrary.load_asset(
+    "/Game/__UeCliE2E/BP_Issue81_Dirty"
 )
+if dirty is None:
+    factory = unreal.BlueprintFactory()
+    factory.set_editor_property("parent_class", unreal.Actor)
+    dirty = tools.create_asset(
+        "BP_Issue81_Dirty", "/Game/__UeCliE2E",
+        unreal.Blueprint, factory
+    )
 assets = [query, dirty]
 if any(asset is None for asset in assets):
     result = {
@@ -228,7 +229,10 @@ else:
         assert setup_result.get("status") == "ok", setup_result
         assert all(setup_result.get("saved", [])), setup_result
 
-        dirty_file = Path(project_path).parent / "Content" / "E2E_Issue81_DirtyMaterial.uasset"
+        dirty_file = (
+            Path(project_path).parent
+            / "Content" / "__UeCliE2E" / "BP_Issue81_Dirty.uasset"
+        )
         assert dirty_file.is_file()
         before_hash = hashlib.sha256(dirty_file.read_bytes()).hexdigest()
         before_mtime = dirty_file.stat().st_mtime_ns
@@ -238,10 +242,9 @@ import unreal
 path = {dirty_path!r}
 asset = unreal.EditorAssetLibrary.load_asset(path)
 if asset is None:
-    result = {{"error": "Dirty test material did not load"}}
+    result = {{"error": "Dirty test asset did not load"}}
 else:
     asset.modify()
-    asset.set_editor_property("two_sided", not bool(asset.get_editor_property("two_sided")))
     dirty_packages = [
         package.get_path_name().split(".")[0]
         for package in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()
@@ -275,7 +278,18 @@ result = {
             assert dirty_file.stat().st_mtime_ns == before_mtime
             assert hashlib.sha256(dirty_file.read_bytes()).hexdigest() == before_hash
         finally:
-            run_python_code(api, cleanup, timeout=30.0, save=False)
+            restore = run_python_code(api, f'''
+import unreal
+path = {dirty_path!r}
+asset = unreal.EditorAssetLibrary.load_asset(path)
+if asset is None:
+    result = {{"error": "Issue #81 dirty fixture did not load for restore"}}
+else:
+    saved = unreal.EditorAssetLibrary.save_loaded_asset(asset)
+    result = {{"status": "ok", "saved": saved}}
+''', timeout=30.0, save=False)
+            assert restore.get("status") == "ok", restore
+            assert restore.get("saved") is True, restore
 
     def test_material_function_info_and_graph(
         self, api, cli_runner, project_path, api_port,
@@ -316,42 +330,20 @@ result = {
         assert isinstance(result["materials"], list)
 
     def test_material_info(self, api, project_path):
-        """Test getting info on first available material."""
-        from cli_anything.unreal.core.materials import list_materials, get_material_info
+        """Test material info against a deterministic engine asset."""
+        from cli_anything.unreal.core.materials import get_material_info
 
         project_dir = str(Path(project_path).parent)
-        materials = list_materials(api, "/Game/", project_dir)
-
-        if not materials.get("materials"):
-            pytest.skip("No materials found in project")
-
-        mat_path = materials["materials"][0]["path"]
-        info = get_material_info(api, mat_path, project_dir)
+        info = get_material_info(api, self.READ_ONLY_MATERIAL, project_dir)
         assert "name" in info
 
     def test_material_analyze_cli(self, cli_runner, project_path, api_port):
         """Test material analyze via CLI."""
         from cli_anything.unreal.unreal_cli import cli
 
-        # First list materials
         result = cli_runner.invoke(cli, [
             "--output", "json", "--project", project_path, "--port", str(api_port),
-            "material", "list",
-        ])
-        if result.exit_code != 0:
-            pytest.skip("Could not list materials")
-
-        data = json.loads(result.output)
-        result_data = data.get("result", data)
-        if not result_data.get("materials"):
-            pytest.skip("No materials in project")
-
-        mat_path = result_data["materials"][0]["path"]
-
-        # Analyze
-        result = cli_runner.invoke(cli, [
-            "--output", "json", "--project", project_path, "--port", str(api_port),
-            "material", "analyze", mat_path,
+            "material", "analyze", self.READ_ONLY_MATERIAL,
         ])
         assert result.exit_code == 0
         analysis = json.loads(result.output)
@@ -364,95 +356,115 @@ result = {
         self, api, cli_runner, project_path, api_port,
     ):
         """Material Attributes output is visible to info, graph, and analysis."""
+        from cli_anything.unreal.core.materials import (
+            add_material_node,
+            connect_material_nodes,
+            delete_material_node,
+            get_material_info,
+        )
         from cli_anything.unreal.core.script_runner import run_python_code
         from cli_anything.unreal.unreal_cli import cli
 
-        material_path = "/Game/E2E_Issue68_Material"
-        delete_script = r'''
-import unreal
-path = "/Game/E2E_Issue68_Material"
-deleted = not unreal.EditorAssetLibrary.does_asset_exist(path)
-if not deleted:
-    unreal.SystemLibrary.collect_garbage()
-    deleted = unreal.EditorAssetLibrary.delete_asset(path)
-result = {"deleted": deleted}
-'''
-        preclean = run_python_code(api, delete_script, timeout=30.0, save=False)
-        assert preclean.get("deleted") is True, f"pre-clean failed: {preclean}"
-
+        material_path = "/Game/__UeCliE2E/M_MaterialAttributes"
         setup_script = r'''
 import unreal
 
-mat = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
-    "E2E_Issue68_Material", "/Game", unreal.Material, unreal.MaterialFactoryNew()
-)
+path = "/Game/__UeCliE2E/M_MaterialAttributes"
+mat = unreal.EditorAssetLibrary.load_asset(path)
+created = mat is None
+if created:
+    mat = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        "M_MaterialAttributes", "/Game/__UeCliE2E",
+        unreal.Material, unreal.MaterialFactoryNew()
+    )
 if mat is None:
-    result = {"error": "Failed to create E2E_Issue68_Material"}
+    result = {"error": "Failed to create issue #68 E2E material"}
 else:
-    mel = unreal.MaterialEditingLibrary
-    color = mel.create_material_expression(
-        mat, unreal.MaterialExpressionConstant3Vector, -600, 0
-    )
-    make_attributes = mel.create_material_expression(
-        mat, unreal.MaterialExpressionMakeMaterialAttributes, -300, 0
-    )
-    mat.set_editor_property("use_material_attributes", True)
-    mel.connect_material_expressions(color, "", make_attributes, "BaseColor")
-    mel.connect_material_property(
-        make_attributes, "", unreal.MaterialProperty.MP_MATERIAL_ATTRIBUTES
-    )
-    mel.recompile_material(mat)
     mat.modify()
+    mat.set_editor_property("use_material_attributes", True)
+    saved = unreal.EditorAssetLibrary.save_loaded_asset(mat)
     result = {
         "status": "ok",
-        "color_node": color.get_name(),
-        "attributes_node": make_attributes.get_name(),
+        "created": created,
+        "saved": saved,
     }
 '''
-        setup = run_python_code(api, setup_script, timeout=60.0)
+        setup = run_python_code(api, setup_script, timeout=60.0, save=False)
         assert setup.get("status") == "ok", f"setup failed: {setup}"
+        assert setup.get("saved") is True, f"setup save failed: {setup}"
 
-        try:
-            common = [
-                "--output", "json", "--project", project_path,
-                "--port", str(api_port), "material",
-            ]
-            info_result = cli_runner.invoke(cli, [*common, "info", material_path])
-            graph_result = cli_runner.invoke(cli, [*common, "get-graph", material_path])
-            analyze_result = cli_runner.invoke(cli, [*common, "analyze", material_path])
-
-            assert info_result.exit_code == 0, info_result.output
-            assert graph_result.exit_code == 0, graph_result.output
-            assert analyze_result.exit_code == 0, analyze_result.output
-
-            info = json.loads(info_result.output)["result"]
-            graph = json.loads(graph_result.output)["result"]
-            analysis = json.loads(analyze_result.output)["result"]
-
-            assert info.get("use_material_attributes") is True
-            assert (
-                info["material_outputs"]["MaterialAttributes"]["node"]
-                == setup["attributes_node"]
+        project_dir = str(Path(project_path).parent)
+        existing = get_material_info(api, material_path, project_dir)
+        assert existing.get("status") == "ok", existing
+        for node in existing.get("nodes", []):
+            deleted = delete_material_node(
+                api, material_path, node["name"], project_dir=project_dir,
             )
-            assert set(graph["connected_nodes"]) == {
-                setup["color_node"], setup["attributes_node"],
-            }
-            assert graph["orphan_nodes"] == []
-            assert analysis["stats"]["connected_outputs"] == ["MaterialAttributes"]
-            assert not any(
-                "No material output connections" in warning
-                for warning in analysis["warnings"]
-            )
-        finally:
-            cleanup = {"deleted": False}
-            for _ in range(10):
-                cleanup = run_python_code(
-                    api, delete_script, timeout=30.0, save=False,
-                )
-                if cleanup.get("deleted") is True:
-                    break
-                time.sleep(1)
-            assert cleanup.get("deleted") is True, f"cleanup failed: {cleanup}"
+            assert deleted.get("status") == "ok", deleted
+
+        color = add_material_node(
+            api,
+            material_path,
+            "MaterialExpressionConstant3Vector",
+            pos_x=-600,
+            project_dir=project_dir,
+        )
+        assert color.get("status") == "ok", color
+        attributes = add_material_node(
+            api,
+            material_path,
+            "MaterialExpressionMakeMaterialAttributes",
+            pos_x=-300,
+            project_dir=project_dir,
+        )
+        assert attributes.get("status") == "ok", attributes
+        edge = connect_material_nodes(
+            api,
+            material_path,
+            color["node"]["name"],
+            "",
+            attributes["node"]["name"],
+            "BaseColor",
+            project_dir=project_dir,
+        )
+        assert edge.get("status") == "ok", edge
+        output = connect_material_nodes(
+            api,
+            material_path,
+            attributes["node"]["name"],
+            "",
+            "__material_output__",
+            "MaterialAttributes",
+            project_dir=project_dir,
+        )
+        assert output.get("status") == "ok", output
+
+        common = [
+            "--output", "json", "--project", project_path,
+            "--port", str(api_port), "material",
+        ]
+        info_result = cli_runner.invoke(cli, [*common, "info", material_path])
+        graph_result = cli_runner.invoke(cli, [*common, "get-graph", material_path])
+        analyze_result = cli_runner.invoke(cli, [*common, "analyze", material_path])
+
+        assert info_result.exit_code == 0, info_result.output
+        assert graph_result.exit_code == 0, graph_result.output
+        assert analyze_result.exit_code == 0, analyze_result.output
+
+        info = json.loads(info_result.output)["result"]
+        graph = json.loads(graph_result.output)["result"]
+        analysis = json.loads(analyze_result.output)["result"]
+
+        assert info.get("use_material_attributes") is True
+        output_node = info["material_outputs"]["MaterialAttributes"]["node"]
+        assert output_node in graph["connected_nodes"]
+        assert len(graph["connected_nodes"]) == 2
+        assert graph["orphan_nodes"] == []
+        assert analysis["stats"]["connected_outputs"] == ["MaterialAttributes"]
+        assert not any(
+            "No material output connections" in warning
+            for warning in analysis["warnings"]
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -773,10 +785,6 @@ else:
             node_name, "", "__material_output__", "BaseColor",
             project_dir=project_dir,
         )
-        if disc.get("code") == "MATERIAL_DISCONNECT_UNSAFE_ENGINE":
-            assert disc.get("engine_version") == "5.7", disc
-            assert disc.get("operation") == "material_output", disc
-            return
         assert disc.get("status") == "ok"
 
     def test_disconnect_between_expressions(self, api, project_path):
@@ -821,10 +829,6 @@ else:
             const_name, "", multiply_name, "A",
             project_dir=project_dir,
         )
-        if disc.get("code") == "MATERIAL_DISCONNECT_UNSAFE_ENGINE":
-            assert disc.get("engine_version") == "5.7", disc
-            assert disc.get("operation") == "expression_input", disc
-            return
         assert disc.get("status") == "ok", f"disconnect failed: {disc}"
         assert disc.get("to") == multiply_name
         assert disc.get("to_input") == "A"
@@ -847,7 +851,13 @@ else:
         self, api, cli_runner, project_path, api_port,
     ):
         """Effective parameters and empty MaterialFunction inspection stay truthful."""
-        from cli_anything.unreal.core.materials import get_material_param, set_material_param
+        from cli_anything.unreal.core.materials import (
+            add_material_node,
+            connect_material_nodes,
+            get_material_info,
+            get_material_param,
+            set_material_param,
+        )
         from cli_anything.unreal.core.script_runner import run_python_code
         from cli_anything.unreal.unreal_cli import cli
 
@@ -857,65 +867,122 @@ import unreal
 
 EAL = unreal.EditorAssetLibrary
 ATH = unreal.AssetToolsHelpers.get_asset_tools()
-mel = unreal.MaterialEditingLibrary
 mat_path = "/Game/E2E_MIParamMat"
 mi_path = "/Game/E2E_MIParamInst"
 leaf_path = "/Game/E2E_MIParamLeaf"
 function_path = "/Game/E2E_MaterialFunction"
 
-for _path in [function_path, leaf_path, mi_path, mat_path]:
-    if EAL.does_asset_exist(_path):
-        EAL.delete_asset(_path)
-unreal.SystemLibrary.collect_garbage()
-
-mat = ATH.create_asset("E2E_MIParamMat", "/Game", unreal.Material, unreal.MaterialFactoryNew())
+mat = EAL.load_asset(mat_path)
+if mat is None:
+    mat = ATH.create_asset("E2E_MIParamMat", "/Game", unreal.Material, unreal.MaterialFactoryNew())
 if mat is None:
     result = {"error": "Failed to create parent material"}
 else:
-    scalar = mel.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -300, 0)
-    scalar.set_editor_property("parameter_name", "Roughness")
-    scalar.set_editor_property("default_value", 0.1)
-    mel.connect_material_property(scalar, "", unreal.MaterialProperty.MP_ROUGHNESS)
-    static_switch = mel.create_material_expression(mat, unreal.MaterialExpressionStaticSwitchParameter, -300, 200)
-    static_switch.set_editor_property("parameter_name", "UseDetail")
-    static_switch.set_editor_property("default_value", False)
-    mel.recompile_material(mat)
-    mat.modify()
-    EAL.save_loaded_asset(mat)
-
     factory = unreal.MaterialInstanceConstantFactoryNew()
-    mi = ATH.create_asset("E2E_MIParamInst", "/Game", unreal.MaterialInstanceConstant, factory)
+    mi = EAL.load_asset(mi_path)
+    if mi is None:
+        mi = ATH.create_asset("E2E_MIParamInst", "/Game", unreal.MaterialInstanceConstant, factory)
     if mi is None:
         result = {"error": "Failed to create material instance"}
     else:
-        mi.set_editor_property("parent", mat)
-        static_switch_set = mel.set_material_instance_static_switch_parameter_value(mi, "UseDetail", True)
         mi.modify()
-        EAL.save_loaded_asset(mi)
-        leaf = ATH.create_asset("E2E_MIParamLeaf", "/Game", unreal.MaterialInstanceConstant, factory)
+        mi.set_editor_property("parent", mat)
+        leaf = EAL.load_asset(leaf_path)
+        if leaf is None:
+            leaf = ATH.create_asset("E2E_MIParamLeaf", "/Game", unreal.MaterialInstanceConstant, factory)
         if leaf is None:
             result = {"error": "Failed to create leaf material instance"}
         else:
-            leaf.set_editor_property("parent", mi)
             leaf.modify()
-            EAL.save_loaded_asset(leaf)
-            function = ATH.create_asset(
-                "E2E_MaterialFunction", "/Game", unreal.MaterialFunction, unreal.MaterialFunctionFactoryNew()
-            )
+            leaf.set_editor_property("parent", mi)
+            function = EAL.load_asset(function_path)
+            if function is None:
+                function = ATH.create_asset(
+                    "E2E_MaterialFunction", "/Game",
+                    unreal.MaterialFunction, unreal.MaterialFunctionFactoryNew()
+                )
             if function is None:
                 result = {"error": "Failed to create material function"}
             else:
-                EAL.save_loaded_asset(function)
-                unreal.EditorLoadingAndSavingUtils.save_dirty_packages(False, True)
+                save_results = [
+                    EAL.save_loaded_asset(asset) for asset in [mat, mi, leaf, function]
+                ]
                 result = {
                     "status": "ok",
+                    "saved": all(save_results),
                     "leaf_local_scalar_count": len(leaf.get_editor_property("scalar_parameter_values")),
-                    "static_switch_set": static_switch_set,
+                    "static_switch_supported": hasattr(
+                        unreal.MaterialEditingLibrary,
+                        "set_material_instance_static_switch_parameter_value",
+                    ),
                 }
 '''
-        setup_result = run_python_code(api, setup, timeout=60.0)
+        setup_result = run_python_code(api, setup, timeout=60.0, save=False)
         assert setup_result.get("status") == "ok", setup_result
+        assert setup_result.get("saved") is True, setup_result
         assert setup_result.get("leaf_local_scalar_count") == 0, setup_result
+
+        parent_info = get_material_info(api, "/Game/E2E_MIParamMat", project_dir)
+        assert parent_info.get("status") == "ok", parent_info
+        scalar_node = next((
+            node for node in parent_info.get("nodes", [])
+            if node.get("type") == "MaterialExpressionScalarParameter"
+        ), None)
+        if scalar_node is None:
+            scalar_result = add_material_node(
+                api,
+                "/Game/E2E_MIParamMat",
+                "MaterialExpressionScalarParameter",
+                pos_x=-300,
+                set_props=[("ParameterName", "Roughness"), ("DefaultValue", "0.1")],
+                project_dir=project_dir,
+            )
+            assert scalar_result.get("status") == "ok", scalar_result
+            scalar_node = scalar_result["node"]
+        scalar_connection = connect_material_nodes(
+            api,
+            "/Game/E2E_MIParamMat",
+            scalar_node["name"],
+            "",
+            "__material_output__",
+            "Roughness",
+            project_dir=project_dir,
+        )
+        assert scalar_connection.get("status") == "ok", scalar_connection
+
+        if setup_result.get("static_switch_supported"):
+            parent_info = get_material_info(api, "/Game/E2E_MIParamMat", project_dir)
+            static_node = next((
+                node for node in parent_info.get("nodes", [])
+                if node.get("type") == "MaterialExpressionStaticSwitchParameter"
+            ), None)
+            if static_node is None:
+                static_result = add_material_node(
+                    api,
+                    "/Game/E2E_MIParamMat",
+                    "MaterialExpressionStaticSwitchParameter",
+                    pos_x=-300,
+                    pos_y=200,
+                    set_props=[("ParameterName", "UseDetail"), ("DefaultValue", "false")],
+                    project_dir=project_dir,
+                )
+                assert static_result.get("status") == "ok", static_result
+
+            switch_setup = run_python_code(api, r'''
+import unreal
+mi = unreal.EditorAssetLibrary.load_asset("/Game/E2E_MIParamInst")
+if mi is None:
+    result = {"error": "Failed to load material instance for static switch"}
+else:
+    changed = unreal.MaterialEditingLibrary.set_material_instance_static_switch_parameter_value(
+        mi, "UseDetail", True
+    )
+    mi.modify()
+    saved = unreal.EditorAssetLibrary.save_loaded_asset(mi)
+    result = {"status": "ok", "changed": changed, "saved": saved}
+''', timeout=60.0, save=False)
+            assert switch_setup.get("status") == "ok", switch_setup
+            assert switch_setup.get("saved") is True, switch_setup
 
         result = set_material_param(
             api,
@@ -937,21 +1004,22 @@ else:
         assert inherited.get("type") == "scalar", inherited
         assert abs(float(inherited.get("value")) - 0.77) < 0.001
 
-        static_switch = get_material_param(
-            api, "/Game/E2E_MIParamLeaf", "UseDetail", project_dir=project_dir,
-        )
-        assert static_switch.get("status") == "ok", static_switch
-        assert static_switch.get("type") == "static_switch", static_switch
-        assert static_switch.get("value") is True, static_switch
+        if setup_result.get("static_switch_supported"):
+            static_switch = get_material_param(
+                api, "/Game/E2E_MIParamLeaf", "UseDetail", project_dir=project_dir,
+            )
+            assert static_switch.get("status") == "ok", static_switch
+            assert static_switch.get("type") == "static_switch", static_switch
+            assert static_switch.get("value") is True, static_switch
 
-        cli_switch = cli_runner.invoke(cli, [
-            "--output", "json", "--project", project_path, "--port", str(api_port),
-            "material", "get-param", "/Game/E2E_MIParamLeaf", "--name", "UseDetail",
-        ])
-        assert cli_switch.exit_code == 0, cli_switch.output
-        cli_switch_data = json.loads(cli_switch.output)
-        assert cli_switch_data["result"]["type"] == "static_switch", cli_switch_data
-        assert cli_switch_data["result"]["value"] is True, cli_switch_data
+            cli_switch = cli_runner.invoke(cli, [
+                "--output", "json", "--project", project_path, "--port", str(api_port),
+                "material", "get-param", "/Game/E2E_MIParamLeaf", "--name", "UseDetail",
+            ])
+            assert cli_switch.exit_code == 0, cli_switch.output
+            cli_switch_data = json.loads(cli_switch.output)
+            assert cli_switch_data["result"]["type"] == "static_switch", cli_switch_data
+            assert cli_switch_data["result"]["value"] is True, cli_switch_data
 
         cli_function = cli_runner.invoke(cli, [
             "--output", "json", "--project", project_path, "--port", str(api_port),
@@ -1054,50 +1122,68 @@ class TestMaterialErrorsPluginE2E:
 
     def test_broken_material_has_errors(self, api, project_path):
         """Material with invalid Custom HLSL should report compile errors."""
-        from cli_anything.unreal.core.materials import get_material_errors
+        from cli_anything.unreal.core.materials import (
+            add_material_node,
+            connect_material_nodes,
+            delete_material_node,
+            get_material_errors,
+            get_material_info,
+        )
         from cli_anything.unreal.core.script_runner import run_python_code
 
         project_dir = str(Path(project_path).parent)
 
-        # Create material with bad HLSL and recompile (all UE-side).
-        # Uses "return invalid_var;" which fails fast (single undeclared identifier).
         setup_script = r'''
 import unreal
 
 EAL = unreal.EditorAssetLibrary
 ATH = unreal.AssetToolsHelpers.get_asset_tools()
-mel = unreal.MaterialEditingLibrary
-
 mat_path = "/Game/E2E_ErrorMaterial"
-can_create = True
-if EAL.does_asset_exist(mat_path):
-    if EAL.delete_asset(mat_path):
-        unreal.SystemLibrary.collect_garbage()
-    else:
-        can_create = False
-
-if can_create:
+mat = EAL.load_asset(mat_path)
+if mat is None:
     mat = ATH.create_asset("E2E_ErrorMaterial", "/Game", unreal.Material, unreal.MaterialFactoryNew())
-    if not mat:
-        # Retry with load_asset in case create_asset failed but asset exists
-        mat = EAL.load_asset("/Game/E2E_ErrorMaterial")
-    if mat:
-        custom = mel.create_material_expression(mat, unreal.MaterialExpressionCustom, -300, 0)
-        custom.set_editor_property("code", "return invalid_var;")
-        custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
-        mel.connect_material_property(custom, "", unreal.MaterialProperty.MP_BASE_COLOR)
-        mel.recompile_material(mat)
-        result = {"status": "ok"}
-    else:
-        result = {"error": "Failed to create or load E2E_ErrorMaterial"}
+if mat is None:
+    result = {"error": "Failed to create or load E2E_ErrorMaterial"}
 else:
-    result = {"error": "delete_asset failed for E2E_ErrorMaterial"}
+    result = {"status": "ok", "saved": EAL.save_loaded_asset(mat)}
 '''
-        setup = run_python_code(api, setup_script, timeout=60.0)
+        setup = run_python_code(api, setup_script, timeout=60.0, save=False)
         assert setup.get("status") == "ok", f"Setup failed: {setup}"
+        assert setup.get("saved") is True, setup
+
+        material_path = "/Game/E2E_ErrorMaterial"
+        existing = get_material_info(api, material_path, project_dir)
+        assert existing.get("status") == "ok", existing
+        for node in existing.get("nodes", []):
+            deleted = delete_material_node(
+                api, material_path, node["name"], project_dir=project_dir,
+            )
+            assert deleted.get("status") == "ok", deleted
+
+        custom = add_material_node(
+            api,
+            material_path,
+            "MaterialExpressionCustom",
+            pos_x=-300,
+            set_props=[("Code", "return invalid_var;")],
+            project_dir=project_dir,
+        )
+        assert custom.get("status") == "ok", custom
+        node_name = custom["node"]["name"]
 
         try:
-            result = get_material_errors(api, "/Game/E2E_ErrorMaterial", project_dir=project_dir)
+            connection = connect_material_nodes(
+                api,
+                material_path,
+                node_name,
+                "",
+                "__material_output__",
+                "BaseColor",
+                project_dir=project_dir,
+            )
+            assert connection.get("status") == "ok", connection
+
+            result = get_material_errors(api, material_path, project_dir=project_dir)
 
             if "error" in result and "not loaded" in result.get("error", ""):
                 pytest.skip("Bridge plugin not loaded in editor")
@@ -1108,15 +1194,10 @@ else:
             all_errors = " ".join(result["errors"])
             assert "invalid_var" in all_errors
         finally:
-            cleanup = r'''
-import unreal
-EAL = unreal.EditorAssetLibrary
-if EAL.does_asset_exist("/Game/E2E_ErrorMaterial"):
-    EAL.delete_asset("/Game/E2E_ErrorMaterial")
-    unreal.SystemLibrary.collect_garbage()
-result = {"cleaned": True}
-'''
-            run_python_code(api, cleanup, timeout=15.0)
+            cleanup = delete_material_node(
+                api, material_path, node_name, project_dir=project_dir,
+            )
+            assert cleanup.get("status") == "ok", cleanup
 
     def test_material_errors_cli(self, cli_runner, project_path, api_port):
         """Test material errors CLI command returns plugin-sourced results."""

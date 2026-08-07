@@ -49,17 +49,15 @@ Known Unreal Engine bugs that affect `ue-cli` automation + Python APIs.
   # Do not call unreal.SystemLibrary.collect_garbage() here.
   ```
 
-### 3. Material disconnect through Python/bridge can corrupt later edits
+### 3. Python material graph UObject wrappers can crash later work
 
 - **Modules:** `PythonScriptPlugin` / `MaterialEditor`
-- **Issue:** On UE 5.7.4, disconnecting either a material output or an
-  expression input through the injected Python/bridge path can return success,
-  save the asset, and then crash inside Python/MaterialEditor during a later
-  material edit.
-- **CLI safety behavior:** bridge 1.28 refuses these two disconnect operations
-  before mutation and returns `MATERIAL_DISCONNECT_UNSAFE_ENGINE`. Use the
-  Material Editor UI, or an engine version where this workflow has been
-  validated.
+- **Issue:** On UE 5.7.4, repeated Python inspection and edit calls can retain
+  `MaterialExpression` wrappers. A command may return success, then the editor
+  crashes later in Python/MaterialEditor.
+- **CLI behavior:** bridge 1.30 performs material graph reads and edits directly
+  through Remote Control and C++. No material expression crosses into Python;
+  mutations then save only the target asset.
 
 ### 4. `scene transform` (Remote Control API 400 Error)
 

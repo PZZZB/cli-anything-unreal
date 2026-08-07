@@ -505,7 +505,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.28"
+        assert version == "1.30"
 
     def test_disconnect_helpers_defer_post_edit_to_single_recompile(self):
         """Bridge mutation must not duplicate RecompileMaterial notifications."""
@@ -519,7 +519,7 @@ class TestPluginBridge:
             / "CliAnythingBridgeLibrary.cpp"
         ).read_text(encoding="utf-8")
         expression_body = cpp.split(
-            "FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput",
+            "FString UCliAnythingBridgeLibrary::DisconnectMaterialExpression",
             1,
         )[1].split(
             "FString UCliAnythingBridgeLibrary::GetTextureSourceInfo",
@@ -529,16 +529,16 @@ class TestPluginBridge:
             "FString UCliAnythingBridgeLibrary::DisconnectMaterialOutput",
             1,
         )[1].split(
-            "FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo",
+            "FString UCliAnythingBridgeLibrary::RecompileMaterial",
             1,
         )[0]
 
         for body in (expression_body, output_body):
             assert "PostEditChange(" not in body
-            assert "MarkPackageDirty()" in body
+            assert "RecompileEditedMaterial(Material)" in body
 
-    def test_disconnect_helpers_guard_ue57_before_mutation(self):
-        """UE 5.7 must fail truthfully before touching material state."""
+    def test_disconnect_helpers_use_native_mutation_on_ue57(self):
+        """Native graph edits must not leave a Python-only UE 5.7 branch."""
         from cli_anything.unreal.core.plugin_bridge import _BUNDLED_PLUGIN_DIR
 
         cpp = (
@@ -548,27 +548,9 @@ class TestPluginBridge:
             / "Private"
             / "CliAnythingBridgeLibrary.cpp"
         ).read_text(encoding="utf-8")
-        expression_body = cpp.split(
-            "FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput",
-            1,
-        )[1].split(
-            "FString UCliAnythingBridgeLibrary::GetTextureSourceInfo",
-            1,
-        )[0]
-        output_body = cpp.split(
-            "FString UCliAnythingBridgeLibrary::DisconnectMaterialOutput",
-            1,
-        )[1].split(
-            "FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo",
-            1,
-        )[0]
-
-        for body in (expression_body, output_body):
-            assert "ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7" in body
-            assert "MATERIAL_DISCONNECT_UNSAFE_ENGINE" in body
-            assert body.index("MATERIAL_DISCONNECT_UNSAFE_ENGINE") < body.index(
-                "Material->Modify()"
-            )
+        assert "MATERIAL_DISCONNECT_UNSAFE_ENGINE" not in cpp
+        assert "DisconnectMaterialExpression(UMaterial* Material" in cpp
+        assert "DisconnectMaterialOutput(UMaterial* Material" in cpp
 
     def test_bridge_shader_dump_recompile_restores_package_dirty_state(self):
         """Diagnostic shader dumps must not leave a clean material package dirty."""
@@ -663,8 +645,8 @@ class TestPluginBridge:
             assert name in header
             assert name in cpp
 
-    def test_bridge_declares_material_disconnect_helper(self):
-        """Material node input disconnect needs C++ because UE Python has no disconnect API."""
+    def test_bridge_declares_native_material_edit_surface(self):
+        """Graph edits stay in C++ so Python never wraps expression UObjects."""
         plugin_dir = Path(__file__).resolve().parents[1] / "bridge_plugin" / "CliAnythingBridge"
         header = (
             plugin_dir
@@ -681,8 +663,18 @@ class TestPluginBridge:
             / "CliAnythingBridgeLibrary.cpp"
         ).read_text(encoding="utf-8")
 
-        assert "DisconnectMaterialExpressionInput" in header
-        assert "DisconnectMaterialExpressionInput" in cpp
+        for name in (
+            "AddMaterialExpression",
+            "DeleteMaterialExpression",
+            "RenameMaterialCustomInput",
+            "ConnectMaterialExpressions",
+            "DisconnectMaterialExpression",
+            "ConnectMaterialOutput",
+            "DisconnectMaterialOutput",
+            "RecompileMaterial",
+        ):
+            assert name in header
+            assert name in cpp
 
     def test_bridge_declares_struct_info_helper(self):
         """api-discover needs C++ reflection for UScriptStruct types such as CustomInput."""

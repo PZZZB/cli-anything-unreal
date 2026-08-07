@@ -137,685 +137,9 @@ def _cli_load_material(asset_path, asset_candidates):
 '''
 
 
-# ── Python script templates (for complex queries) ─────────────────────
-
-_SCRIPT_MATERIAL_DETAIL = '''
-import unreal
-import json
-
-asset_path = "{material_path}"
-material_candidates = {material_path_candidates_json}
-mat, loaded_asset_path, tried_asset_paths = _cli_load_material(asset_path, material_candidates)
-if mat is None:
-    result = {{"error": "Material not found: " + asset_path, "tried": tried_asset_paths}}
-else:
-    result = {{
-        "name": mat.get_name(),
-        "path": loaded_asset_path,
-        "class": mat.get_class().get_name(),
-    }}
-
-    if isinstance(mat, unreal.Material):
-        for _prop in ["blend_mode", "material_domain", "two_sided", "shading_model"]:
-            try:
-                result[_prop] = str(mat.get_editor_property(_prop))
-            except:
-                pass
-        try:
-            result["use_material_attributes"] = bool(
-                mat.get_editor_property("use_material_attributes")
-            )
-        except:
-            pass
-
-        mel = unreal.MaterialEditingLibrary
-
-        # ── Nodes (expressions) ── ObjectIterator because .expressions is protected in UE 5.7+
-        try:
-            nodes = []
-            _expr_objs = []
-            for expr in unreal.ObjectIterator(unreal.MaterialExpression):
-                if expr.get_outer() == mat:
-                    cls_name = expr.get_class().get_name()
-                    node = {{"type": cls_name, "name": expr.get_name()}}
-                    try:
-                        _d = expr.get_editor_property("desc")
-                        if _d:
-                            node["desc"] = _d
-                    except:
-                        pass
-                    # Custom expression: include HLSL code snippet
-                    if cls_name == "MaterialExpressionCustom":
-                        try:
-                            _code = expr.get_editor_property("code")
-                            if _code:
-                                _lines = _code.strip().split("\\n")
-                                node["code_lines"] = len(_lines)
-                                node["code_preview"] = "\\n".join(_lines[:10])
-                                if len(_lines) > 10:
-                                    node["code_preview"] += "\\n// ... ({{}}) more lines".format(len(_lines) - 10)
-                        except:
-                            pass
-                        try:
-                            node["output_type"] = str(expr.get_editor_property("output_type"))
-                        except:
-                            pass
-                        try:
-                            _custom_inputs = []
-                            for _ci in expr.get_editor_property("inputs") or []:
-                                _custom_inputs.append(str(_ci.get_editor_property("input_name")))
-                            node["inputs"] = _custom_inputs
-                        except Exception as e:
-                            node["inputs_error"] = str(e)
-                    nodes.append(node)
-                    _expr_objs.append(expr)
-            result["nodes"] = nodes
-            result["node_count"] = len(nodes)
-        except Exception as e:
-            result["nodes"] = []
-            result["node_count"] = 0
-            result["nodes_error"] = str(e)
-            _expr_objs = []
-
-        # ── Node-to-node edges via get_inputs_for_material_expression ──
-        try:
-            _edges = []
-            for _eo in _expr_objs:
-                _inputs = mel.get_inputs_for_material_expression(mat, _eo)
-                for _ii, _ie in enumerate(_inputs):
-                    if _ie is not None:
-                        _edges.append({{
-                            "from_node": _ie.get_name(),
-                            "to_node": _eo.get_name(),
-                            "to_input_index": _ii,
-                        }})
-            result["edges"] = _edges
-        except Exception as e:
-            result["edges"] = []
-            result["edges_error"] = str(e)
-
-        # ── Material output connections ── which node feeds each output pin
-        try:
-            _prop_list = [
-                ("BaseColor", "MP_BASE_COLOR"),
-                ("Metallic", "MP_METALLIC"),
-                ("Specular", "MP_SPECULAR"),
-                ("Roughness", "MP_ROUGHNESS"),
-                ("Normal", "MP_NORMAL"),
-                ("EmissiveColor", "MP_EMISSIVE_COLOR"),
-                ("Opacity", "MP_OPACITY"),
-                ("OpacityMask", "MP_OPACITY_MASK"),
-                ("WorldPositionOffset", "MP_WORLD_POSITION_OFFSET"),
-                ("AmbientOcclusion", "MP_AMBIENT_OCCLUSION"),
-                ("SubsurfaceColor", "MP_SUBSURFACE_COLOR"),
-                ("MaterialAttributes", "MP_MATERIAL_ATTRIBUTES"),
-            ]
-            mat_outputs = {{}}
-            for _name, _mp_name in _prop_list:
-                try:
-                    _mp = getattr(unreal.MaterialProperty, _mp_name, None)
-                    if _mp is None:
-                        continue
-                    _src = mel.get_material_property_input_node(mat, _mp)
-                    if _src is not None:
-                        _out = ""
-                        try:
-                            _out = mel.get_material_property_input_node_output_name(mat, _mp)
-                        except:
-                            pass
-                        mat_outputs[_name] = {{
-                            "node": _src.get_name(),
-                            "node_type": _src.get_class().get_name(),
-                            "output": _out,
-                        }}
-                except:
-                    pass
-            result["material_outputs"] = mat_outputs
-        except Exception as e:
-            result["material_outputs_error"] = str(e)
-
-        # ── Texture samples ──
-        try:
-            tex_samples = []
-            for expr in unreal.ObjectIterator(unreal.MaterialExpression):
-                if expr.get_outer() == mat:
-                    cls_name = expr.get_class().get_name()
-                    if "TextureSample" in cls_name or "TextureObject" in cls_name:
-                        try:
-                            tex = expr.get_editor_property("texture")
-                            if tex:
-                                tex_info = {{"name": tex.get_name(), "path": tex.get_path_name(), "node_type": cls_name}}
-                                try:
-                                    tex_info["size_x"] = tex.blueprint_get_size_x()
-                                    tex_info["size_y"] = tex.blueprint_get_size_y()
-                                except:
-                                    pass
-                                tex_samples.append(tex_info)
-                            else:
-                                tex_samples.append({{"name": None, "path": None, "node_type": cls_name}})
-                        except:
-                            pass
-            result["textures"] = tex_samples
-            result["texture_sample_count"] = len(tex_samples)
-        except Exception as e:
-            result["textures"] = []
-            result["texture_sample_count"] = 0
-
-    elif isinstance(mat, unreal.MaterialFunctionInterface):
-        bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
-        graph_reader = getattr(bridge, "get_material_function_graph", None) if bridge else None
-        if graph_reader is None:
-            result = {{
-                "error": "MaterialFunction graph inspection requires the current CliAnythingBridge.",
-                "code": "MATERIAL_FUNCTION_GRAPH_BRIDGE_REQUIRED",
-                "material": loaded_asset_path,
-                "asset_class": mat.get_class().get_name(),
-                "suggestion": "Run 'editor plugin-upgrade', then retry material info.",
-            }}
-        else:
-            try:
-                graph = json.loads(graph_reader(mat))
-                if not isinstance(graph, dict):
-                    raise TypeError("bridge returned non-object JSON")
-                if graph.get("error"):
-                    graph.setdefault("code", "MATERIAL_FUNCTION_GRAPH_FAILED")
-                    graph.setdefault("material", loaded_asset_path)
-                    graph.setdefault("asset_class", mat.get_class().get_name())
-                    result = graph
-                else:
-                    for key in ["nodes", "node_count", "edges", "function_inputs", "function_outputs"]:
-                        if key in graph:
-                            result[key] = graph[key]
-            except Exception as e:
-                result = {{
-                    "error": "MaterialFunction graph inspection failed: " + str(e),
-                    "code": "MATERIAL_FUNCTION_GRAPH_FAILED",
-                    "material": loaded_asset_path,
-                    "asset_class": mat.get_class().get_name(),
-                }}
-
-    elif isinstance(mat, unreal.MaterialInstanceConstant):
-        try:
-            parent = mat.get_editor_property("parent")
-            result["parent"] = str(parent.get_path_name()) if parent else None
-        except:
-            result["parent"] = None
-
-        # Scalar parameters
-        scalars = []
-        try:
-            for param in mat.get_editor_property("scalar_parameter_values"):
-                scalars.append({{
-                    "name": str(param.get_editor_property("parameter_info").get_editor_property("name")),
-                    "value": param.get_editor_property("parameter_value"),
-                }})
-        except:
-            pass
-        result["scalar_parameters"] = scalars
-
-        # Vector parameters
-        vectors = []
-        try:
-            for param in mat.get_editor_property("vector_parameter_values"):
-                val = param.get_editor_property("parameter_value")
-                vectors.append({{
-                    "name": str(param.get_editor_property("parameter_info").get_editor_property("name")),
-                    "value": {{"r": val.r, "g": val.g, "b": val.b, "a": val.a}},
-                }})
-        except:
-            pass
-        result["vector_parameters"] = vectors
-
-        # Texture parameters
-        textures = []
-        try:
-            for param in mat.get_editor_property("texture_parameter_values"):
-                tex = param.get_editor_property("parameter_value")
-                textures.append({{
-                    "name": str(param.get_editor_property("parameter_info").get_editor_property("name")),
-                    "texture": str(tex.get_path_name()) if tex else None,
-                }})
-        except:
-            pass
-        result["texture_parameters"] = textures
-
-    else:
-        asset_class = mat.get_class().get_name()
-        result = {{
-            "error": "Unsupported material asset class for material info: " + asset_class,
-            "code": "MATERIAL_INFO_UNSUPPORTED_CLASS",
-            "material": loaded_asset_path,
-            "asset_class": asset_class,
-            "supported_classes": ["Material", "MaterialFunction", "MaterialInstanceConstant"],
-        }}
-'''
-
-
 # ── Shared helper snippet for property type coercion ─────────────────
-# Injected into _SCRIPT_ADD_NODE and _SCRIPT_SET_NODE_PROPERTY.
-# Supports: int, float, str, enum, and struct types (LinearColor, Vector, etc.)
 
 # ── Script templates for material editing ─────────────────────────────
-
-_SCRIPT_ADD_NODE = '''
-import unreal
-import json
-
-material_path = "{material_path}"
-mat = unreal.EditorAssetLibrary.load_asset(material_path)
-if mat is None:
-    result = {{"error": "Material not found: " + material_path}}
-elif not isinstance(mat, unreal.Material):
-    result = {{"error": "Asset is not a Material (cannot add nodes to MaterialInstance): " + material_path}}
-else:
-    mel = unreal.MaterialEditingLibrary
-    try:
-        expr = mel.create_material_expression(mat, unreal.{expression_class}, {pos_x}, {pos_y})
-        if expr is None:
-            result = {{"error": "Failed to create expression. Class 'unreal.{expression_class}' may not exist."}}
-        else:
-            # Set properties from --set key=value (simple types only: int, float, str, enum)
-            # For struct types (LinearColor, Vector, etc.), use editor run-script instead.
-            set_props = {set_props}
-            set_warnings = []
-            for key, value in set_props:
-                try:
-                    typed_value = value
-                    if isinstance(value, str):
-                        try:
-                            typed_value = int(value)
-                        except ValueError:
-                            try:
-                                typed_value = float(value)
-                            except ValueError:
-                                typed_value = value
-                    try:
-                        expr.set_editor_property(key, typed_value)
-                    except (TypeError, ValueError):
-                        if isinstance(typed_value, str) and '_' in typed_value and typed_value[0].isupper():
-                            resolved = False
-                            candidates = [typed_value]
-                            upper = typed_value.upper()
-                            if upper != typed_value:
-                                candidates.append(upper)
-                            for attr_name in dir(unreal):
-                                if resolved:
-                                    break
-                                try:
-                                    enum_cls = getattr(unreal, attr_name)
-                                    for cand in candidates:
-                                        if hasattr(enum_cls, cand):
-                                            expr.set_editor_property(key, getattr(enum_cls, cand))
-                                            resolved = True
-                                            break
-                                except Exception:
-                                    continue
-                            if not resolved:
-                                raise
-                        else:
-                            raise
-                except Exception as e:
-                    set_warnings.append(f"{{key}}={{value}}: {{e}}")
-
-            # Add inputs for Custom nodes from --add-input Name
-            add_input_names = {add_input_names}
-            if add_input_names:
-                inputs = []
-                for input_name in add_input_names:
-                    ci = unreal.CustomInput()
-                    ci.set_editor_property("input_name", input_name)
-                    inputs.append(ci)
-                try:
-                    expr.set_editor_property("inputs", inputs)
-                except Exception as e:
-                    set_warnings.append(f"inputs: {{e}}")
-
-            result = {{
-                "status": "ok",
-                "action": "add_node",
-                "material": material_path,
-                "node": {{
-                    "name": expr.get_name(),
-                    "type": expr.get_class().get_name(),
-                }},
-            }}
-            if set_warnings:
-                result["property_warnings"] = set_warnings
-            mel.recompile_material(mat)
-            mat.modify()
-    except Exception as e:
-        result = {{"error": "create_material_expression failed: " + str(e)}}
-'''
-
-_SCRIPT_RENAME_CUSTOM_INPUT = '''
-import re
-import unreal
-
-material_path = {material_path}
-node_name = {node_name}
-old_name = {old_name}
-new_name = {new_name}
-update_code = {update_code}
-
-def _list_nodes(_mat):
-    _nodes = []
-    for _expr in unreal.ObjectIterator(unreal.MaterialExpression):
-        if _expr.get_outer() == _mat:
-            _nodes.append(_expr.get_name())
-    return _nodes
-
-def _input_names(_expr):
-    _names = []
-    for _ci in _expr.get_editor_property("inputs") or []:
-        _names.append(str(_ci.get_editor_property("input_name")))
-    return _names
-
-mat = unreal.EditorAssetLibrary.load_asset(material_path)
-if mat is None:
-    result = {{"error": "Material not found: " + material_path}}
-elif not isinstance(mat, unreal.Material):
-    result = {{"error": "Asset is not a Material: " + material_path}}
-elif not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", new_name):
-    result = {{"error": "New Custom input name is not a valid HLSL identifier: " + new_name}}
-else:
-    mel = unreal.MaterialEditingLibrary
-    target = unreal.find_object(None, mat.get_path_name() + ":" + node_name)
-    if target is None:
-        for _expr in unreal.ObjectIterator(unreal.MaterialExpression):
-            if _expr.get_outer() == mat and _expr.get_name() == node_name:
-                target = _expr
-                break
-
-    if target is None:
-        result = {{"error": "Node not found: " + node_name, "available_nodes": _list_nodes(mat)}}
-    elif target.get_class().get_name() != "MaterialExpressionCustom":
-        result = {{
-            "error": "Node is not a MaterialExpressionCustom: " + node_name,
-            "node_type": target.get_class().get_name(),
-        }}
-    else:
-        try:
-            inputs = list(target.get_editor_property("inputs") or [])
-            before_names = _input_names(target)
-            if old_name not in before_names:
-                result = {{
-                    "error": "Custom input not found: " + old_name,
-                    "material": material_path,
-                    "node": node_name,
-                    "inputs": before_names,
-                }}
-            elif new_name != old_name and new_name in before_names:
-                result = {{
-                    "error": "Custom input already exists: " + new_name,
-                    "material": material_path,
-                    "node": node_name,
-                    "inputs": before_names,
-                }}
-            else:
-                warnings = []
-                for _ci in inputs:
-                    if str(_ci.get_editor_property("input_name")) == old_name:
-                        _ci.set_editor_property("input_name", new_name)
-                target.set_editor_property("inputs", inputs)
-
-                code_updated = False
-                if update_code:
-                    try:
-                        code = target.get_editor_property("code") or ""
-                        next_code = re.sub(
-                            r"(?<![A-Za-z0-9_])" + re.escape(old_name) + r"(?![A-Za-z0-9_])",
-                            new_name,
-                            code,
-                        )
-                        if next_code != code:
-                            target.set_editor_property("code", next_code)
-                            code_updated = True
-                    except Exception as e:
-                        warnings.append("code: " + str(e))
-
-                for _obj in [target, mat]:
-                    try:
-                        _obj.modify()
-                    except Exception:
-                        pass
-                    try:
-                        _obj.post_edit_change()
-                    except Exception:
-                        pass
-                try:
-                    mel.recompile_material(mat)
-                except Exception as e:
-                    warnings.append("recompile: " + str(e))
-                after_names = _input_names(target)
-                result = {{
-                    "status": "ok",
-                    "action": "rename_custom_input",
-                    "material": material_path,
-                    "node": node_name,
-                    "old_name": old_name,
-                    "new_name": new_name,
-                    "inputs_before": before_names,
-                    "inputs_after": after_names,
-                    "code_updated": code_updated,
-                }}
-                if warnings:
-                    result["warnings"] = warnings
-        except Exception as e:
-            result = {{"error": "rename_custom_input failed: " + str(e)}}
-'''
-
-_SCRIPT_DELETE_NODE = '''
-import unreal
-import json
-
-material_path = "{material_path}"
-node_name = "{node_name}"
-mat = unreal.EditorAssetLibrary.load_asset(material_path)
-if mat is None:
-    result = {{"error": "Material not found: " + material_path}}
-elif not isinstance(mat, unreal.Material):
-    result = {{"error": "Asset is not a Material: " + material_path}}
-else:
-    mel = unreal.MaterialEditingLibrary
-    # Find node by name using unreal.find_object (expressions property is protected in UE 5.7+)
-    mat_obj_path = mat.get_path_name()
-    target = unreal.find_object(None, mat_obj_path + ":" + node_name)
-    if target is None:
-        # List available nodes via ObjectIterator
-        available = []
-        for expr in unreal.ObjectIterator(unreal.MaterialExpression):
-            if expr.get_outer() == mat:
-                available.append(expr.get_name())
-        result = {{"error": "Node not found: " + node_name, "available_nodes": available}}
-    else:
-        try:
-            mel.delete_material_expression(mat, target)
-            mel.recompile_material(mat)
-            mat.modify()
-            result = {{"status": "ok", "action": "delete_node", "material": material_path, "deleted_node": node_name}}
-        except Exception as e:
-            result = {{"error": "delete_material_expression failed: " + str(e)}}
-'''
-
-_SCRIPT_CONNECT = '''
-import unreal
-import json
-
-material_path = "{material_path}"
-from_node_name = "{from_node}"
-from_output = "{from_output}"
-to_node_name = "{to_node}"
-to_input = "{to_input}"
-
-mat = unreal.EditorAssetLibrary.load_asset(material_path)
-if mat is None:
-    result = {{"error": "Material not found: " + material_path}}
-elif not isinstance(mat, unreal.Material):
-    result = {{"error": "Asset is not a Material: " + material_path}}
-else:
-    mel = unreal.MaterialEditingLibrary
-    # Find nodes by name using unreal.find_object (expressions property is protected in UE 5.7+)
-    mat_obj_path = mat.get_path_name()
-    from_expr = unreal.find_object(None, mat_obj_path + ":" + from_node_name)
-    to_expr = unreal.find_object(None, mat_obj_path + ":" + to_node_name) if to_node_name != "__material_output__" else None
-
-    # List available nodes for error messages
-    def _list_nodes():
-        nodes = []
-        for expr in unreal.ObjectIterator(unreal.MaterialExpression):
-            if expr.get_outer() == mat:
-                nodes.append(expr.get_name())
-        return nodes
-
-    if from_expr is None:
-        result = {{"error": "Source node not found: " + from_node_name, "available_nodes": _list_nodes()}}
-    elif to_expr is None and to_node_name != "__material_output__":
-        result = {{"error": "Target node not found: " + to_node_name, "available_nodes": _list_nodes()}}
-    else:
-        try:
-            if to_node_name == "__material_output__":
-                # Connect to material output property (BaseColor, Normal, etc.)
-                prop_map = {{
-                    "BaseColor": "MP_BASE_COLOR",
-                    "Metallic": "MP_METALLIC",
-                    "Specular": "MP_SPECULAR",
-                    "Roughness": "MP_ROUGHNESS",
-                    "Normal": "MP_NORMAL",
-                    "EmissiveColor": "MP_EMISSIVE_COLOR",
-                    "Opacity": "MP_OPACITY",
-                    "OpacityMask": "MP_OPACITY_MASK",
-                    "WorldPositionOffset": "MP_WORLD_POSITION_OFFSET",
-                    "AmbientOcclusion": "MP_AMBIENT_OCCLUSION",
-                    "SubsurfaceColor": "MP_SUBSURFACE_COLOR",
-                }}
-                mat_prop_name = prop_map.get(to_input)
-                mat_prop = getattr(unreal.MaterialProperty, mat_prop_name, None) if mat_prop_name else None
-                if mat_prop_name is None:
-                    result = {{"error": "Unknown material property: " + to_input, "available_properties": list(prop_map.keys())}}
-                elif mat_prop is None:
-                    bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
-                    connect_output = getattr(bridge, "connect_material_output", None) if bridge else None
-                    if connect_output is None:
-                        result = {{
-                            "error": "Material property is not exposed by this engine Python API: " + to_input,
-                            "suggestion": "Run editor plugin-upgrade, then relaunch the editor.",
-                        }}
-                    else:
-                        raw = connect_output(from_expr, from_output, to_input)
-                        result = json.loads(raw) if raw else {{"error": "Bridge returned empty result"}}
-                        if "error" not in result:
-                            mel.recompile_material(mat)
-                            mat.modify()
-                            result["from"] = from_node_name
-                else:
-                    ok = mel.connect_material_property(from_expr, from_output, mat_prop)
-                    if ok:
-                        mel.recompile_material(mat)
-                        mat.modify()
-                        result = {{"status": "ok", "action": "connect", "from": from_node_name, "to": "MaterialOutput." + to_input}}
-                    else:
-                        result = {{"error": "connect_material_property returned False"}}
-            else:
-                ok = mel.connect_material_expressions(from_expr, from_output, to_expr, to_input)
-                if ok:
-                    mel.recompile_material(mat)
-                    mat.modify()
-                    result = {{"status": "ok", "action": "connect", "from": from_node_name, "from_output": from_output, "to": to_node_name, "to_input": to_input}}
-                else:
-                    result = {{"error": "connect_material_expressions returned False"}}
-        except Exception as e:
-            result = {{"error": "Connection failed: " + str(e)}}
-'''
-
-_SCRIPT_DISCONNECT = '''
-import unreal
-import json
-
-material_path = "{material_path}"
-from_node_name = "{from_node}"
-from_output = "{from_output}"
-to_node_name = "{to_node}"
-to_input = "{to_input}"
-
-mat = unreal.EditorAssetLibrary.load_asset(material_path)
-if mat is None:
-    result = {{"error": "Material not found: " + material_path}}
-elif not isinstance(mat, unreal.Material):
-    result = {{"error": "Asset is not a Material: " + material_path}}
-else:
-    mel = unreal.MaterialEditingLibrary
-    try:
-        if to_node_name == "__material_output__":
-            prop_map = {{
-                "BaseColor": "MP_BASE_COLOR",
-                "Metallic": "MP_METALLIC",
-                "Specular": "MP_SPECULAR",
-                "Roughness": "MP_ROUGHNESS",
-                "Normal": "MP_NORMAL",
-                "EmissiveColor": "MP_EMISSIVE_COLOR",
-                "Opacity": "MP_OPACITY",
-                "OpacityMask": "MP_OPACITY_MASK",
-                "WorldPositionOffset": "MP_WORLD_POSITION_OFFSET",
-                "AmbientOcclusion": "MP_AMBIENT_OCCLUSION",
-                "SubsurfaceColor": "MP_SUBSURFACE_COLOR",
-            }}
-            mat_prop_name = prop_map.get(to_input)
-            mat_prop = getattr(unreal.MaterialProperty, mat_prop_name, None) if mat_prop_name else None
-            if mat_prop_name is None:
-                result = {{"error": "Unknown material property: " + to_input, "available_properties": list(prop_map.keys())}}
-            else:
-                bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
-                disconnect_output = getattr(bridge, "disconnect_material_output", None) if bridge else None
-                if disconnect_output is not None:
-                    raw = disconnect_output(mat, to_input)
-                    result = json.loads(raw) if raw else {{"error": "Bridge returned empty result"}}
-                elif mat_prop is None:
-                    result = {{
-                        "error": "Material property is not exposed by this engine Python API: " + to_input,
-                        "suggestion": "Run editor plugin-upgrade, then relaunch the editor.",
-                    }}
-                else:
-                    # Legacy fallback for older bridge versions.
-                    try:
-                        mel.connect_material_property(None, "", mat_prop)
-                    except Exception:
-                        pass
-                    result = {{"status": "ok", "action": "disconnect", "to": "MaterialOutput." + to_input}}
-                if "error" not in result:
-                    mel.recompile_material(mat)
-                    mat.modify()
-                    result["from"] = from_node_name
-        else:
-            # Find target node by name using unreal.find_object
-            mat_obj_path = mat.get_path_name()
-            to_expr = unreal.find_object(None, mat_obj_path + ":" + to_node_name)
-            if to_expr is None:
-                result = {{"error": "Target node not found: " + to_node_name}}
-            else:
-                bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
-                if bridge is None or not hasattr(bridge, "disconnect_material_expression_input"):
-                    result = {{
-                        "error": "CliAnythingBridgeLibrary is missing DisconnectMaterialExpressionInput. material disconnect between nodes requires bridge plugin 1.15+.",
-                        "suggestion": "Run editor plugin-upgrade, then relaunch the editor.",
-                    }}
-                else:
-                    raw = bridge.disconnect_material_expression_input(mat, to_expr, to_input)
-                    bridge_result = json.loads(raw) if raw else {{"error": "Bridge returned empty result"}}
-                    if "error" in bridge_result:
-                        result = bridge_result
-                    else:
-                        mel.recompile_material(mat)
-                        mat.modify()
-                        result = bridge_result
-                        result["from"] = from_node_name
-                        result["from_output"] = from_output
-                        result["to"] = to_node_name
-                        result["to_input"] = bridge_result.get("to_input", to_input)
-    except Exception as e:
-        result = {{"error": "Disconnect failed: " + str(e)}}
-'''
-
-
 _SCRIPT_GET_PARAM = '''
 import unreal
 import json
@@ -928,40 +252,6 @@ else:
         result = {{"error": "set_param failed: " + str(e)}}
 '''
 
-_SCRIPT_RECOMPILE = '''
-import unreal
-import json
-
-material_path = "{material_path}"
-material_candidates = {material_path_candidates_json}
-mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, material_candidates)
-if mat is None:
-    result = {{"error": "Material not found: " + material_path, "tried": tried_asset_paths}}
-else:
-    mel = unreal.MaterialEditingLibrary
-    try:
-        # Recompile is synchronous on the main thread for the material graph.
-        mel.recompile_material(mat)
-        mat.modify()
-        
-        errors = []
-        if hasattr(unreal, "CliAnythingBridgeLibrary"):
-            bridge = unreal.CliAnythingBridgeLibrary
-            errors = list(bridge.get_material_compile_errors(mat))
-            
-        if len(errors) > 0:
-            result = {{
-                "status": "error", 
-                "action": "recompile", 
-                "material": loaded_asset_path,
-                "error": "Material compilation failed.",
-                "compile_errors": errors
-            }}
-        else:
-            result = {{"status": "ok", "action": "recompile", "material": loaded_asset_path}}
-    except Exception as e:
-        result = {{"error": "recompile_material failed: " + str(e)}}
-'''
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -1009,97 +299,157 @@ def list_materials(
     return {"materials": materials}
 
 
+_BRIDGE_CDO = "/Script/CliAnythingBridge.Default__CliAnythingBridgeLibrary"
+_EDITOR_ASSET_LIBRARY_CDO = (
+    "/Script/EditorScriptingUtilities.Default__EditorAssetLibrary"
+)
+
+
+def _material_object_path(material_path: str) -> str:
+    candidates = _material_asset_path_candidates(material_path)
+    return next(
+        (path for path in candidates if "." in path.rsplit("/", 1)[-1]),
+        candidates[0],
+    )
+
+
+def _call_material_bridge(
+    api: UEEditorAPI,
+    function_name: str,
+    parameters: dict,
+    *,
+    missing_code: str,
+    required_version: str,
+    timeout: int = 30,
+    generate_transaction: bool = False,
+) -> dict:
+    call_kwargs = {"timeout": timeout}
+    if generate_transaction:
+        call_kwargs["generate_transaction"] = True
+    response = api.call_function(
+        _BRIDGE_CDO,
+        function_name,
+        parameters,
+        **call_kwargs,
+    )
+    _raise_if_editor_became_unreachable(api, response)
+
+    raw = response.get("ReturnValue")
+    if not isinstance(raw, str):
+        return {
+            "error": (
+                f"{function_name} requires CliAnythingBridge "
+                f"{required_version} or newer."
+            ),
+            "code": missing_code,
+            "detail": response.get("error", response),
+            "suggestion": "Run 'editor plugin-upgrade', then retry.",
+        }
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {
+            "error": f"{function_name} returned invalid JSON: {exc}",
+            "code": "MATERIAL_BRIDGE_INVALID_RESPONSE",
+        }
+    if not isinstance(result, dict):
+        return {
+            "error": f"{function_name} returned non-object JSON.",
+            "code": "MATERIAL_BRIDGE_INVALID_RESPONSE",
+        }
+    return result
+
+
+def _material_package_path(material_path: str) -> str:
+    leaf = material_path.rsplit("/", 1)[-1]
+    return material_path.rsplit(".", 1)[0] if "." in leaf else material_path
+
+
+def _call_material_edit_bridge(
+    api: UEEditorAPI,
+    function_name: str,
+    material_path: str,
+    parameters: dict | None = None,
+    *,
+    timeout: int = 120,
+) -> dict:
+    call_parameters = {"Material": _material_object_path(material_path)}
+    call_parameters.update(parameters or {})
+    result = _call_material_bridge(
+        api,
+        function_name,
+        call_parameters,
+        missing_code="MATERIAL_EDIT_BRIDGE_REQUIRED",
+        required_version="1.30",
+        timeout=timeout,
+        generate_transaction=True,
+    )
+    if result.get("status") not in {"ok", "error"}:
+        return result
+
+    package_path = _material_package_path(material_path)
+    save_response = api.call_function(
+        _EDITOR_ASSET_LIBRARY_CDO,
+        "SaveAsset",
+        {"AssetToSave": package_path, "bOnlyIfIsDirty": False},
+        timeout=60,
+    )
+    _raise_if_editor_became_unreachable(api, save_response)
+    if save_response.get("ReturnValue") is not True:
+        return {
+            "error": (
+                "Material edit completed in memory, but the target asset "
+                f"could not be saved: {package_path}"
+            ),
+            "code": "MATERIAL_SAVE_FAILED",
+            "material": package_path,
+            "edit_result": result,
+            "detail": save_response.get("error", save_response),
+        }
+    result["saved"] = True
+    result["saved_packages"] = [package_path]
+    return result
+
+
+def _call_material_info_bridge(api: UEEditorAPI, material_path: str) -> dict:
+    load_response = api.call_function(
+        _EDITOR_ASSET_LIBRARY_CDO,
+        "LoadAsset",
+        {"AssetPath": _material_package_path(material_path)},
+        timeout=30,
+    )
+    _raise_if_editor_became_unreachable(api, load_response)
+
+    result = _call_material_bridge(
+        api,
+        "GetMaterialInfo",
+        {"Asset": _material_object_path(material_path)},
+        missing_code="MATERIAL_INFO_BRIDGE_REQUIRED",
+        required_version="1.29",
+    )
+    result.setdefault("material", material_path)
+    return result
+
+
 def get_material_info(
     api: UEEditorAPI,
     material_path: str,
     project_dir: str | None = None,
-    *,
-    require_deep: bool = False,
 ) -> dict:
-    """Get detailed information about a material.
+    """Get detailed material data through the native bridge.
 
-    First tries Remote Control search for basic metadata,
-    then uses Python script for full node/parameter details.
+    Remote Control resolves the asset path directly into the bridge call, so
+    Python never creates wrappers for material expression UObjects.
 
     Args:
         api: Connected UEEditorAPI instance.
         material_path: Content path (e.g., "/Game/NewMaterial").
-        project_dir: Project directory for temp files.
+        project_dir: Kept for public API compatibility.
 
     Returns:
         Dict with material properties, nodes, parameters, etc.
     """
-    # Step 1: Get basic info from search API
-    # Normalize: "/Game/NewMaterial.NewMaterial" or "/Game/NewMaterial"
-    search_name = material_path.split(".")[-1] if "." in material_path else material_path.split("/")[-1]
-
-    search_result = api.search_assets(
-        query=search_name,
-        class_names=[
-            "/Script/Engine.Material",
-            "/Script/Engine.MaterialFunction",
-            "/Script/Engine.MaterialInstanceConstant",
-        ],
-        package_paths=["/Game"],
-        recursive=True,
-    )
-    _raise_if_editor_became_unreachable(api, search_result)
-
-    basic_info = {}
-    for asset in search_result.get("Assets", []):
-        # Match by name or path
-        if asset.get("Name") == search_name or material_path in asset.get("Path", ""):
-            basic_info = {
-                "name": asset.get("Name", ""),
-                "path": asset.get("Path", ""),
-                "class": asset.get("Class", ""),
-                **asset.get("Metadata", {}),
-            }
-            break
-
-    # Step 2: Python script for deep node/expression info and material properties.
-    #         This also reads blend_mode, shading_model, etc. — no need for a
-    #         separate Remote Control get_property pass (which would trigger
-    #         "AllowPrivateAccess" log spam on private props).
-    script_result = _exec_material_script(
-        api,
-        _SCRIPT_MATERIAL_DETAIL,
-        project_dir=project_dir,
-        save_policy=SavePolicy.NEVER,
-        material_path=material_path.rsplit(".", 1)[0] if "." in material_path else material_path,
-    )
-
-    if "error" not in script_result:
-        # Merge deep info into basic_info (script result has nodes, textures, etc.)
-        for key in ("name", "path", "class",
-                     "nodes", "node_count", "textures", "texture_sample_count",
-                     "blend_mode", "material_domain", "shading_model", "two_sided",
-                     "use_material_attributes",
-                     "material_outputs", "edges", "function_inputs", "function_outputs",
-                     "scalar_parameters", "vector_parameters", "texture_parameters",
-                     "parent"):
-            if key in script_result:
-                basic_info[key] = script_result[key]
-    elif script_result.get("code") in {
-        "MATERIAL_INFO_UNSUPPORTED_CLASS",
-        "MATERIAL_FUNCTION_GRAPH_BRIDGE_REQUIRED",
-        "MATERIAL_FUNCTION_GRAPH_FAILED",
-    }:
-        return script_result
-    else:
-        # Python script failed — record as note, RC API data still available
-        _raise_if_editor_became_unreachable(api, script_result)
-        if require_deep:
-            return script_result
-        if not basic_info:
-            return script_result
-        basic_info["detail_note"] = (
-            f"Python script unavailable ({script_result['error']}). "
-            "Node-level details require the EditorScriptingUtilities / Python plugin. "
-            "Basic properties are still available via Remote Control API."
-        )
-
-    return basic_info
+    return _call_material_info_bridge(api, material_path)
 
 
 def get_material_stats(
@@ -1119,7 +469,7 @@ def get_material_stats(
     Returns:
         Dict with shader stats.
     """
-    info = get_material_info(api, material_path, project_dir, require_deep=True)
+    info = get_material_info(api, material_path, project_dir)
     raise_for_legacy_error(info, default_code="MATERIAL_STATS_FAILED")
 
     asset_class = info.get("class", "")
@@ -1406,7 +756,7 @@ def get_material_texture_list(
     Returns:
         {"textures": [...]}
     """
-    info = get_material_info(api, material_path, project_dir, require_deep=True)
+    info = get_material_info(api, material_path, project_dir)
     raise_for_legacy_error(info, default_code="MATERIAL_TEXTURE_LIST_FAILED")
 
     textures = info.get("textures", [])
@@ -1452,7 +802,7 @@ def get_material_connections(
             "orphan_nodes": [str, ..],
         }
     """
-    info = get_material_info(api, material_path, project_dir, require_deep=True)
+    info = get_material_info(api, material_path, project_dir)
     raise_for_legacy_error(info, default_code="MATERIAL_GRAPH_FAILED")
 
     mat_outputs = info.get("material_outputs", {})
@@ -1528,7 +878,7 @@ def analyze_material(
     warnings = []
 
     # Get full material info
-    info = get_material_info(api, material_path, project_dir, require_deep=True)
+    info = get_material_info(api, material_path, project_dir)
     raise_for_legacy_error(info, default_code="MATERIAL_ANALYZE_FAILED")
 
     # ── Analysis rules ────────────────────────────────────────────────
@@ -1649,18 +999,17 @@ def add_material_node(
     Returns:
         {"status": "ok", "node": {"name": str, "type": str}} or {"error": str}
     """
-    return _exec_material_script(
+    return _call_material_edit_bridge(
         api,
-        _SCRIPT_ADD_NODE,
-        project_dir=project_dir,
-        save_policy=SavePolicy.TARGET_PACKAGES,
-        target_packages=[material_path],
-        material_path=material_path,
-        expression_class=expression_class,
-        pos_x=str(pos_x),
-        pos_y=str(pos_y),
-        set_props=repr(set_props or []),
-        add_input_names=repr(add_input_names or []),
+        "AddMaterialExpression",
+        material_path,
+        {
+            "ExpressionClass": expression_class,
+            "PosX": pos_x,
+            "PosY": pos_y,
+            "Properties": dict(set_props or []),
+            "InputNames": add_input_names or [],
+        },
     )
 
 
@@ -1683,14 +1032,11 @@ def delete_material_node(
     Returns:
         {"status": "ok", "deleted_node": str} or {"error": str}
     """
-    return _exec_material_script(
+    return _call_material_edit_bridge(
         api,
-        _SCRIPT_DELETE_NODE,
-        project_dir=project_dir,
-        save_policy=SavePolicy.TARGET_PACKAGES,
-        target_packages=[material_path],
-        material_path=material_path,
-        node_name=node_name,
+        "DeleteMaterialExpression",
+        material_path,
+        {"NodeName": node_name},
     )
 
 
@@ -1710,17 +1056,16 @@ def rename_custom_input(
     those variables. This helper updates the real Custom input name and,
     by default, rewrites whole-word HLSL references from old_name to new_name.
     """
-    return _exec_material_script(
+    return _call_material_edit_bridge(
         api,
-        _SCRIPT_RENAME_CUSTOM_INPUT,
-        project_dir=project_dir,
-        save_policy=SavePolicy.TARGET_PACKAGES,
-        target_packages=[material_path],
-        material_path=repr(material_path),
-        node_name=repr(node_name),
-        old_name=repr(old_name),
-        new_name=repr(new_name),
-        update_code=repr(bool(update_code)),
+        "RenameMaterialCustomInput",
+        material_path,
+        {
+            "NodeName": node_name,
+            "OldName": old_name,
+            "NewName": new_name,
+            "bUpdateCode": bool(update_code),
+        },
     )
 
 
@@ -1750,17 +1095,24 @@ def connect_material_nodes(
     Returns:
         {"status": "ok", "action": "connect", ...} or {"error": str}
     """
-    return _exec_material_script(
+    function_name = (
+        "ConnectMaterialOutput"
+        if to_node == "__material_output__"
+        else "ConnectMaterialExpressions"
+    )
+    parameters = {
+        "FromNode": from_node,
+        "FromOutputName": from_output,
+    }
+    if to_node == "__material_output__":
+        parameters["PropertyName"] = to_input
+    else:
+        parameters.update({"ToNode": to_node, "ToInputName": to_input})
+    return _call_material_edit_bridge(
         api,
-        _SCRIPT_CONNECT,
-        project_dir=project_dir,
-        save_policy=SavePolicy.TARGET_PACKAGES,
-        target_packages=[material_path],
-        material_path=material_path,
-        from_node=from_node,
-        from_output=from_output,
-        to_node=to_node,
-        to_input=to_input,
+        function_name,
+        material_path,
+        parameters,
     )
 
 
@@ -1787,18 +1139,28 @@ def disconnect_material_nodes(
     Returns:
         {"status": "ok", "action": "disconnect", ...} or {"error": str}
     """
-    return _exec_material_script(
-        api,
-        _SCRIPT_DISCONNECT,
-        project_dir=project_dir,
-        save_policy=SavePolicy.TARGET_PACKAGES,
-        target_packages=[material_path],
-        material_path=material_path,
-        from_node=from_node,
-        from_output=from_output,
-        to_node=to_node,
-        to_input=to_input,
+    function_name = (
+        "DisconnectMaterialOutput"
+        if to_node == "__material_output__"
+        else "DisconnectMaterialExpression"
     )
+    parameters = (
+        {"PropertyName": to_input}
+        if to_node == "__material_output__"
+        else {"ToNode": to_node, "ToInputName": to_input}
+    )
+    result = _call_material_edit_bridge(
+        api,
+        function_name,
+        material_path,
+        parameters,
+    )
+    if result.get("status") == "ok":
+        result.setdefault("from", from_node)
+        result.setdefault("from_output", from_output)
+        result.setdefault("to", to_node)
+        result.setdefault("to_input", to_input)
+    return result
 
 
 
@@ -1880,14 +1242,11 @@ def recompile_material(
     Returns:
         {"status": "ok", "action": "recompile"} or {"error": str}
     """
-    return _exec_material_script(
+    return _call_material_edit_bridge(
         api,
-        _SCRIPT_RECOMPILE,
-        project_dir=project_dir,
-        timeout=120.0,
-        save_policy=SavePolicy.TARGET_PACKAGES,
-        target_packages=[material_path],
-        material_path=material_path,
+        "RecompileMaterial",
+        material_path,
+        timeout=120,
     )
 
 

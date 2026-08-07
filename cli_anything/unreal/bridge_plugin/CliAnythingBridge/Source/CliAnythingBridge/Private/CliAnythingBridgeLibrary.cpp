@@ -2,13 +2,17 @@
 
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
+#include "Materials/MaterialExpressionCustom.h"
+#include "Materials/MaterialExpressionTextureBase.h"
 #include "Materials/MaterialFunctionInterface.h"
+#include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
 #include "MaterialEditingLibrary.h"
 #include "Engine/Engine.h"
 #include "Engine/Texture2D.h"
 #include "Engine/Texture.h"
 #include "MaterialShared.h"
+#include "MaterialShaderType.h"
 #include "RHI.h"
 #include "ShaderCompiler.h"
 #include "ShaderCompilerCore.h"
@@ -50,6 +54,42 @@ static FString JsonError(const FString& Message);
 static FString JsonStringArray(const TArray<FString>& Values);
 static UClass* FindWidgetClassByName(const FString& ClassName);
 static FString WidgetJson(UWidget* Widget, UWidgetBlueprint* Blueprint);
+
+struct FNamedMaterialProperty
+{
+	const TCHAR* Name;
+	EMaterialProperty Property;
+};
+
+static const FNamedMaterialProperty GNamedMaterialProperties[] = {
+	{TEXT("BaseColor"), MP_BaseColor},
+	{TEXT("Metallic"), MP_Metallic},
+	{TEXT("Specular"), MP_Specular},
+	{TEXT("Roughness"), MP_Roughness},
+	{TEXT("Normal"), MP_Normal},
+	{TEXT("EmissiveColor"), MP_EmissiveColor},
+	{TEXT("Opacity"), MP_Opacity},
+	{TEXT("OpacityMask"), MP_OpacityMask},
+	{TEXT("WorldPositionOffset"), MP_WorldPositionOffset},
+	{TEXT("AmbientOcclusion"), MP_AmbientOcclusion},
+	{TEXT("SubsurfaceColor"), MP_SubsurfaceColor},
+	{TEXT("MaterialAttributes"), MP_MaterialAttributes},
+};
+
+static bool ResolveMaterialProperty(const FString& PropertyName, EMaterialProperty& OutProperty)
+{
+	FString Name = PropertyName;
+	Name.TrimStartAndEndInline();
+	for (const FNamedMaterialProperty& NamedProperty : GNamedMaterialProperties)
+	{
+		if (Name.Equals(NamedProperty.Name, ESearchCase::IgnoreCase))
+		{
+			OutProperty = NamedProperty.Property;
+			return true;
+		}
+	}
+	return false;
+}
 
 class FMaterialResourceExtractSource : public FMaterialResource
 {
@@ -121,35 +161,23 @@ TArray<FString> UCliAnythingBridgeLibrary::GetMaterialCompileErrors(UMaterialInt
 	return Result;
 }
 
-FString UCliAnythingBridgeLibrary::GetMaterialFunctionGraph(UMaterialFunctionInterface* MaterialFunction)
+static FString BuildMaterialGraphJson(
+	UObject* Asset,
+	const TArray<UMaterialExpression*>& Expressions,
+	UMaterial* Material)
 {
-	if (!MaterialFunction)
-	{
-		return JsonError(TEXT("MaterialFunction is null"));
-	}
-
-	TArray<UMaterialExpression*> Expressions;
-#if ENGINE_MAJOR_VERSION >= 5
-	for (UMaterialExpression* Expression : MaterialFunction->GetExpressions())
-	{
-		Expressions.Add(Expression);
-	}
-#else
-	const TArray<UMaterialExpression*>* FunctionExpressions = MaterialFunction->GetFunctionExpressions();
-	if (!FunctionExpressions)
-	{
-		return JsonError(TEXT("MaterialFunction expressions are unavailable"));
-	}
-	Expressions.Append(*FunctionExpressions);
-#endif
-
 	TArray<FString> FunctionInputs;
 	TArray<FString> FunctionOutputs;
 	FString NodesJson = TEXT("[");
+	FString TexturesJson = TEXT("[");
 	bool bFirstNode = true;
+	bool bFirstTexture = true;
+	int32 NodeCount = 0;
+	int32 TextureCount = 0;
 	for (UMaterialExpression* Expression : Expressions)
 	{
 		if (!Expression) continue;
+		++NodeCount;
 		if (!bFirstNode) NodesJson += TEXT(",");
 		bFirstNode = false;
 
@@ -164,7 +192,68 @@ FString UCliAnythingBridgeLibrary::GetMaterialFunctionGraph(UMaterialFunctionInt
 		{
 			NodesJson += TEXT(",\"desc\":\"") + JsonEscape(Expression->Desc) + TEXT("\"");
 		}
+
+		if (const UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression))
+		{
+			FString TrimmedCode = Custom->Code.TrimStartAndEnd();
+			TArray<FString> CodeLines;
+			TrimmedCode.ParseIntoArrayLines(CodeLines, false);
+			const int32 PreviewLineCount = FMath::Min(10, CodeLines.Num());
+			TArray<FString> PreviewLines;
+			for (int32 Index = 0; Index < PreviewLineCount; ++Index)
+			{
+				PreviewLines.Add(CodeLines[Index]);
+			}
+			FString Preview = FString::Join(PreviewLines, TEXT("\n"));
+			if (CodeLines.Num() > PreviewLineCount)
+			{
+				Preview += FString::Printf(
+					TEXT("\n// ... (%d) more lines"),
+					CodeLines.Num() - PreviewLineCount);
+			}
+			NodesJson += FString::Printf(TEXT(",\"code_lines\":%d"), CodeLines.Num());
+			NodesJson += TEXT(",\"code_preview\":\"") + JsonEscape(Preview) + TEXT("\"");
+
+			const UEnum* OutputTypeEnum = StaticEnum<ECustomMaterialOutputType>();
+			if (OutputTypeEnum)
+			{
+				NodesJson += TEXT(",\"output_type\":\"")
+					+ JsonEscape(OutputTypeEnum->GetNameStringByValue(Custom->OutputType.GetValue()))
+					+ TEXT("\"");
+			}
+			TArray<FString> CustomInputs;
+			for (const FCustomInput& Input : Custom->Inputs)
+			{
+				CustomInputs.Add(Input.InputName.ToString());
+			}
+			NodesJson += TEXT(",\"inputs\":") + JsonStringArray(CustomInputs);
+		}
 		NodesJson += TEXT("}");
+
+		if (const UMaterialExpressionTextureBase* TextureExpression = Cast<UMaterialExpressionTextureBase>(Expression))
+		{
+			++TextureCount;
+			if (!bFirstTexture) TexturesJson += TEXT(",");
+			bFirstTexture = false;
+			TexturesJson += TEXT("{\"node_type\":\"") + JsonEscape(ClassName) + TEXT("\"");
+			if (const UTexture* Texture = TextureExpression->Texture)
+			{
+				TexturesJson += TEXT(",\"name\":\"") + JsonEscape(Texture->GetName()) + TEXT("\"");
+				TexturesJson += TEXT(",\"path\":\"") + JsonEscape(Texture->GetPathName()) + TEXT("\"");
+				if (const UTexture2D* Texture2D = Cast<UTexture2D>(Texture))
+				{
+					TexturesJson += FString::Printf(
+						TEXT(",\"size_x\":%d,\"size_y\":%d"),
+						Texture2D->GetSizeX(),
+						Texture2D->GetSizeY());
+				}
+			}
+			else
+			{
+				TexturesJson += TEXT(",\"name\":null,\"path\":null");
+			}
+			TexturesJson += TEXT("}");
+		}
 
 		if (ClassName.Contains(TEXT("MaterialExpressionFunctionInput")))
 		{
@@ -176,6 +265,7 @@ FString UCliAnythingBridgeLibrary::GetMaterialFunctionGraph(UMaterialFunctionInt
 		}
 	}
 	NodesJson += TEXT("]");
+	TexturesJson += TEXT("]");
 
 	FString EdgesJson = TEXT("[");
 	bool bFirstEdge = true;
@@ -212,25 +302,444 @@ FString UCliAnythingBridgeLibrary::GetMaterialFunctionGraph(UMaterialFunctionInt
 	}
 	EdgesJson += TEXT("]");
 
-	FString Json = TEXT("{\"status\":\"ok\",\"material\":\"") + JsonEscape(MaterialFunction->GetPathName()) + TEXT("\"");
+	FString Json = TEXT("{\"status\":\"ok\",\"name\":\"") + JsonEscape(Asset->GetName()) + TEXT("\"");
+	Json += TEXT(",\"path\":\"") + JsonEscape(Asset->GetPathName()) + TEXT("\"");
+	Json += TEXT(",\"class\":\"") + JsonEscape(Asset->GetClass()->GetName()) + TEXT("\"");
+	Json += TEXT(",\"material\":\"") + JsonEscape(Asset->GetPathName()) + TEXT("\"");
 	Json += TEXT(",\"nodes\":") + NodesJson;
-	Json += FString::Printf(TEXT(",\"node_count\":%d"), Expressions.Num());
+	Json += FString::Printf(TEXT(",\"node_count\":%d"), NodeCount);
 	Json += TEXT(",\"edges\":") + EdgesJson;
-	Json += TEXT(",\"function_inputs\":") + JsonStringArray(FunctionInputs);
-	Json += TEXT(",\"function_outputs\":") + JsonStringArray(FunctionOutputs);
+	Json += TEXT(",\"textures\":") + TexturesJson;
+	Json += FString::Printf(TEXT(",\"texture_sample_count\":%d"), TextureCount);
+
+	if (Material)
+	{
+		Json += TEXT(",\"blend_mode\":\"")
+			+ JsonEscape(StaticEnum<EBlendMode>()->GetNameStringByValue(Material->BlendMode.GetValue()))
+			+ TEXT("\"");
+		Json += TEXT(",\"material_domain\":\"")
+			+ JsonEscape(StaticEnum<EMaterialDomain>()->GetNameStringByValue(Material->MaterialDomain.GetValue()))
+			+ TEXT("\"");
+		Json += TEXT(",\"shading_model\":\"")
+			+ JsonEscape(GetShadingModelFieldString(Material->GetShadingModels()))
+			+ TEXT("\"");
+		Json += Material->TwoSided ? TEXT(",\"two_sided\":true") : TEXT(",\"two_sided\":false");
+		Json += Material->bUseMaterialAttributes
+			? TEXT(",\"use_material_attributes\":true")
+			: TEXT(",\"use_material_attributes\":false");
+
+		FString OutputsJson = TEXT("{");
+		bool bFirstOutput = true;
+		for (const FNamedMaterialProperty& NamedProperty : GNamedMaterialProperties)
+		{
+			FExpressionInput* Input = Material->GetExpressionInputForProperty(NamedProperty.Property);
+			if (!Input || !Input->Expression) continue;
+
+			FString OutputName;
+			TArray<FExpressionOutput>& Outputs = Input->Expression->GetOutputs();
+			if (Outputs.IsValidIndex(Input->OutputIndex))
+			{
+				OutputName = Outputs[Input->OutputIndex].OutputName.ToString();
+			}
+
+			if (!bFirstOutput) OutputsJson += TEXT(",");
+			bFirstOutput = false;
+			OutputsJson += TEXT("\"") + JsonEscape(NamedProperty.Name) + TEXT("\":{");
+			OutputsJson += TEXT("\"node\":\"") + JsonEscape(Input->Expression->GetName()) + TEXT("\"");
+			OutputsJson += TEXT(",\"node_type\":\"") + JsonEscape(Input->Expression->GetClass()->GetName()) + TEXT("\"");
+			OutputsJson += TEXT(",\"output\":\"") + JsonEscape(OutputName) + TEXT("\"}");
+		}
+		OutputsJson += TEXT("}");
+		Json += TEXT(",\"material_outputs\":") + OutputsJson;
+	}
+	else
+	{
+		Json += TEXT(",\"function_inputs\":") + JsonStringArray(FunctionInputs);
+		Json += TEXT(",\"function_outputs\":") + JsonStringArray(FunctionOutputs);
+	}
 	Json += TEXT("}");
 	return Json;
 }
 
-FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput(UMaterial* Material, UMaterialExpression* ToExpression, const FString& ToInputName)
+static FString BuildMaterialInstanceJson(UMaterialInstanceConstant* Instance)
 {
-	if (!Material)
+	FString Json = TEXT("{\"status\":\"ok\",\"name\":\"") + JsonEscape(Instance->GetName()) + TEXT("\"");
+	Json += TEXT(",\"path\":\"") + JsonEscape(Instance->GetPathName()) + TEXT("\"");
+	Json += TEXT(",\"class\":\"") + JsonEscape(Instance->GetClass()->GetName()) + TEXT("\"");
+	Json += TEXT(",\"parent\":");
+	if (Instance->Parent)
 	{
-		return JsonError(TEXT("Material is null"));
+		Json += TEXT("\"") + JsonEscape(Instance->Parent->GetPathName()) + TEXT("\"");
 	}
+	else
+	{
+		Json += TEXT("null");
+	}
+
+	Json += TEXT(",\"scalar_parameters\":[");
+	for (int32 Index = 0; Index < Instance->ScalarParameterValues.Num(); ++Index)
+	{
+		const FScalarParameterValue& Parameter = Instance->ScalarParameterValues[Index];
+		if (Index > 0) Json += TEXT(",");
+		Json += TEXT("{\"name\":\"") + JsonEscape(Parameter.ParameterInfo.Name.ToString()) + TEXT("\"");
+		Json += TEXT(",\"value\":") + FString::SanitizeFloat(Parameter.ParameterValue) + TEXT("}");
+	}
+	Json += TEXT("]");
+
+	Json += TEXT(",\"vector_parameters\":[");
+	for (int32 Index = 0; Index < Instance->VectorParameterValues.Num(); ++Index)
+	{
+		const FVectorParameterValue& Parameter = Instance->VectorParameterValues[Index];
+		const FLinearColor& Value = Parameter.ParameterValue;
+		if (Index > 0) Json += TEXT(",");
+		Json += TEXT("{\"name\":\"") + JsonEscape(Parameter.ParameterInfo.Name.ToString()) + TEXT("\"");
+		Json += TEXT(",\"value\":{\"r\":") + FString::SanitizeFloat(Value.R);
+		Json += TEXT(",\"g\":") + FString::SanitizeFloat(Value.G);
+		Json += TEXT(",\"b\":") + FString::SanitizeFloat(Value.B);
+		Json += TEXT(",\"a\":") + FString::SanitizeFloat(Value.A) + TEXT("}}");
+	}
+	Json += TEXT("]");
+
+	Json += TEXT(",\"texture_parameters\":[");
+	for (int32 Index = 0; Index < Instance->TextureParameterValues.Num(); ++Index)
+	{
+		const FTextureParameterValue& Parameter = Instance->TextureParameterValues[Index];
+		if (Index > 0) Json += TEXT(",");
+		Json += TEXT("{\"name\":\"") + JsonEscape(Parameter.ParameterInfo.Name.ToString()) + TEXT("\"");
+		Json += TEXT(",\"texture\":");
+		if (Parameter.ParameterValue)
+		{
+			Json += TEXT("\"") + JsonEscape(Parameter.ParameterValue->GetPathName()) + TEXT("\"");
+		}
+		else
+		{
+			Json += TEXT("null");
+		}
+		Json += TEXT("}");
+	}
+	Json += TEXT("]}");
+	return Json;
+}
+
+static TArray<UMaterialExpression*> GetMaterialExpressions(UMaterial* Material)
+{
+	TArray<UMaterialExpression*> Expressions;
+	if (!Material) return Expressions;
+#if ENGINE_MAJOR_VERSION >= 5
+	for (UMaterialExpression* Expression : Material->GetExpressions())
+	{
+		Expressions.Add(Expression);
+	}
+#else
+	Expressions.Append(Material->Expressions);
+#endif
+	return Expressions;
+}
+
+static UMaterialExpression* FindMaterialExpression(UMaterial* Material, const FString& NodeName, TArray<FString>* AvailableNodes = nullptr)
+{
+	UMaterialExpression* Found = nullptr;
+	for (UMaterialExpression* Expression : GetMaterialExpressions(Material))
+	{
+		if (!Expression) continue;
+		if (AvailableNodes) AvailableNodes->Add(Expression->GetName());
+		if (!Found && Expression->GetName().Equals(NodeName, ESearchCase::CaseSensitive)) Found = Expression;
+	}
+	return Found;
+}
+
+static void RecompileEditedMaterial(UMaterial* Material)
+{
+	UMaterialEditingLibrary::RecompileMaterial(Material);
+	Material->MarkPackageDirty();
+}
+
+FString UCliAnythingBridgeLibrary::GetMaterialInfo(UObject* Asset)
+{
+	if (!Asset)
+	{
+		return TEXT("{\"error\":\"Material asset is null\",\"code\":\"MATERIAL_NOT_FOUND\"}");
+	}
+
+	if (UMaterial* Material = Cast<UMaterial>(Asset))
+	{
+		TArray<UMaterialExpression*> Expressions = GetMaterialExpressions(Material);
+		return BuildMaterialGraphJson(Material, Expressions, Material);
+	}
+
+	if (UMaterialFunctionInterface* MaterialFunction = Cast<UMaterialFunctionInterface>(Asset))
+	{
+		TArray<UMaterialExpression*> Expressions;
+#if ENGINE_MAJOR_VERSION >= 5
+		for (UMaterialExpression* Expression : MaterialFunction->GetExpressions())
+		{
+			Expressions.Add(Expression);
+		}
+#else
+		const TArray<UMaterialExpression*>* FunctionExpressions = MaterialFunction->GetFunctionExpressions();
+		if (!FunctionExpressions)
+		{
+			return JsonError(TEXT("MaterialFunction expressions are unavailable"));
+		}
+		Expressions.Append(*FunctionExpressions);
+#endif
+		return BuildMaterialGraphJson(MaterialFunction, Expressions, nullptr);
+	}
+
+	if (UMaterialInstanceConstant* Instance = Cast<UMaterialInstanceConstant>(Asset))
+	{
+		return BuildMaterialInstanceJson(Instance);
+	}
+
+	return TEXT("{\"error\":\"Unsupported material asset class: ")
+		+ JsonEscape(Asset->GetClass()->GetName())
+		+ TEXT("\",\"code\":\"MATERIAL_INFO_UNSUPPORTED_CLASS\",\"asset_class\":\"")
+		+ JsonEscape(Asset->GetClass()->GetName())
+		+ TEXT("\",\"supported_classes\":[\"Material\",\"MaterialFunction\",\"MaterialInstanceConstant\"]}");
+}
+
+static bool IsHlslIdentifier(const FString& Name)
+{
+	if (Name.IsEmpty() || !(FChar::IsAlpha(Name[0]) || Name[0] == TEXT('_'))) return false;
+	for (int32 Index = 1; Index < Name.Len(); ++Index)
+	{
+		if (!(FChar::IsAlnum(Name[Index]) || Name[Index] == TEXT('_'))) return false;
+	}
+	return true;
+}
+
+static FString ReplaceHlslIdentifier(const FString& Code, const FString& OldName, const FString& NewName, bool& bChanged)
+{
+	bChanged = false;
+	if (OldName.IsEmpty() || OldName == NewName) return Code;
+	FString Result;
+	for (int32 Index = 0; Index < Code.Len();)
+	{
+		const bool bMatches = Code.Mid(Index, OldName.Len()) == OldName;
+		const bool bLeftBoundary = Index == 0 || !(FChar::IsAlnum(Code[Index - 1]) || Code[Index - 1] == TEXT('_'));
+		const int32 RightIndex = Index + OldName.Len();
+		const bool bRightBoundary = RightIndex >= Code.Len() || !(FChar::IsAlnum(Code[RightIndex]) || Code[RightIndex] == TEXT('_'));
+		if (bMatches && bLeftBoundary && bRightBoundary)
+		{
+			Result += NewName;
+			Index = RightIndex;
+			bChanged = true;
+		}
+		else
+		{
+			Result.AppendChar(Code[Index++]);
+		}
+	}
+	return Result;
+}
+
+FString UCliAnythingBridgeLibrary::AddMaterialExpression(
+	UMaterial* Material,
+	const FString& ExpressionClass,
+	int32 PosX,
+	int32 PosY,
+	const TMap<FString, FString>& Properties,
+	const TArray<FString>& InputNames)
+{
+	if (!Material) return JsonError(TEXT("Material is null"));
+
+	UClass* FoundClass = nullptr;
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		if (It->GetName() == ExpressionClass && It->IsChildOf(UMaterialExpression::StaticClass()))
+		{
+			FoundClass = *It;
+			break;
+		}
+	}
+	if (!FoundClass || FoundClass->HasAnyClassFlags(CLASS_Abstract))
+	{
+		return JsonError(TEXT("Material expression class not found: ") + ExpressionClass);
+	}
+
+	Material->Modify();
+	UMaterialExpression* Expression = UMaterialEditingLibrary::CreateMaterialExpression(Material, FoundClass, PosX, PosY);
+	if (!Expression) return JsonError(TEXT("CreateMaterialExpression failed: ") + ExpressionClass);
+
+	Expression->Modify();
+	TArray<FString> Warnings;
+	for (const TPair<FString, FString>& Pair : Properties)
+	{
+		FProperty* Property = FindFProperty<FProperty>(Expression->GetClass(), FName(*Pair.Key));
+		if (!Property)
+		{
+			Warnings.Add(Pair.Key + TEXT(": property not found"));
+			continue;
+		}
+
+		void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Expression);
+		bool bSet = true;
+		if (FStrProperty* StringProperty = CastField<FStrProperty>(Property))
+		{
+			StringProperty->SetPropertyValue(ValuePtr, Pair.Value);
+		}
+		else if (FNameProperty* NameProperty = CastField<FNameProperty>(Property))
+		{
+			NameProperty->SetPropertyValue(ValuePtr, FName(*Pair.Value));
+		}
+		else if (FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
+		{
+			if (Pair.Value.Equals(TEXT("true"), ESearchCase::IgnoreCase) || Pair.Value == TEXT("1")) BoolProperty->SetPropertyValue(ValuePtr, true);
+			else if (Pair.Value.Equals(TEXT("false"), ESearchCase::IgnoreCase) || Pair.Value == TEXT("0")) BoolProperty->SetPropertyValue(ValuePtr, false);
+			else bSet = false;
+		}
+		else if (FNumericProperty* NumericProperty = CastField<FNumericProperty>(Property))
+		{
+			if (NumericProperty->IsFloatingPoint()) NumericProperty->SetFloatingPointPropertyValue(ValuePtr, FCString::Atod(*Pair.Value));
+			else if (NumericProperty->IsInteger()) NumericProperty->SetIntPropertyValue(ValuePtr, FCString::Atoi64(*Pair.Value));
+			else bSet = false;
+		}
+		else
+		{
+#if ENGINE_MAJOR_VERSION >= 5
+			bSet = Property->ImportText_Direct(*Pair.Value, ValuePtr, Expression, PPF_None) != nullptr;
+#else
+			bSet = Property->ImportText(*Pair.Value, ValuePtr, PPF_None, Expression) != nullptr;
+#endif
+		}
+		if (!bSet) Warnings.Add(Pair.Key + TEXT("=") + Pair.Value + TEXT(": invalid value"));
+	}
+
+	if (InputNames.Num() > 0)
+	{
+		UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression);
+		if (!Custom)
+		{
+			Warnings.Add(TEXT("input names require MaterialExpressionCustom"));
+		}
+		else
+		{
+			Custom->Inputs.Reset();
+			for (const FString& InputName : InputNames)
+			{
+				FCustomInput Input;
+				Input.InputName = FName(*InputName);
+				Custom->Inputs.Add(Input);
+			}
+		}
+	}
+
+	Expression->PostEditChange();
+	RecompileEditedMaterial(Material);
+	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"add_node\",\"material\":\"") + JsonEscape(Material->GetPathName()) + TEXT("\"");
+	Json += TEXT(",\"node\":{\"name\":\"") + JsonEscape(Expression->GetName()) + TEXT("\",\"type\":\"") + JsonEscape(Expression->GetClass()->GetName()) + TEXT("\"}");
+	if (Warnings.Num() > 0) Json += TEXT(",\"property_warnings\":") + JsonStringArray(Warnings);
+	Json += TEXT("}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::DeleteMaterialExpression(UMaterial* Material, const FString& NodeName)
+{
+	if (!Material) return JsonError(TEXT("Material is null"));
+	TArray<FString> AvailableNodes;
+	UMaterialExpression* Expression = FindMaterialExpression(Material, NodeName, &AvailableNodes);
+	if (!Expression)
+	{
+		return TEXT("{\"error\":\"Node not found: ") + JsonEscape(NodeName) + TEXT("\",\"available_nodes\":") + JsonStringArray(AvailableNodes) + TEXT("}");
+	}
+	const FString DeletedName = Expression->GetName();
+	Material->Modify();
+	Expression->Modify();
+	UMaterialEditingLibrary::DeleteMaterialExpression(Material, Expression);
+	RecompileEditedMaterial(Material);
+	return TEXT("{\"status\":\"ok\",\"action\":\"delete_node\",\"material\":\"") + JsonEscape(Material->GetPathName()) + TEXT("\",\"deleted_node\":\"") + JsonEscape(DeletedName) + TEXT("\"}");
+}
+
+FString UCliAnythingBridgeLibrary::RenameMaterialCustomInput(
+	UMaterial* Material,
+	const FString& NodeName,
+	const FString& OldName,
+	const FString& NewName,
+	bool bUpdateCode)
+{
+	if (!Material) return JsonError(TEXT("Material is null"));
+	if (!IsHlslIdentifier(NewName)) return JsonError(TEXT("New Custom input name is not a valid HLSL identifier: ") + NewName);
+	TArray<FString> AvailableNodes;
+	UMaterialExpression* Expression = FindMaterialExpression(Material, NodeName, &AvailableNodes);
+	if (!Expression)
+	{
+		return TEXT("{\"error\":\"Node not found: ") + JsonEscape(NodeName) + TEXT("\",\"available_nodes\":") + JsonStringArray(AvailableNodes) + TEXT("}");
+	}
+	UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression);
+	if (!Custom) return JsonError(TEXT("Node is not a MaterialExpressionCustom: ") + NodeName);
+
+	TArray<FString> BeforeNames;
+	bool bFound = false;
+	for (const FCustomInput& Input : Custom->Inputs)
+	{
+		const FString InputName = Input.InputName.ToString();
+		BeforeNames.Add(InputName);
+		bFound |= InputName == OldName;
+	}
+	if (!bFound)
+	{
+		return TEXT("{\"error\":\"Custom input not found: ") + JsonEscape(OldName) + TEXT("\",\"inputs\":") + JsonStringArray(BeforeNames) + TEXT("}");
+	}
+	if (OldName != NewName && BeforeNames.Contains(NewName))
+	{
+		return TEXT("{\"error\":\"Custom input already exists: ") + JsonEscape(NewName) + TEXT("\",\"inputs\":") + JsonStringArray(BeforeNames) + TEXT("}");
+	}
+
+	Material->Modify();
+	Custom->Modify();
+	for (FCustomInput& Input : Custom->Inputs)
+	{
+		if (Input.InputName.ToString() == OldName) Input.InputName = FName(*NewName);
+	}
+	bool bCodeUpdated = false;
+	if (bUpdateCode) Custom->Code = ReplaceHlslIdentifier(Custom->Code, OldName, NewName, bCodeUpdated);
+	Custom->PostEditChange();
+	RecompileEditedMaterial(Material);
+
+	TArray<FString> AfterNames;
+	for (const FCustomInput& Input : Custom->Inputs) AfterNames.Add(Input.InputName.ToString());
+	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"rename_custom_input\",\"material\":\"") + JsonEscape(Material->GetPathName()) + TEXT("\"");
+	Json += TEXT(",\"node\":\"") + JsonEscape(NodeName) + TEXT("\",\"old_name\":\"") + JsonEscape(OldName) + TEXT("\",\"new_name\":\"") + JsonEscape(NewName) + TEXT("\"");
+	Json += TEXT(",\"inputs_before\":") + JsonStringArray(BeforeNames) + TEXT(",\"inputs_after\":") + JsonStringArray(AfterNames);
+	Json += TEXT(",\"code_updated\":") + FString(bCodeUpdated ? TEXT("true") : TEXT("false")) + TEXT("}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::ConnectMaterialExpressions(
+	UMaterial* Material,
+	const FString& FromNode,
+	const FString& FromOutputName,
+	const FString& ToNode,
+	const FString& ToInputName)
+{
+	if (!Material) return JsonError(TEXT("Material is null"));
+	TArray<FString> AvailableNodes;
+	UMaterialExpression* FromExpression = FindMaterialExpression(Material, FromNode, &AvailableNodes);
+	UMaterialExpression* ToExpression = FindMaterialExpression(Material, ToNode);
+	if (!FromExpression || !ToExpression)
+	{
+		const FString Missing = !FromExpression ? FromNode : ToNode;
+		return TEXT("{\"error\":\"Node not found: ") + JsonEscape(Missing) + TEXT("\",\"available_nodes\":") + JsonStringArray(AvailableNodes) + TEXT("}");
+	}
+	Material->Modify();
+	if (!UMaterialEditingLibrary::ConnectMaterialExpressions(FromExpression, FromOutputName, ToExpression, ToInputName))
+	{
+		return JsonError(TEXT("ConnectMaterialExpressions returned false"));
+	}
+	RecompileEditedMaterial(Material);
+	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"connect\",\"from\":\"") + JsonEscape(FromNode) + TEXT("\"");
+	Json += TEXT(",\"from_output\":\"") + JsonEscape(FromOutputName) + TEXT("\",\"to\":\"") + JsonEscape(ToNode) + TEXT("\",\"to_input\":\"") + JsonEscape(ToInputName) + TEXT("\"}");
+	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::DisconnectMaterialExpression(UMaterial* Material, const FString& ToNode, const FString& ToInputName)
+{
+	if (!Material) return JsonError(TEXT("Material is null"));
+	TArray<FString> AvailableNodes;
+	UMaterialExpression* ToExpression = FindMaterialExpression(Material, ToNode, &AvailableNodes);
 	if (!ToExpression)
 	{
-		return JsonError(TEXT("Target expression is null"));
+		return TEXT("{\"error\":\"Node not found: ") + JsonEscape(ToNode) + TEXT("\",\"available_nodes\":") + JsonStringArray(AvailableNodes) + TEXT("}");
 	}
 
 	FString Wanted = ToInputName;
@@ -275,10 +784,6 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput(UMaterial* 
 		return JsonError(TEXT("Input pointer is null"));
 	}
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7
-	return TEXT("{\"error\":\"Material disconnect is disabled on Unreal Engine 5.7 because it can corrupt Python/MaterialEditor state and crash on a later material edit.\",\"code\":\"MATERIAL_DISCONNECT_UNSAFE_ENGINE\",\"engine_version\":\"5.7\",\"operation\":\"expression_input\",\"suggestion\":\"Disconnect in the Material Editor UI or use an engine version where this workflow has been validated.\"}");
-#else
-
 	const FString InputName = ToExpression->GetInputName(TargetIndex).ToString();
 	const bool bHadConnection = Input->Expression != nullptr;
 	const FString FromExpressionName = Input->Expression ? Input->Expression->GetName() : FString();
@@ -296,9 +801,7 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput(UMaterial* 
 	Input->MaskB = 0;
 	Input->MaskA = 0;
 
-	// The command layer owns the single RecompileMaterial call after this
-	// mutation, so do not duplicate its edit notifications here.
-	Material->MarkPackageDirty();
+	RecompileEditedMaterial(Material);
 
 	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"disconnect\",\"to_node\":\"") + JsonEscape(ToExpression->GetName()) + TEXT("\"");
 	Json += TEXT(",\"to_input\":\"") + JsonEscape(InputName) + TEXT("\"");
@@ -306,7 +809,6 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput(UMaterial* 
 	Json += TEXT(",\"disconnected_from\":\"") + JsonEscape(FromExpressionName) + TEXT("\"");
 	Json += TEXT(",\"disconnected_from_path\":\"") + JsonEscape(FromExpressionPath) + TEXT("\"}");
 	return Json;
-#endif
 }
 
 FString UCliAnythingBridgeLibrary::GetTextureSourceInfo(UTexture2D* Texture)
@@ -562,46 +1064,31 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.28");
+	return TEXT("1.30");
 }
 
-static bool ResolveMaterialProperty(const FString& PropertyName, EMaterialProperty& OutProperty)
+FString UCliAnythingBridgeLibrary::ConnectMaterialOutput(UMaterial* Material, const FString& FromNode, const FString& FromOutputName, const FString& PropertyName)
 {
-	FString Name = PropertyName;
-	Name.TrimStartAndEndInline();
-	if (Name.Equals(TEXT("BaseColor"), ESearchCase::IgnoreCase)) OutProperty = MP_BaseColor;
-	else if (Name.Equals(TEXT("Metallic"), ESearchCase::IgnoreCase)) OutProperty = MP_Metallic;
-	else if (Name.Equals(TEXT("Specular"), ESearchCase::IgnoreCase)) OutProperty = MP_Specular;
-	else if (Name.Equals(TEXT("Roughness"), ESearchCase::IgnoreCase)) OutProperty = MP_Roughness;
-	else if (Name.Equals(TEXT("Normal"), ESearchCase::IgnoreCase)) OutProperty = MP_Normal;
-	else if (Name.Equals(TEXT("EmissiveColor"), ESearchCase::IgnoreCase)) OutProperty = MP_EmissiveColor;
-	else if (Name.Equals(TEXT("Opacity"), ESearchCase::IgnoreCase)) OutProperty = MP_Opacity;
-	else if (Name.Equals(TEXT("OpacityMask"), ESearchCase::IgnoreCase)) OutProperty = MP_OpacityMask;
-	else if (Name.Equals(TEXT("WorldPositionOffset"), ESearchCase::IgnoreCase)) OutProperty = MP_WorldPositionOffset;
-	else if (Name.Equals(TEXT("AmbientOcclusion"), ESearchCase::IgnoreCase)) OutProperty = MP_AmbientOcclusion;
-	else if (Name.Equals(TEXT("SubsurfaceColor"), ESearchCase::IgnoreCase)) OutProperty = MP_SubsurfaceColor;
-	else return false;
-	return true;
-}
-
-FString UCliAnythingBridgeLibrary::ConnectMaterialOutput(UMaterialExpression* FromExpression, const FString& FromOutputName, const FString& PropertyName)
-{
-	if (!FromExpression)
-	{
-		return JsonError(TEXT("Source expression is null"));
-	}
+	if (!Material) return JsonError(TEXT("Material is null"));
+	TArray<FString> AvailableNodes;
+	UMaterialExpression* FromExpression = FindMaterialExpression(Material, FromNode, &AvailableNodes);
+	if (!FromExpression) return TEXT("{\"error\":\"Node not found: ") + JsonEscape(FromNode) + TEXT("\",\"available_nodes\":") + JsonStringArray(AvailableNodes) + TEXT("}");
 
 	EMaterialProperty Property = MP_MAX;
 	if (!ResolveMaterialProperty(PropertyName, Property))
 	{
 		return JsonError(TEXT("Unknown material property: ") + PropertyName);
 	}
+	Material->Modify();
 	if (!UMaterialEditingLibrary::ConnectMaterialProperty(FromExpression, FromOutputName, Property))
 	{
 		return JsonError(TEXT("ConnectMaterialProperty returned false for: ") + PropertyName);
 	}
+	RecompileEditedMaterial(Material);
 
-	return TEXT("{\"status\":\"ok\",\"action\":\"connect\",\"to\":\"MaterialOutput.")
+	return TEXT("{\"status\":\"ok\",\"action\":\"connect\",\"from\":\"")
+		+ JsonEscape(FromNode)
+		+ TEXT("\",\"to\":\"MaterialOutput.")
 		+ JsonEscape(PropertyName)
 		+ TEXT("\"}");
 }
@@ -619,10 +1106,6 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialOutput(UMaterial* Material,
 		return JsonError(TEXT("Unknown material property: ") + PropertyName);
 	}
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7
-	return TEXT("{\"error\":\"Material disconnect is disabled on Unreal Engine 5.7 because it can corrupt Python/MaterialEditor state and crash on a later material edit.\",\"code\":\"MATERIAL_DISCONNECT_UNSAFE_ENGINE\",\"engine_version\":\"5.7\",\"operation\":\"material_output\",\"suggestion\":\"Disconnect in the Material Editor UI or use an engine version where this workflow has been validated.\"}");
-#else
-
 	FExpressionInput* Input = Material->GetExpressionInputForProperty(Property);
 	if (!Input)
 	{
@@ -632,13 +1115,30 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialOutput(UMaterial* Material,
 	Material->Modify();
 	Input->Expression = nullptr;
 	Input->OutputIndex = 0;
-	// Defer the single PreEditChange/PostEditChange pair to RecompileMaterial.
-	Material->MarkPackageDirty();
+	RecompileEditedMaterial(Material);
 
 	return TEXT("{\"status\":\"ok\",\"action\":\"disconnect\",\"to\":\"MaterialOutput.")
 		+ JsonEscape(PropertyName)
 		+ TEXT("\"}");
-#endif
+}
+
+FString UCliAnythingBridgeLibrary::RecompileMaterial(UMaterial* Material)
+{
+	if (!Material) return JsonError(TEXT("Material is null"));
+	Material->Modify();
+	RecompileEditedMaterial(Material);
+	const TArray<FString> Errors = GetMaterialCompileErrors(Material);
+	if (Errors.Num() > 0)
+	{
+		return TEXT("{\"status\":\"error\",\"action\":\"recompile\",\"material\":\"")
+			+ JsonEscape(Material->GetPathName())
+			+ TEXT("\",\"error\":\"Material compilation failed.\",\"compile_errors\":")
+			+ JsonStringArray(Errors)
+			+ TEXT("}");
+	}
+	return TEXT("{\"status\":\"ok\",\"action\":\"recompile\",\"material\":\"")
+		+ JsonEscape(Material->GetPathName())
+		+ TEXT("\"}");
 }
 
 FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)

@@ -17,7 +17,7 @@ class TestMaterials:
         mock_api.get_property.return_value = properties or {"error": "not found"}
         return mock_api
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_get_material_info_with_nodes(self, mock_exec_script):
         """Test that material info merges node data from Python script."""
         from cli_anything.unreal.core.materials import get_material_info
@@ -76,7 +76,7 @@ class TestMaterials:
         assert result["shading_model"] == "ShadingModel.MSM_DefaultLit"
         assert result["two_sided"] is False
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_get_material_info_material_instance(self, mock_exec_script):
         """Test material info for MaterialInstanceConstant with parameters."""
         from cli_anything.unreal.core.materials import get_material_info
@@ -118,7 +118,7 @@ class TestMaterials:
         assert len(result["texture_parameters"]) == 1
         assert result["texture_parameters"][0]["texture"] == "/Game/Textures/T_Diffuse"
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_get_material_info_reads_material_function_graph(self, mock_exec_script):
         from cli_anything.unreal.core.materials import get_material_info
 
@@ -150,29 +150,30 @@ class TestMaterials:
         assert result["function_inputs"] == ["Input"]
         assert result["function_outputs"] == ["Output"]
 
-    @patch("cli_anything.unreal.core.script_runner.run_python_code")
-    def test_get_material_info_detail_uses_resolver_for_package_path(self, mock_run):
+    def test_get_material_info_uses_object_path_for_native_bridge(self):
         from cli_anything.unreal.core.materials import get_material_info
 
-        mock_run.return_value = {
+        mock_api = self._make_mock_api()
+        mock_api.call_function.return_value = {"ReturnValue": json.dumps({
+            "name": "MI_Drone",
             "nodes": [],
             "node_count": 0,
             "path": "/Game/Drone/MI_Drone.MI_Drone",
             "class": "MaterialInstanceConstant",
-        }
-        mock_api = self._make_mock_api(
-            assets={
-                "Assets": [{"Name": "MI_Drone", "Path": "/Game/Drone/MI_Drone.MI_Drone",
-                            "Class": "/Script/Engine.MaterialInstanceConstant", "Metadata": {}}]
-            }
-        )
+        })}
 
         result = get_material_info(mock_api, "/Game/Drone/MI_Drone")
 
-        script = mock_run.call_args.args[1]
-        assert "mat, loaded_asset_path, tried_asset_paths = _cli_load_material" in script
-        assert 'material_candidates = ["/Game/Drone/MI_Drone", "/Game/Drone/MI_Drone.MI_Drone"]' in script
-        assert "detail_note" not in result
+        assert result["name"] == "MI_Drone"
+        load_call, bridge_call = mock_api.call_function.call_args_list
+        assert load_call.args[1] == "LoadAsset"
+        assert load_call.args[2] == {"AssetPath": "/Game/Drone/MI_Drone"}
+        assert bridge_call.args == (
+            "/Script/CliAnythingBridge.Default__CliAnythingBridgeLibrary",
+            "GetMaterialInfo",
+            {"Asset": "/Game/Drone/MI_Drone.MI_Drone"},
+        )
+        assert bridge_call.kwargs == {"timeout": 30}
 
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_material_hlsl_code_uses_resolver_for_package_path(self, mock_run):
@@ -381,69 +382,70 @@ class TestMaterials:
         assert data["status"] == "error"
         assert data["code"] == "SHADER_DUMP_WRITE_FAILED"
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
-    def test_get_material_info_script_fallback(self, mock_exec_script):
-        """Test graceful fallback when Python script is unavailable."""
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
+    def test_get_material_info_reports_bridge_failure(self, mock_exec_script):
         from cli_anything.unreal.core.materials import get_material_info
 
-        mock_api = self._make_mock_api(
-            assets={
-                "Assets": [{"Name": "TestMat", "Path": "/Game/TestMat.TestMat",
-                            "Class": "/Script/Engine.Material",
-                            "Metadata": {}}]
-            },
-            describe={
-                "Properties": [{"Name": "BlendMode", "Type": "EBlendMode"}],
-                "Functions": [{"Name": "SetBlendMode"}],
-            },
-        )
-        mock_api.is_alive.return_value = True
-
-        # Script fails (Python plugin not enabled)
+        mock_api = self._make_mock_api()
         mock_exec_script.return_value = {
-            "error": "Script execution timed out or produced no output",
+            "error": "Native material inspection requires CliAnythingBridge 1.29 or newer.",
+            "code": "MATERIAL_INFO_BRIDGE_REQUIRED",
         }
 
         result = get_material_info(mock_api, "/Game/TestMat")
 
-        # Should still have RC API data
-        assert result["name"] == "TestMat"
-        # Should have detail_note explaining script failure
-        assert "detail_note" in result
-        assert "Python script unavailable" in result["detail_note"]
-        # Should NOT have nodes (script failed)
-        assert "nodes" not in result
+        assert result["code"] == "MATERIAL_INFO_BRIDGE_REQUIRED"
+        assert "CliAnythingBridge 1.29" in result["error"]
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_get_material_info_raises_when_editor_drops_during_detail(self, mock_exec_script):
         """A transport failure must not become a successful empty inspection."""
         from cli_anything.unreal.core.materials import get_material_info
 
-        mock_api = self._make_mock_api(assets={"Assets": []})
-        mock_api.is_alive.return_value = False
-        mock_exec_script.return_value = {
-            "error": "HTTPConnectionPool: WinError 10061 connection actively refused",
-        }
+        mock_api = self._make_mock_api()
+        mock_exec_script.side_effect = ConnectionError(
+            "HTTPConnectionPool: WinError 10061 connection actively refused"
+        )
 
         with pytest.raises(ConnectionError, match="WinError 10061"):
             get_material_info(mock_api, "/Engine/EngineDebugMaterials/GeomMaterial")
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
-    def test_get_material_info_raises_when_editor_drops_during_search(self, mock_exec_script):
-        """Asset-search transport failures are propagated before the fallback runs."""
-        from cli_anything.unreal.core.materials import get_material_info
+    def test_material_bridge_call_raises_when_editor_drops(self):
+        from cli_anything.unreal.core.materials import _call_material_info_bridge
 
-        mock_api = self._make_mock_api(
-            assets={"error": "HTTPConnectionPool: WinError 10061 connection actively refused"},
-        )
+        mock_api = self._make_mock_api()
+        mock_api.call_function.return_value = {
+            "error": "HTTPConnectionPool: WinError 10061 connection actively refused",
+        }
         mock_api.is_alive.return_value = False
 
         with pytest.raises(ConnectionError, match="WinError 10061"):
-            get_material_info(mock_api, "/Game/TestMat")
+            _call_material_info_bridge(mock_api, "/Game/TestMat")
 
-        mock_exec_script.assert_not_called()
+    def test_material_info_loads_asset_before_native_bridge_call(self):
+        from cli_anything.unreal.core.materials import _call_material_info_bridge
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+        mock_api = self._make_mock_api()
+        mock_api.call_function.side_effect = [
+            {"ReturnValue": "/Game/TestMat.TestMat"},
+            {"ReturnValue": json.dumps({
+                "status": "ok",
+                "name": "TestMat",
+                "class": "Material",
+                "node_count": 0,
+            })},
+        ]
+
+        result = _call_material_info_bridge(mock_api, "/Game/TestMat")
+
+        assert result["status"] == "ok"
+        load_call, bridge_call = mock_api.call_function.call_args_list
+        assert load_call.args[1] == "LoadAsset"
+        assert load_call.args[2] == {"AssetPath": "/Game/TestMat"}
+        assert bridge_call.args[1] == "GetMaterialInfo"
+        assert bridge_call.args[2] == {"Asset": "/Game/TestMat.TestMat"}
+
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_analyze_material_structure(self, mock_exec_script):
         """Test that analyze_material returns correct structure."""
         from cli_anything.unreal.core.materials import analyze_material
@@ -470,7 +472,7 @@ class TestMaterials:
         assert exc_info.value.code == "MATERIAL_ANALYZE_FAILED"
         assert exc_info.value.message == "timeout"
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_analyze_material_high_textures(self, mock_exec_script):
         """Test detection of high texture sample count."""
         from cli_anything.unreal.core.materials import analyze_material
@@ -499,7 +501,7 @@ class TestMaterials:
         assert any("exceeds" in issue.lower() or "texture sample" in issue.lower()
                     for issue in result["issues"])
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_analyze_material_attributes_is_connected_output(self, mock_exec_script):
         """A Material Attributes master must not be reported as output-less."""
         from cli_anything.unreal.core.materials import analyze_material
@@ -541,7 +543,7 @@ class TestMaterials:
         assert result["stats"]["connected_outputs"] == ["MaterialAttributes"]
         assert not any("No material output connections" in warning for warning in result["warnings"])
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_analyze_material_high_node_count(self, mock_exec_script):
         """Test detection of very high node count."""
         from cli_anything.unreal.core.materials import analyze_material
@@ -565,7 +567,7 @@ class TestMaterials:
         result = analyze_material(mock_api, "/Game/ComplexMat")
         assert any("node count" in issue.lower() for issue in result["issues"])
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_analyze_material_missing_texture(self, mock_exec_script):
         """Test detection of missing texture references."""
         from cli_anything.unreal.core.materials import analyze_material
@@ -592,7 +594,7 @@ class TestMaterials:
         result = analyze_material(mock_api, "/Game/BrokenMat")
         assert any("missing texture" in issue.lower() for issue in result["issues"])
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_analyze_material_error(self, mock_exec_script):
         """Test handling of material not found."""
         from cli_anything.unreal.core.materials import analyze_material
@@ -610,7 +612,7 @@ class TestMaterials:
         assert exc_info.value.code == "MATERIAL_ANALYZE_FAILED"
         assert exc_info.value.message == "timeout"
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_material_texture_list_with_nodes(self, mock_exec_script):
         """Test texture list merges node textures and parameter textures."""
         from cli_anything.unreal.core.materials import get_material_texture_list
@@ -637,7 +639,7 @@ class TestMaterials:
         assert "textures" in result
         assert len(result["textures"]) == 2  # 1 node texture + 1 parameter texture
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_material_info_cli(self, mock_exec_script):
         """Test material info via CLI with --json output."""
         from click.testing import CliRunner
@@ -671,7 +673,7 @@ class TestMaterials:
             assert "nodes" in data["result"]
             assert data["result"]["node_count"] == 1
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_material_stats_cli_rejects_material_instance(self, mock_exec_script):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -705,40 +707,35 @@ class TestMaterials:
         assert data["details"]["parent"] == "/Game/M_Master.M_Master"
         assert "material info" in data["suggestion"]
 
-    @patch("cli_anything.unreal.core.script_runner.run_python_code")
-    def test_material_info_is_explicitly_read_only(self, mock_run):
+    def test_material_info_is_direct_remote_control_read(self):
         from cli_anything.unreal.core.materials import get_material_info
-        from cli_anything.unreal.core.script_runner import SavePolicy
 
-        mock_run.return_value = {"nodes": [], "node_count": 0}
-        mock_api = self._make_mock_api(
-            assets={
-                "Assets": [
-                    {
-                        "Name": "M_Test",
-                        "Path": "/Game/M_Test.M_Test",
-                        "Class": "/Script/Engine.Material",
-                        "Metadata": {},
-                    }
-                ]
-            }
-        )
+        mock_api = self._make_mock_api()
+        mock_api.call_function.return_value = {
+            "ReturnValue": json.dumps({"nodes": [], "node_count": 0}),
+        }
 
         result = get_material_info(mock_api, "/Game/M_Test")
 
         assert result["node_count"] == 0
-        assert mock_run.call_args.kwargs["save_policy"] is SavePolicy.NEVER
-        assert mock_run.call_args.kwargs["target_packages"] is None
+        load_call, bridge_call = mock_api.call_function.call_args_list
+        assert load_call.args[1] == "LoadAsset"
+        assert bridge_call.args == (
+            "/Script/CliAnythingBridge.Default__CliAnythingBridgeLibrary",
+            "GetMaterialInfo",
+            {"Asset": "/Game/M_Test.M_Test"},
+        )
+        assert bridge_call.kwargs == {"timeout": 30}
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_material_info_cli_reports_editor_unreachable_after_connection_drop(self, mock_exec_script):
         """The CLI exposes a mid-query disconnect as a top-level protocol error."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
-        mock_exec_script.return_value = {
-            "error": "HTTPConnectionPool: WinError 10061 connection actively refused",
-        }
+        mock_exec_script.side_effect = ConnectionError(
+            "HTTPConnectionPool: WinError 10061 connection actively refused"
+        )
         mock_api = self._make_mock_api(assets={"Assets": []})
         mock_api.is_alive.return_value = False
 
@@ -755,7 +752,7 @@ class TestMaterials:
         assert data["code"] == "EDITOR_UNREACHABLE"
         assert "WinError 10061" in data["message"]
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_material_info_cli_reads_material_function(self, mock_exec_script):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -789,7 +786,7 @@ class TestMaterials:
         assert data["result"]["node_count"] == 1
         assert data["result"]["function_outputs"] == ["Output"]
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_material_graph_cli_reads_material_function_topology(self, mock_exec_script):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -826,14 +823,14 @@ class TestMaterials:
         assert data["result"]["connected_nodes"] == ["Input", "Output"]
         assert data["result"]["orphan_nodes"] == []
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_material_info_cli_reports_stale_bridge_for_material_function(self, mock_exec_script):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
         mock_exec_script.return_value = {
-            "error": "MaterialFunction graph inspection requires the current CliAnythingBridge.",
-            "code": "MATERIAL_FUNCTION_GRAPH_BRIDGE_REQUIRED",
+            "error": "Native material inspection requires CliAnythingBridge 1.29 or newer.",
+            "code": "MATERIAL_INFO_BRIDGE_REQUIRED",
             "material": "/Game/MF_Test.MF_Test",
             "asset_class": "MaterialFunction",
             "suggestion": "Run 'editor plugin-upgrade', then retry material info.",
@@ -848,7 +845,7 @@ class TestMaterials:
 
         assert result.exit_code == 3
         data = json.loads(result.output)
-        assert data["code"] == "MATERIAL_FUNCTION_GRAPH_BRIDGE_REQUIRED"
+        assert data["code"] == "MATERIAL_INFO_BRIDGE_REQUIRED"
         assert "plugin-upgrade" in data["suggestion"]
 
 
@@ -860,7 +857,7 @@ class TestMaterials:
 class TestMaterialConnections:
     """Tests for get_material_connections — BFS connected/orphan logic."""
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_connections_with_edges(self, mock_exec_script):
         """Nodes reachable from material outputs via edges are connected."""
         from cli_anything.unreal.core.materials import get_material_connections
@@ -891,7 +888,7 @@ class TestMaterialConnections:
         assert result["orphan_count"] == 1
         assert len(result["edges"]) == 1
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_connections_material_attributes_reaches_function_chain(self, mock_exec_script):
         """Material Attributes is a real material-output seed."""
         from cli_anything.unreal.core.materials import get_material_connections
@@ -925,7 +922,7 @@ class TestMaterialConnections:
         assert result["orphan_nodes"] == ["Unused"]
         assert "MaterialAttributes" in result["material_outputs"]
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_connections_custom_output_node(self, mock_exec_script):
         """Custom output nodes (e.g. SLW) are treated as seeds."""
         from cli_anything.unreal.core.materials import get_material_connections
@@ -952,7 +949,7 @@ class TestMaterialConnections:
         assert set(result["connected_nodes"]) == {"D", "SLWOutput"}
         assert result["orphan_nodes"] == ["E_Orphan"]
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_connections_deep_chain(self, mock_exec_script):
         """Multi-hop chains are fully traversed."""
         from cli_anything.unreal.core.materials import get_material_connections
@@ -982,7 +979,7 @@ class TestMaterialConnections:
         assert set(result["connected_nodes"]) == {"Tex", "Custom", "Mul"}
         assert result["orphan_nodes"] == []
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_info_bridge")
     def test_connections_no_edges_fallback(self, mock_exec_script):
         """When no edges data, only material_outputs seeds are connected."""
         from cli_anything.unreal.core.materials import get_material_connections
@@ -1031,7 +1028,54 @@ class TestMaterialEditing:
             "/Game/Env/M_Test",
         ]
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_native_edit_calls_bridge_then_saves_only_target(self):
+        from cli_anything.unreal.core.materials import _call_material_edit_bridge
+
+        api = MagicMock()
+        api.call_function.side_effect = [
+            {"ReturnValue": json.dumps({"status": "ok", "action": "recompile"})},
+            {"ReturnValue": True},
+        ]
+
+        result = _call_material_edit_bridge(
+            api,
+            "RecompileMaterial",
+            "/Game/Env/M_Test.M_Test",
+        )
+
+        assert result["saved"] is True
+        assert result["saved_packages"] == ["/Game/Env/M_Test"]
+        bridge_call, save_call = api.call_function.call_args_list
+        assert bridge_call.args[1] == "RecompileMaterial"
+        assert bridge_call.args[2] == {
+            "Material": "/Game/Env/M_Test.M_Test",
+        }
+        assert bridge_call.kwargs["generate_transaction"] is True
+        assert save_call.args[1] == "SaveAsset"
+        assert save_call.args[2] == {
+            "AssetToSave": "/Game/Env/M_Test",
+            "bOnlyIfIsDirty": False,
+        }
+
+    def test_native_edit_reports_target_save_failure(self):
+        from cli_anything.unreal.core.materials import _call_material_edit_bridge
+
+        api = MagicMock()
+        api.call_function.side_effect = [
+            {"ReturnValue": json.dumps({"status": "ok", "action": "connect"})},
+            {"ReturnValue": False},
+        ]
+
+        result = _call_material_edit_bridge(
+            api,
+            "ConnectMaterialExpressions",
+            "/Game/M_Test",
+        )
+
+        assert result["code"] == "MATERIAL_SAVE_FAILED"
+        assert result["edit_result"]["status"] == "ok"
+
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_add_node(self, mock_exec):
         from cli_anything.unreal.core.materials import add_material_node
 
@@ -1047,11 +1091,11 @@ class TestMaterialEditing:
 
         assert result["status"] == "ok"
         assert result["node"]["type"] == "MaterialExpressionConstant3Vector"
-        # Verify _exec_material_script was called with correct template args
+        # Verify the native bridge receives typed values, not Python source.
         call_kwargs = mock_exec.call_args
         assert "MaterialExpressionConstant3Vector" in str(call_kwargs)
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_add_node_invalid_class(self, mock_exec):
         from cli_anything.unreal.core.materials import add_material_node
 
@@ -1063,7 +1107,7 @@ class TestMaterialEditing:
         result = add_material_node(api, "/Game/M_Test", "FakeClass")
         assert "error" in result
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_rename_custom_input(self, mock_exec):
         from cli_anything.unreal.core.materials import rename_custom_input
 
@@ -1089,14 +1133,15 @@ class TestMaterialEditing:
 
         assert result["status"] == "ok"
         assert result["new_name"] == "OutlineWidthPx"
-        script_template = mock_exec.call_args.args[1]
-        assert 'set_editor_property("inputs", inputs)' in script_template
-        assert "re.sub" in script_template
-        assert mock_exec.call_args.kwargs["old_name"] == repr("OutlineWidth")
-        assert mock_exec.call_args.kwargs["new_name"] == repr("OutlineWidthPx")
-        assert mock_exec.call_args.kwargs["update_code"] == repr(True)
+        assert mock_exec.call_args.args[1] == "RenameMaterialCustomInput"
+        assert mock_exec.call_args.args[3] == {
+            "NodeName": "Custom_0",
+            "OldName": "OutlineWidth",
+            "NewName": "OutlineWidthPx",
+            "bUpdateCode": True,
+        }
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_rename_custom_input_without_code_update(self, mock_exec):
         from cli_anything.unreal.core.materials import rename_custom_input
 
@@ -1117,9 +1162,9 @@ class TestMaterialEditing:
         )
 
         assert result["status"] == "ok"
-        assert mock_exec.call_args.kwargs["update_code"] == repr(False)
+        assert mock_exec.call_args.args[3]["bUpdateCode"] is False
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_delete_node(self, mock_exec):
         from cli_anything.unreal.core.materials import delete_material_node
 
@@ -1135,7 +1180,7 @@ class TestMaterialEditing:
         assert result["status"] == "ok"
         assert result["deleted_node"] == "Constant3Vector_0"
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_delete_node_not_found(self, mock_exec):
         from cli_anything.unreal.core.materials import delete_material_node
 
@@ -1149,7 +1194,7 @@ class TestMaterialEditing:
         assert "error" in result
         assert "available_nodes" in result
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_connect_nodes(self, mock_exec):
         from cli_anything.unreal.core.materials import connect_material_nodes
 
@@ -1168,7 +1213,7 @@ class TestMaterialEditing:
         assert result["status"] == "ok"
         assert "BaseColor" in result["to"]
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_connect_between_expressions(self, mock_exec):
         from cli_anything.unreal.core.materials import connect_material_nodes
 
@@ -1189,7 +1234,7 @@ class TestMaterialEditing:
         assert result["status"] == "ok"
         assert result["to"] == "TextureSample_0"
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_disconnect_nodes(self, mock_exec):
         from cli_anything.unreal.core.materials import disconnect_material_nodes
 
@@ -1206,12 +1251,10 @@ class TestMaterialEditing:
             "Constant3Vector_0", "", "__material_output__", "BaseColor",
         )
         assert result["status"] == "ok"
-        script_template = mock_exec.call_args.args[1]
-        assert script_template.index("disconnect_output(mat") < script_template.index(
-            "mel.recompile_material(mat)"
-        )
+        assert mock_exec.call_args.args[1] == "DisconnectMaterialOutput"
+        assert mock_exec.call_args.args[3] == {"PropertyName": "BaseColor"}
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_disconnect_between_expressions_uses_bridge(self, mock_exec):
         from cli_anything.unreal.core.materials import disconnect_material_nodes
 
@@ -1230,9 +1273,11 @@ class TestMaterialEditing:
         )
 
         assert result["status"] == "ok"
-        script_template = mock_exec.call_args.args[1]
-        assert "disconnect_material_expression_input" in script_template
-        assert "disconnect_material_expression(" not in script_template
+        assert mock_exec.call_args.args[1] == "DisconnectMaterialExpression"
+        assert mock_exec.call_args.args[3] == {
+            "ToNode": "Multiply_0",
+            "ToInputName": "A",
+        }
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_set_param_scalar(self, mock_exec):
@@ -1350,7 +1395,7 @@ class TestMaterialEditing:
         assert "error" in result
         assert "MaterialInstanceConstant" in result["error"]
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_recompile(self, mock_exec):
         from cli_anything.unreal.core.materials import recompile_material
 
@@ -1363,25 +1408,28 @@ class TestMaterialEditing:
         api = MagicMock()
         result = recompile_material(api, "/Game/M_Test")
         assert result["status"] == "ok"
-        assert mock_exec.call_args.kwargs["timeout"] == 120.0
-        from cli_anything.unreal.core.script_runner import SavePolicy
+        mock_exec.assert_called_once_with(
+            api,
+            "RecompileMaterial",
+            "/Game/M_Test",
+            timeout=120,
+        )
 
-        assert mock_exec.call_args.kwargs["save_policy"] is SavePolicy.TARGET_PACKAGES
-        assert mock_exec.call_args.kwargs["target_packages"] == ["/Game/M_Test"]
-
-    @patch("cli_anything.unreal.core.script_runner.run_python_code")
-    def test_recompile_uses_material_resolver(self, mock_run):
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
+    def test_recompile_uses_material_object_path(self, mock_edit):
         from cli_anything.unreal.core.materials import recompile_material
 
-        mock_run.return_value = {"status": "ok", "action": "recompile"}
+        mock_edit.return_value = {"status": "ok", "action": "recompile"}
+        api = MagicMock()
 
-        recompile_material(MagicMock(), "/Game/Env/M_Test.M_Test")
+        recompile_material(api, "/Game/Env/M_Test.M_Test")
 
-        script = mock_run.call_args.args[1]
-        assert 'material_path = "/Game/Env/M_Test.M_Test"' in script
-        assert 'material_candidates = ["/Game/Env/M_Test.M_Test", "/Game/Env/M_Test"]' in script
-        assert "_cli_load_material" in script
-        assert '"material": loaded_asset_path' in script
+        mock_edit.assert_called_once_with(
+            api,
+            "RecompileMaterial",
+            "/Game/Env/M_Test.M_Test",
+            timeout=120,
+        )
 
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_get_errors_uses_material_resolver(self, mock_run):
@@ -1408,7 +1456,7 @@ class TestMaterialEditing:
         assert result["source"] == "plugin"
         mock_deploy.assert_not_called()
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_recompile_not_found(self, mock_exec):
         from cli_anything.unreal.core.materials import recompile_material
 
@@ -1420,7 +1468,7 @@ class TestMaterialEditing:
 
     # ── CLI command tests ──────────────────────────────────────────────
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_add_node_cli(self, mock_exec):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -1445,7 +1493,7 @@ class TestMaterialEditing:
             assert data["result"]["status"] == "ok"
             assert data["result"]["node"]["type"] == "MaterialExpressionConstant"
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_rename_custom_input_cli(self, mock_exec):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -1475,7 +1523,7 @@ class TestMaterialEditing:
             assert data["result"]["status"] == "ok"
             assert data["result"]["new_name"] == "OutlineWidthPx"
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_connect_cli(self, mock_exec):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -1554,7 +1602,7 @@ class TestMaterialEditing:
         assert data["message"] == "Material not found: /Game/Missing"
         assert data["details"]["tried"] == ["/Game/Missing", "/Game/Missing.Missing"]
 
-    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_recompile_cli(self, mock_exec):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli

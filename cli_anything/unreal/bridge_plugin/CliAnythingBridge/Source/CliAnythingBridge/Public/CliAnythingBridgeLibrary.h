@@ -2,12 +2,9 @@
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
-#include "UObject/UnrealType.h"
 #include "CliAnythingBridgeLibrary.generated.h"
 
 class UMaterial;
-class UMaterialExpression;
-class UMaterialFunctionInterface;
 class UMaterialInterface;
 class UBlueprint;
 class UTexture2D;
@@ -28,34 +25,38 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static TArray<FString> GetMaterialCompileErrors(UMaterialInterface* Material);
 
-	/**
-	 * Returns MaterialFunction nodes and expression-input edges as JSON.
-	 * Python can enumerate function expressions but cannot read protected
-	 * FExpressionInput connections.
-	 */
+	/** Returns Material, MaterialFunction, or MaterialInstance details as JSON. */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
-	static FString GetMaterialFunctionGraph(UMaterialFunctionInterface* MaterialFunction);
+	static FString GetMaterialInfo(UObject* Asset);
 
-	/**
-	 * Disconnects a material expression input pin.
-	 * UE Python exposes ConnectMaterialExpressions but no reliable disconnect API,
-	 * and FExpressionInput properties are protected from Python.
-	 * Returns MATERIAL_DISCONNECT_UNSAFE_ENGINE without mutation on UE 5.7.
-	 * Returns a JSON result string.
-	 */
+	/** Native material graph edits. Inputs use stable class/node/pin names. */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
-	static FString DisconnectMaterialExpressionInput(UMaterial* Material, UMaterialExpression* ToExpression, const FString& ToInputName);
+	static FString AddMaterialExpression(UMaterial* Material, const FString& ExpressionClass, int32 PosX, int32 PosY, const TMap<FString, FString>& Properties, const TArray<FString>& InputNames);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString DeleteMaterialExpression(UMaterial* Material, const FString& NodeName);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString RenameMaterialCustomInput(UMaterial* Material, const FString& NodeName, const FString& OldName, const FString& NewName, bool bUpdateCode);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString ConnectMaterialExpressions(UMaterial* Material, const FString& FromNode, const FString& FromOutputName, const FString& ToNode, const FString& ToInputName);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString DisconnectMaterialExpression(UMaterial* Material, const FString& ToNode, const FString& ToInputName);
 
 	/**
 	 * Connects or disconnects a material output by stable display name.
 	 * UE 4.26 omits some EMaterialProperty values from its Python enum.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
-	static FString ConnectMaterialOutput(UMaterialExpression* FromExpression, const FString& FromOutputName, const FString& PropertyName);
+	static FString ConnectMaterialOutput(UMaterial* Material, const FString& FromNode, const FString& FromOutputName, const FString& PropertyName);
 
-	/** Returns MATERIAL_DISCONNECT_UNSAFE_ENGINE without mutation on UE 5.7. */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString DisconnectMaterialOutput(UMaterial* Material, const FString& PropertyName);
+
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString RecompileMaterial(UMaterial* Material);
 
 	/**
 	 * Gets the absolute screen coordinates (X, Y, Width, Height) of the active level viewport.
