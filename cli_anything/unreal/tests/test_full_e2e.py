@@ -1622,10 +1622,119 @@ result = {{"status": "ok", "deleted": deleted}}
         finally:
             self._cleanup(api)
 
+@pytest.fixture
+def scene_fixture_actors(api):
+    """Create deterministic scene actors and remove only those actors afterward."""
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    setup = run_python_code(api, '''
+import unreal
+
+subsystem_class = getattr(unreal, "EditorActorSubsystem", None)
+if subsystem_class is not None:
+    actor_subsystem = unreal.get_editor_subsystem(subsystem_class)
+else:
+    actor_subsystem = None
+
+created = []
+
+def spawn(actor_class, location):
+    if actor_subsystem is not None:
+        actor = actor_subsystem.spawn_actor_from_class(actor_class, location)
+    else:
+        actor = unreal.EditorLevelLibrary.spawn_actor_from_class(actor_class, location)
+    if actor is None:
+        raise RuntimeError("Could not spawn " + actor_class.get_name())
+    created.append(actor)
+    return actor
+
+def spawn_from_object(asset, location):
+    if actor_subsystem is not None:
+        actor = actor_subsystem.spawn_actor_from_object(asset, location)
+    else:
+        actor = unreal.EditorLevelLibrary.spawn_actor_from_object(asset, location)
+    if actor is None:
+        raise RuntimeError("Could not spawn actor from " + asset.get_path_name())
+    created.append(actor)
+    return actor
+
+def destroy(actor):
+    if actor_subsystem is not None:
+        actor_subsystem.destroy_actor(actor)
+    else:
+        unreal.EditorLevelLibrary.destroy_actor(actor)
+
+try:
+    actor = spawn(unreal.Actor, unreal.Vector(0, 0, 0))
+    actor.set_actor_label("UE CLI E2E LabelOnly Search")
+
+    light = spawn(unreal.DirectionalLight, unreal.Vector(200, 0, 0))
+    light.set_actor_label("UE CLI E2E Directional Light")
+
+    cube = unreal.EditorAssetLibrary.load_asset("/Engine/BasicShapes/Cube.Cube")
+    if cube is None:
+        raise RuntimeError("Could not load /Engine/BasicShapes/Cube.Cube")
+    static_mesh_actor = spawn_from_object(cube, unreal.Vector(400, 0, 0))
+    static_mesh_actor.set_actor_label("UE CLI E2E Static Mesh")
+
+    result = {
+        "status": "ok",
+        "actor_path": actor.get_path_name(),
+        "actor_name": actor.get_name(),
+        "actor_label": actor.get_actor_label(),
+        "light_path": light.get_path_name(),
+        "mesh_path": static_mesh_actor.get_path_name(),
+        "paths": [item.get_path_name() for item in created],
+    }
+except Exception as exc:
+    paths = [item.get_path_name() for item in created]
+    for item in reversed(created):
+        destroy(item)
+    result = {"status": "error", "error": str(exc), "cleaned_paths": paths}
+''', save=False)
+    assert setup.get("status") == "ok", setup
+    paths = setup.get("paths") or []
+    assert len(paths) == 3, setup
+
+    try:
+        yield setup
+    finally:
+        cleanup = run_python_code(api, f'''
+import unreal
+
+targets = set({paths!r})
+subsystem_class = getattr(unreal, "EditorActorSubsystem", None)
+if subsystem_class is not None:
+    actor_subsystem = unreal.get_editor_subsystem(subsystem_class)
+    actors = actor_subsystem.get_all_level_actors()
+else:
+    actor_subsystem = None
+    actors = unreal.EditorLevelLibrary.get_all_level_actors()
+
+destroyed = []
+for actor in actors:
+    path = actor.get_path_name()
+    if path not in targets:
+        continue
+    if actor_subsystem is not None:
+        actor_subsystem.destroy_actor(actor)
+    else:
+        unreal.EditorLevelLibrary.destroy_actor(actor)
+    destroyed.append(path)
+
+result = {{"status": "ok", "destroyed": destroyed}}
+''', save=False)
+        assert cleanup.get("status") == "ok", cleanup
+        assert set(cleanup.get("destroyed") or []) == set(paths), cleanup
+
 
 @pytest.mark.e2e
 class TestSceneE2E:
     """Test scene/level actor queries against running editor."""
+
+    @pytest.fixture(autouse=True)
+    def _prepare_scene(self, scene_fixture_actors):
+        self.scene = scene_fixture_actors
 
     def test_list_actors(self, api):
         from cli_anything.unreal.core.scene import list_actors
@@ -1633,7 +1742,10 @@ class TestSceneE2E:
         result = list_actors(api)
         assert "actors" in result
         assert isinstance(result["actors"], list)
-        assert result["count"] >= 0
+        assert any(
+            actor["path"] == self.scene["actor_path"]
+            for actor in result["actors"]
+        )
 
     def test_list_actors_cli(self, cli_runner, api_port):
         from cli_anything.unreal.unreal_cli import cli
@@ -1647,17 +1759,19 @@ class TestSceneE2E:
         assert data["status"] == "success"
         assert "actors" in data["result"]
         assert "count" in data["result"]
+        assert any(
+            actor["path"] == self.scene["actor_path"]
+            for actor in data["result"]["actors"]
+        )
 
     def test_find_actor_by_name(self, api):
-        from cli_anything.unreal.core.scene import list_actors, find_actor_by_name
+        from cli_anything.unreal.core.scene import find_actor_by_name
 
-        all_actors = list_actors(api)
-        if not all_actors.get("actors"):
-            pytest.skip("No actors in level")
-
-        first_name = all_actors["actors"][0]["name"]
-        result = find_actor_by_name(api, first_name)
-        assert result["count"] >= 1
+        result = find_actor_by_name(api, self.scene["actor_name"])
+        assert any(
+            actor["path"] == self.scene["actor_path"]
+            for actor in result["actors"]
+        )
 
     def test_find_actor_cli(self, cli_runner, api_port):
         from cli_anything.unreal.unreal_cli import cli
@@ -1670,82 +1784,42 @@ class TestSceneE2E:
         data = json.loads(result.output)
         assert data["status"] == "success"
         assert "actors" in data["result"]
+        assert any(
+            actor["path"] == self.scene["light_path"]
+            for actor in data["result"]["actors"]
+        )
 
 
-    def test_find_actor_cli_matches_outliner_label(self, cli_runner, api_port, api):
-        from cli_anything.unreal.core.script_runner import run_python_code
+    def test_find_actor_cli_matches_outliner_label(self, cli_runner, api_port):
         from cli_anything.unreal.unreal_cli import cli
 
-        label = "UE CLI E2E LabelOnly Search"
-        spawn = run_python_code(api, f"""
-import unreal
-subsystem_class = getattr(unreal, "EditorActorSubsystem", None)
-if subsystem_class is not None:
-    sub = unreal.get_editor_subsystem(subsystem_class)
-    actor = sub.spawn_actor_from_class(unreal.Actor, unreal.Vector(0, 0, 0))
-else:
-    actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
-        unreal.Actor, unreal.Vector(0, 0, 0)
-    )
-actor.set_actor_label({label!r})
-result = {{"path": actor.get_path_name(), "name": actor.get_name(), "label": actor.get_actor_label()}}
-""", save=False)
-        if "error" in spawn:
-            pytest.skip(f"Could not spawn label-search actor: {spawn['error']}")
+        label = self.scene["actor_label"]
+        result = cli_runner.invoke(cli, [
+            "--output", "json", "--port", str(api_port),
+            "scene", "list", "-q", "LabelOnly Search",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "success"
+        actors = data["result"].get("actors") or []
+        matches = [actor for actor in actors if actor.get("label") == label]
+        assert matches, data["result"]
+        assert matches[0]["name"] != label
 
-        try:
-            result = cli_runner.invoke(cli, [
-                "--output", "json", "--port", str(api_port),
-                "scene", "list", "-q", "LabelOnly Search",
-            ])
-            assert result.exit_code == 0
-            data = json.loads(result.output)
-            assert data["status"] == "success"
-            actors = data["result"].get("actors") or []
-            matches = [actor for actor in actors if actor.get("label") == label]
-            assert matches, data["result"]
-            assert matches[0]["name"] != label
-
-            exact = cli_runner.invoke(cli, [
-                "--output", "json", "--port", str(api_port),
-                "scene", "list", "-q", label, "--field", "label", "--exact",
-            ])
-            assert exact.exit_code == 0
-            exact_data = json.loads(exact.output)
-            exact_actors = exact_data["result"].get("actors") or []
-            assert any(actor.get("label") == label for actor in exact_actors)
-        finally:
-            path = spawn.get("path")
-            if path:
-                run_python_code(api, f"""
-import unreal
-subsystem_class = getattr(unreal, "EditorActorSubsystem", None)
-if subsystem_class is not None:
-    sub = unreal.get_editor_subsystem(subsystem_class)
-    actors = sub.get_all_level_actors()
-else:
-    sub = None
-    actors = unreal.EditorLevelLibrary.get_all_level_actors()
-for actor in actors:
-    if actor.get_path_name() == {path!r}:
-        if sub is not None:
-            sub.destroy_actor(actor)
-        else:
-            unreal.EditorLevelLibrary.destroy_actor(actor)
-        break
-result = {{"status": "cleanup"}}
-""", save=False)
+        exact = cli_runner.invoke(cli, [
+            "--output", "json", "--port", str(api_port),
+            "scene", "list", "-q", label, "--field", "label", "--exact",
+        ])
+        assert exact.exit_code == 0
+        exact_data = json.loads(exact.output)
+        exact_actors = exact_data["result"].get("actors") or []
+        assert any(actor.get("label") == label for actor in exact_actors)
 
 
     def test_get_actor_transform(self, api):
-        from cli_anything.unreal.core.scene import list_actors, get_actor_transform
+        from cli_anything.unreal.core.scene import get_actor_transform
 
-        all_actors = list_actors(api)
-        if not all_actors.get("actors"):
-            pytest.skip("No actors in level")
-
-        actor_path = all_actors["actors"][0]["path"]
-        result = get_actor_transform(api, actor_path)
+        result = get_actor_transform(api, self.scene["actor_path"])
         assert "location" in result
         assert "rotation" in result
         assert "scale" in result
@@ -1762,10 +1836,8 @@ result = {{"status": "cleanup"}}
         assert listed.exit_code == 0
         listed_data = json.loads(listed.output)
         actors = listed_data["result"].get("actors") or []
-        if not actors:
-            pytest.skip("No actors in level")
-
-        actor_path = actors[0]["path"]
+        actor_path = self.scene["actor_path"]
+        assert any(actor["path"] == actor_path for actor in actors)
         transform = cli_runner.invoke(cli, [
             "--output", "json", "--port", str(api_port),
             "scene", "get-transform", actor_path,
@@ -1804,22 +1876,11 @@ result = {{"status": "cleanup"}}
     #   2) api-discover <component>  → returns component's own props/functions
     #   3) scene property <component> Prop=Value → writes the subobject
 
-    def _find_light_actor(self, api):
-        """Pick any light actor from the level — they all have a LightComponent."""
-        from cli_anything.unreal.core.scene import list_actors
-        for class_name in ("DirectionalLight", "PointLight", "SpotLight", "RectLight"):
-            result = list_actors(api, actor_class=class_name)
-            if result.get("actors"):
-                return result["actors"][0]["path"], class_name
-        return None, None
-
-    def test_api_discover_actor_returns_components(self, cli_runner, api_port, api):
+    def test_api_discover_actor_returns_components(self, cli_runner, api_port):
         """api-discover <actor> must return a `components` tree."""
         from cli_anything.unreal.unreal_cli import cli
 
-        actor_path, class_name = self._find_light_actor(api)
-        if actor_path is None:
-            pytest.skip("No light actor in level to test components tree")
+        actor_path = self.scene["light_path"]
 
         result = cli_runner.invoke(cli, [
             "--output", "json", "--port", str(api_port),
@@ -1830,7 +1891,7 @@ result = {{"status": "cleanup"}}
 
         assert data["status"] == "success"
         result_data = data.get("result", data)
-        assert result_data.get("class") == class_name
+        assert result_data.get("class") == "DirectionalLight"
         assert "components" in result_data, "actor api-discover must include components tree"
         comps = result_data["components"]
         assert isinstance(comps, list) and len(comps) >= 1
@@ -1840,13 +1901,11 @@ result = {{"status": "cleanup"}}
             assert c.get("class")
             assert "is_root" in c and "is_native" in c
 
-    def test_api_discover_component_drills_in(self, cli_runner, api_port, api):
+    def test_api_discover_component_drills_in(self, cli_runner, api_port):
         """api-discover <component.path> must resolve to the component class."""
         from cli_anything.unreal.unreal_cli import cli
 
-        actor_path, _ = self._find_light_actor(api)
-        if actor_path is None:
-            pytest.skip("No light actor in level")
+        actor_path = self.scene["light_path"]
 
         # Step 1: discover the light component path
         r1 = cli_runner.invoke(cli, [
@@ -1860,8 +1919,7 @@ result = {{"status": "cleanup"}}
             (c for c in d1_result["components"] if "Light" in c["class"]),
             None,
         )
-        if light_comp is None:
-            pytest.skip("No LightComponent found on this actor")
+        assert light_comp is not None, d1_result
 
         # Step 2: api-discover that component
         r2 = cli_runner.invoke(cli, [
@@ -1877,13 +1935,11 @@ result = {{"status": "cleanup"}}
         # LightComponent should have Intensity in the filter result
         assert "Intensity" in d2_result.get("properties", [])
 
-    def test_scene_property_accepts_component_path(self, cli_runner, api_port, api):
+    def test_scene_property_accepts_component_path(self, cli_runner, api_port):
         """scene property get/set works on a component subobject path, not just actor."""
         from cli_anything.unreal.unreal_cli import cli
 
-        actor_path, _ = self._find_light_actor(api)
-        if actor_path is None:
-            pytest.skip("No light actor in level")
+        actor_path = self.scene["light_path"]
 
         r1 = cli_runner.invoke(cli, [
             "--output", "json", "--port", str(api_port),
@@ -1895,8 +1951,7 @@ result = {{"status": "cleanup"}}
             (c for c in d1_result["components"] if "Light" in c["class"]),
             None,
         )
-        if light_comp is None:
-            pytest.skip("No LightComponent")
+        assert light_comp is not None, d1_result
 
         comp_path = light_comp["path"]
 
@@ -1937,20 +1992,15 @@ result = {{"status": "cleanup"}}
 
     def test_scene_property_reads_static_mesh_asset_reference(self, cli_runner, api_port, api):
         """StaticMesh references are readable through RC or Python fallback."""
-        from cli_anything.unreal.core.scene import get_actor_components, list_actors
+        from cli_anything.unreal.core.scene import get_actor_components
         from cli_anything.unreal.unreal_cli import cli
 
-        actors = list_actors(api, actor_class="StaticMeshActor").get("actors", [])
-        if not actors:
-            pytest.skip("No StaticMeshActor in level")
-
-        components = get_actor_components(api, actors[0]["path"]).get("components", [])
+        components = get_actor_components(api, self.scene["mesh_path"]).get("components", [])
         mesh_component = next(
             (component for component in components if component["class"] == "StaticMeshComponent"),
             None,
         )
-        if mesh_component is None:
-            pytest.skip("No StaticMeshComponent on StaticMeshActor")
+        assert mesh_component is not None, components
 
         read_result = cli_runner.invoke(cli, [
             "--output", "json", "--port", str(api_port),
