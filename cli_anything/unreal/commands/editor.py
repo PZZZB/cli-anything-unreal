@@ -1325,15 +1325,19 @@ def _dirty_package_names(response: object, operation: str) -> list[str]:
     return names
 
 
+_EDITOR_LOADING_AND_SAVING_UTILS = (
+    "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils"
+)
+
+
 def _query_dirty_editor_packages(api) -> dict:
-    object_path = "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils"
     try:
         maps = _dirty_package_names(
-            api.call_function(object_path, "GetDirtyMapPackages", {}),
+            api.call_function(_EDITOR_LOADING_AND_SAVING_UTILS, "GetDirtyMapPackages", {}),
             "GetDirtyMapPackages",
         )
         content = _dirty_package_names(
-            api.call_function(object_path, "GetDirtyContentPackages", {}),
+            api.call_function(_EDITOR_LOADING_AND_SAVING_UTILS, "GetDirtyContentPackages", {}),
             "GetDirtyContentPackages",
         )
     except AppError:
@@ -1356,43 +1360,84 @@ def _query_dirty_editor_packages(api) -> dict:
     }
 
 
-def _save_all_dirty_editor_packages(api) -> None:
-    """Save all dirty packages and require Unreal to confirm success."""
-
+def _call_close_save_function(api, function_name: str, parameters: dict) -> dict:
+    """Call one save-stage function and require a truthful return value."""
     try:
         response = api.call_function(
-            "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils",
-            "SaveDirtyPackages",
-            {"bSaveMapPackages": True, "bSaveContentPackages": True},
+            _EDITOR_LOADING_AND_SAVING_UTILS,
+            function_name,
+            parameters,
         )
     except Exception as exc:
         raise AppError(
             "EDITOR_SAVE_BEFORE_CLOSE_FAILED",
-            "Saving dirty packages failed; the editor was not asked to quit.",
+            f"{function_name} failed during editor close; the editor was not asked to quit.",
             exit_code=3,
-            details={"error": str(exc)},
+            details={
+                "function": function_name,
+                "parameters": parameters,
+                "error": str(exc),
+            },
         ) from exc
     if (
         not isinstance(response, dict)
         or response.get("error")
         or response.get("errorMessage")
-        or response.get("ReturnValue") is not True
+        or not response.get("ReturnValue")
     ):
         raise AppError(
             "EDITOR_SAVE_BEFORE_CLOSE_FAILED",
-            "Unreal Editor did not confirm that all dirty packages were saved; the editor was not asked to quit.",
+            f"{function_name} was not confirmed during editor close; the editor was not asked to quit.",
             exit_code=3,
-            details={"response": response},
+            details={
+                "function": function_name,
+                "parameters": parameters,
+                "response": response,
+            },
         )
+    return response
+
+
+def _save_all_dirty_editor_packages(api) -> None:
+    """Save all dirty packages and require Unreal to confirm success."""
+
+    _call_close_save_function(
+        api,
+        "SaveDirtyPackages",
+        {"bSaveMapPackages": True, "bSaveContentPackages": True},
+    )
+
+
+def _save_transient_dirty_maps(api, map_packages: list[str]) -> list[dict]:
+    """Move dirty transient maps to deterministic project asset paths."""
+
+    saved = []
+    for package_path in map_packages:
+        if not package_path.startswith("/Temp/"):
+            continue
+        map_name = package_path.rsplit("/", 1)[-1]
+        world_path = f"{package_path}.{map_name}"
+        asset_path = f"/Game/__UeCliAutoSave_{map_name}"
+        _call_close_save_function(
+            api,
+            "SaveMap",
+            {"World": world_path, "AssetPath": asset_path},
+        )
+        _call_close_save_function(api, "LoadMap", {"Filename": asset_path})
+        saved.append({"map_package": package_path, "asset_path": asset_path})
+    return saved
 
 
 def _save_dirty_editor_packages_if_needed(api) -> dict:
     dirty = _query_dirty_editor_packages(api)
-    if dirty["count"]:
+    transient_map_saves = _save_transient_dirty_maps(api, dirty["map_packages"])
+    remaining = _query_dirty_editor_packages(api) if transient_map_saves else dirty
+    if remaining["count"]:
         _save_all_dirty_editor_packages(api)
     return {
         **dirty,
         "saved_count": dirty["count"],
+        "transient_map_saves": transient_map_saves,
     }
 
 

@@ -1779,6 +1779,62 @@ def test_editor_close_saves_dirty_packages_automatically(mini_project):
     assert api.call_function.call_args_list[-1].args[1] == "SaveDirtyPackages"
 
 
+def test_editor_close_dirty_transient_map_autosaves_to_game_path():
+    from cli_anything.unreal.commands.editor import _save_dirty_editor_packages_if_needed
+
+    api = MagicMock()
+    api.call_function.side_effect = [
+        {"OutDirtyPackages": ["/Temp/Untitled_2"]},
+        {"OutDirtyPackages": []},
+        {"ReturnValue": True},
+        {"ReturnValue": "/Game/__UeCliAutoSave_Untitled_2.__UeCliAutoSave_Untitled_2"},
+        {"OutDirtyPackages": []},
+        {"OutDirtyPackages": []},
+    ]
+
+    evidence = _save_dirty_editor_packages_if_needed(api)
+
+    assert evidence["saved_count"] == 1
+    assert evidence["transient_map_saves"] == [{
+        "map_package": "/Temp/Untitled_2",
+        "asset_path": "/Game/__UeCliAutoSave_Untitled_2",
+    }]
+    save_map_call = api.call_function.call_args_list[2]
+    assert save_map_call.args[1] == "SaveMap"
+    assert save_map_call.args[2] == {
+        "World": "/Temp/Untitled_2.Untitled_2",
+        "AssetPath": "/Game/__UeCliAutoSave_Untitled_2",
+    }
+    load_map_call = api.call_function.call_args_list[3]
+    assert load_map_call.args[1] == "LoadMap"
+    assert load_map_call.args[2] == {
+        "Filename": "/Game/__UeCliAutoSave_Untitled_2",
+    }
+    assert all(call.args[1] != "SaveDirtyPackages" for call in api.call_function.call_args_list)
+
+
+def test_editor_close_dirty_transient_map_reload_failure_preserves_editor():
+    from cli_anything.unreal.commands import AppError
+    from cli_anything.unreal.commands.editor import _save_dirty_editor_packages_if_needed
+
+    api = MagicMock()
+    api.call_function.side_effect = [
+        {"OutDirtyPackages": ["/Temp/Untitled_2"]},
+        {"OutDirtyPackages": []},
+        {"ReturnValue": True},
+        {"ReturnValue": ""},
+    ]
+
+    with pytest.raises(AppError) as exc_info:
+        _save_dirty_editor_packages_if_needed(api)
+
+    assert exc_info.value.code == "EDITOR_SAVE_BEFORE_CLOSE_FAILED"
+    assert exc_info.value.details["function"] == "LoadMap"
+    assert exc_info.value.details["parameters"] == {
+        "Filename": "/Game/__UeCliAutoSave_Untitled_2",
+    }
+
+
 def test_editor_close_force_is_explicit_and_skips_dirty_query(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
