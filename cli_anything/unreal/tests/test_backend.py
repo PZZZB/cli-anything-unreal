@@ -522,6 +522,53 @@ class TestSession:
         finally:
             sock.close()
 
+    def test_ue4_remote_control_port_uses_web_remote_control_config(self, temp_project):
+        from cli_anything.unreal.utils.ue_backend import (
+            _write_rc_port,
+            check_remote_control_config,
+            read_rc_port,
+        )
+
+        config_file = _write_rc_port(
+            temp_project["dir"],
+            30022,
+            editor_binary_prefix="UE4Editor",
+        )
+
+        assert Path(config_file).name == "DefaultWebRemoteControl.ini"
+        content = Path(config_file).read_text(encoding="utf-8")
+        assert "[/Script/WebRemoteControl.WebRemoteControlSettings]" in content
+        assert "RemoteControlHttpServerPort=30022" in content
+        assert read_rc_port(temp_project["dir"], "UE4Editor") == 30022
+        (Path(temp_project["dir"]) / "Config" / "DefaultRemoteControl.ini").write_text(
+            "[/Script/RemoteControlCommon.RemoteControlSettings]\n"
+            "bAllowConsoleCommandRemoteExecution=True\n"
+            "bEnableRemotePythonExecution=True\n",
+            encoding="utf-8",
+        )
+        assert check_remote_control_config(
+            temp_project["dir"],
+            "UE4Editor",
+        )["port"] == 30022
+
+    def test_ue5_remote_control_port_keeps_remote_control_config(self, temp_project):
+        from cli_anything.unreal.utils.ue_backend import _write_rc_port
+
+        config_file = _write_rc_port(
+            temp_project["dir"],
+            30021,
+            editor_binary_prefix="UnrealEditor",
+        )
+
+        assert Path(config_file).name == "DefaultRemoteControl.ini"
+        content = Path(config_file).read_text(encoding="utf-8")
+        assert "[/Script/RemoteControlCommon.RemoteControlSettings]" in content
+        assert "RemoteControlHttpServerPort=30021" in content
+
+        before = Path(config_file).read_bytes()
+        assert _write_rc_port(temp_project["dir"], 30021, "UnrealEditor") == config_file
+        assert Path(config_file).read_bytes() == before
+
     def test_extract_uproject_from_quoted_editor_cmdline(self):
         from cli_anything.unreal.utils.ue_backend import _extract_uproject_from_cmdline
 

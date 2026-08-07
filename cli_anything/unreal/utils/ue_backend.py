@@ -1509,6 +1509,7 @@ def get_engine_version(engine_root: str) -> Optional[str]:
 # ── Remote Control config ────────────────────────────────────────────────
 
 _REMOTE_CONTROL_INI_SECTION = "/Script/RemoteControlCommon.RemoteControlSettings"
+_UE4_WEB_REMOTE_CONTROL_INI_SECTION = "/Script/WebRemoteControl.WebRemoteControlSettings"
 _REMOTE_CONTROL_REQUIRED_SETTINGS = {
     "bRestrictServerAccess": "True",
     "bAllowConsoleCommandRemoteExecution": "True",
@@ -1808,7 +1809,10 @@ def ensure_remote_control_config(
     return {"status": "ok", "file": str(config_file), "changes": []}
 
 
-def check_remote_control_config(project_dir: str) -> dict:
+def check_remote_control_config(
+    project_dir: str,
+    editor_binary_prefix: str | None = None,
+) -> dict:
     """Check if Remote Control is properly configured.
 
     Returns:
@@ -1863,7 +1867,7 @@ def check_remote_control_config(project_dir: str) -> dict:
             "Python script execution will fail."
         )
 
-    port = _parse_rc_port(content)
+    port = read_rc_port(project_dir, editor_binary_prefix)
 
     return {
         "configured": len(issues) == 0,
@@ -1889,19 +1893,35 @@ def _parse_rc_port(ini_content: str) -> int | None:
     return None
 
 
-def read_rc_port(project_dir: str) -> int | None:
+def _rc_port_config(project_dir: str, editor_binary_prefix: str | None = None) -> tuple[Path, str]:
+    """Return the engine-specific config file and section for Remote Control ports."""
+    config_dir = Path(project_dir) / "Config"
+    if editor_binary_prefix == "UE4Editor":
+        return (
+            config_dir / "DefaultWebRemoteControl.ini",
+            _UE4_WEB_REMOTE_CONTROL_INI_SECTION,
+        )
+    return config_dir / "DefaultRemoteControl.ini", _REMOTE_CONTROL_INI_SECTION
+
+
+def read_rc_port(
+    project_dir: str,
+    editor_binary_prefix: str | None = None,
+) -> int | None:
     """Read the Remote Control HTTP port from project config.
 
-    Looks for ``RemoteControlHttpServerPort`` in
-    ``Config/DefaultRemoteControl.ini``.
+    Looks for ``RemoteControlHttpServerPort`` in the engine-specific config:
+    ``DefaultWebRemoteControl.ini`` for UE4, otherwise
+    ``DefaultRemoteControl.ini``.
 
     Args:
         project_dir: Path to the UE project root.
+        editor_binary_prefix: ``UE4Editor`` selects UE4's WebRemoteControl config.
 
     Returns:
         Port number (int) if configured, None to use the default.
     """
-    config_file = Path(project_dir) / "Config" / "DefaultRemoteControl.ini"
+    config_file, _section = _rc_port_config(project_dir, editor_binary_prefix)
     if not config_file.exists():
         return None
     try:
@@ -1911,19 +1931,26 @@ def read_rc_port(project_dir: str) -> int | None:
     return _parse_rc_port(content)
 
 
-def _write_rc_port(project_dir: str, port: int) -> None:
-    """Write RemoteControlHttpServerPort to the project's DefaultRemoteControl.ini."""
-    config_file = Path(project_dir) / "Config" / "DefaultRemoteControl.ini"
+def _write_rc_port(
+    project_dir: str,
+    port: int,
+    editor_binary_prefix: str | None = None,
+) -> str:
+    """Persist the launch port in the config file read by this engine generation."""
+    config_file, section = _rc_port_config(project_dir, editor_binary_prefix)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
     if not config_file.exists():
         config_file.write_text(
-            f"\n[/Script/RemoteControlCommon.RemoteControlSettings]\n"
+            f"\n[{section}]\n"
             f"RemoteControlHttpServerPort={port}\n",
             encoding="utf-8",
         )
-        return
+        return str(config_file)
 
     content = config_file.read_text(encoding="utf-8-sig")
     key = "RemoteControlHttpServerPort="
+    if f"[{section}]" in content and _parse_rc_port(content) == port:
+        return str(config_file)
     if key in content:
         lines = content.splitlines()
         for i, line in enumerate(lines):
@@ -1934,8 +1961,11 @@ def _write_rc_port(project_dir: str, port: int) -> None:
         if not content.endswith("\n"):
             content += "\n"
     else:
+        if f"[{section}]" not in content:
+            content = content.rstrip("\n") + f"\n\n[{section}]\n"
         content = content.rstrip("\n") + f"\n{key}{port}\n"
     config_file.write_text(content, encoding="utf-8")
+    return str(config_file)
 
 
 def is_tcp_port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
@@ -1951,11 +1981,15 @@ def is_tcp_port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.5)
         return False
 
 
-def resolve_available_port(project_dir: str, desired_port: int) -> int:
+def resolve_available_port(
+    project_dir: str,
+    desired_port: int,
+    editor_binary_prefix: str | None = None,
+) -> int:
     """If *desired_port* is already occupied by another editor, find and persist an available one.
 
     Scans upward from desired_port+1 (max 10 attempts). When a free port is
-    found, writes it to the project's DefaultRemoteControl.ini so the editor
+    found, writes it to the engine-specific Remote Control config so the editor
     picks it up on launch.
 
     Returns the port to use (may be the original if it's free).
@@ -1967,7 +2001,11 @@ def resolve_available_port(project_dir: str, desired_port: int) -> int:
     for offset in range(1, 11):
         candidate = desired_port + offset
         if not is_tcp_port_in_use(candidate):
-            _write_rc_port(project_dir, candidate)
+            _write_rc_port(
+                project_dir,
+                candidate,
+                editor_binary_prefix=editor_binary_prefix,
+            )
             return candidate
 
     # All 10 candidates occupied — fall back to original and let UE fail naturally
@@ -2281,7 +2319,10 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
 
     # Check Remote Control config
     project_dir = str(Path(uproject_path).parent)
-    rc_check = check_remote_control_config(project_dir)
+    rc_check = check_remote_control_config(
+        project_dir,
+        editor_binary_prefix=editor_binary_prefix,
+    )
     plugin_checks = {
         plugin_name: _check_plugin_loadable(
             project_dir,

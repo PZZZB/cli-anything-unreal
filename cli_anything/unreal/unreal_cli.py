@@ -444,8 +444,11 @@ def cli(ctx, output_mode, project_path, port, list_commands):
     if port is not None:
         state.session.port = port
     elif state.session.project_dir:
-        from cli_anything.unreal.utils.ue_backend import read_rc_port
-        ini_port = read_rc_port(state.session.project_dir)
+        from cli_anything.unreal.utils.ue_backend import get_editor_binary_prefix, read_rc_port
+        ini_port = read_rc_port(
+            state.session.project_dir,
+            editor_binary_prefix=get_editor_binary_prefix(state.session.engine_root),
+        )
         if ini_port is not None:
             state.session.port = ini_port
 

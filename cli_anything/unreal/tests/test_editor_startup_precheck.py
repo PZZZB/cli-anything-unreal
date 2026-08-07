@@ -3698,7 +3698,7 @@ def test_run_editor_launch_task_deploys_bridge_for_ue4(tmp_path):
 
     task = create_task("editor.launch", {
         "project_path": str(uproject),
-        "port": 30010,
+        "port": 30022,
     })
 
     with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
@@ -3707,6 +3707,7 @@ def test_run_editor_launch_task_deploys_bridge_for_ue4(tmp_path):
         "project": {"errors": [], "warnings": []},
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockUE4"), \
+         patch("cli_anything.unreal.utils.ue_backend.get_editor_binary_prefix", return_value="UE4Editor"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockUE4/Binaries/UE4Editor.exe"), \
          patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
          patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
@@ -3730,6 +3731,9 @@ def test_run_editor_launch_task_deploys_bridge_for_ue4(tmp_path):
     assert result["status"] == "completed"
     assert result["result"]["bridge_deploy"]["action"] == "already_up_to_date"
     assert result["result"]["bridge_binary_status"]["ready"] is True
+    port_config = project_dir / "Config" / "DefaultWebRemoteControl.ini"
+    assert result["result"]["remote_control_port_config"] == str(port_config)
+    assert "RemoteControlHttpServerPort=30022" in port_config.read_text(encoding="utf-8")
 
 
 def test_run_editor_launch_task_does_not_deploy_ue4_bridge_before_preflight_failure(tmp_path):

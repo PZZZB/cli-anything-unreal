@@ -66,9 +66,12 @@ def ensure_inferred_project(state: AppState) -> str | None:
     state.session.load_project(project_path)
     state.project_is_inferred = True
     if not state.port_is_explicit:
-        from cli_anything.unreal.utils.ue_backend import read_rc_port
+        from cli_anything.unreal.utils.ue_backend import get_editor_binary_prefix, read_rc_port
 
-        state.session.port = read_rc_port(state.session.project_dir) or 30010
+        state.session.port = read_rc_port(
+            state.session.project_dir,
+            editor_binary_prefix=get_editor_binary_prefix(state.session.engine_root),
+        ) or 30010
     return state.session.project_path
 
 

@@ -1641,6 +1641,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     )
     from cli_anything.unreal.core.session import Session
     from cli_anything.unreal.utils.ue_backend import (
+        _write_rc_port,
         ensure_remote_control_config,
         find_editor_exe,
         get_editor_binary_prefix,
@@ -1798,15 +1799,44 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     if port_result is not None:
         # Port occupied — auto-resolve to next available port
         from cli_anything.unreal.utils.ue_backend import resolve_available_port
-        new_port = resolve_available_port(state.session.project_dir, state.session.port)
+        new_port = resolve_available_port(
+            state.session.project_dir,
+            state.session.port,
+            editor_binary_prefix=launch_binary_prefix,
+        )
         state.session.port = new_port
+
+    try:
+        remote_control_port_config = _write_rc_port(
+            state.session.project_dir,
+            state.session.port,
+            editor_binary_prefix=launch_binary_prefix,
+        )
+    except OSError as exc:
+        return transition_task(
+            task_id,
+            status="failed",
+            phase="blocked",
+            error={
+                "code": "EDITOR_LAUNCH_PORT_CONFIG_FAILED",
+                "message": "Could not persist the selected Remote Control port before launch.",
+                "details": {
+                    "port": state.session.port,
+                    "editor_binary_prefix": launch_binary_prefix,
+                    "error": str(exc),
+                },
+            },
+        ) or task
 
     task = transition_task(
         task_id,
         status="running",
         phase="deploying_bridge",
         resolved_port=state.session.port,
-        result_patch={"port": state.session.port},
+        result_patch={
+            "port": state.session.port,
+            "remote_control_port_config": remote_control_port_config,
+        },
     ) or task
     if task.get("status") != "running":
         return task
@@ -1981,6 +2011,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         "bridge_deploy": deploy_result,
         "bridge_binary_status": bridge_binary_status,
         "port": state.session.port,
+        "remote_control_port_config": remote_control_port_config,
         "delivery_state": "accepted",
     }
     if compile_reason:

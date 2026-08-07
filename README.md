@@ -65,7 +65,7 @@ ue-cli --output json --project "$Project" editor launch
 First launch may:
 
 - enable `RemoteControl`, `PythonScriptPlugin`, `EditorScriptingUtilities`, and `CliAnythingBridge` in the `.uproject`;
-- create or update `Config/DefaultRemoteControl.ini`;
+- create or update Remote Control config (`Config/DefaultRemoteControl.ini` on UE5, plus UE4's `Config/DefaultWebRemoteControl.ini` when launching);
 - deploy `Plugins/CliAnythingBridge`;
 - compile only the `CliAnythingBridge` Editor module when its binary is missing or stale, then repair and validate its `UnrealEditor.modules` metadata. Bridge upgrades preserve the previous plugin until that validation passes and restore it with structured rollback details if deployment or compilation fails. If the remaining Editor target output is incomplete, launch stops with a structured full-build reason and recovery command instead of starting a full project build automatically.
 
@@ -199,7 +199,7 @@ ue-cli --output json --project "F:/ProjectA/ProjectA.uproject" editor status
 ue-cli --output json --port 30011 material list
 ```
 
-When `--port` is omitted, ue-cli uses the selected project's `DefaultRemoteControl.ini` or one unambiguous live editor. Multiple matching editors produce a structured ambiguity error instead of choosing silently. A directory containing multiple `.uproject` files also requires explicit `--project`. For every project-bound editor request on Windows, the listening-port PID must be known and its process command line must match that project; unknown or mismatched ownership fails before sending the request.
+When `--port` is omitted, ue-cli uses the selected project's engine-specific Remote Control config or one unambiguous live editor. UE5 reads `DefaultRemoteControl.ini`; UE4 reads `DefaultWebRemoteControl.ini`. `editor launch` persists the selected port to that same file before spawning the editor, so readiness and Unreal bind the same port. Multiple matching editors produce a structured ambiguity error instead of choosing silently. A directory containing multiple `.uproject` files also requires explicit `--project`. For every project-bound editor request on Windows, the listening-port PID must be known and its process command line must match that project; unknown or mismatched ownership fails before sending the request.
 
 `editor status` applies a 15-second discovery deadline by default. Use `editor status --timeout <seconds>` when a slow machine needs more time. An exhausted deadline returns `EDITOR_STATUS_TIMEOUT` with the `blocking_phase`; a blocked task read also includes its `task_id`.
 
