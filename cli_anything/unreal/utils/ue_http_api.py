@@ -16,13 +16,13 @@ Supports multi-instance scenarios via configurable port.
 
 import json
 import locale
-import os
 import re
 import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+
+from cli_anything.unreal.errors import UeCliError
 
 try:
     import requests
@@ -833,7 +833,8 @@ except Exception as _e:
         if sys.platform != "win32":
             return None
         try:
-            import ctypes, ctypes.wintypes
+            import ctypes
+            import ctypes.wintypes
             user32 = ctypes.windll.user32
             hwnd = self.find_editor_window_hwnd()
             if not hwnd:
@@ -850,7 +851,8 @@ except Exception as _e:
         if sys.platform != "win32":
             return False
         try:
-            import ctypes, ctypes.wintypes
+            import ctypes
+            import ctypes.wintypes
             user32 = ctypes.windll.user32
             hwnd = self.find_editor_window_hwnd()
             if not hwnd:
@@ -943,6 +945,32 @@ except Exception as _e:
             {},
         )
 
+    @staticmethod
+    def _require_asset_return_value(result: object, *, code: str, operation: str):
+        if not isinstance(result, dict):
+            raise UeCliError(
+                code,
+                f"{operation} returned an invalid Remote Control response.",
+                exit_code=3,
+                details={"response": str(result)},
+            )
+        error = result.get("error") or result.get("errorMessage")
+        if error:
+            raise UeCliError(
+                code,
+                f"{operation} failed: {error}",
+                exit_code=3,
+                details=result,
+            )
+        if "ReturnValue" not in result:
+            raise UeCliError(
+                code,
+                f"{operation} did not return a verifiable value.",
+                exit_code=3,
+                details=result,
+            )
+        return result["ReturnValue"]
+
     def does_asset_exist(self, asset_path: str) -> bool:
         """Check if an asset exists at the given content path."""
         result = self.call_function(
@@ -950,7 +978,11 @@ except Exception as _e:
             "DoesAssetExist",
             {"AssetPath": asset_path},
         )
-        return bool(result.get("ReturnValue", False))
+        return bool(self._require_asset_return_value(
+            result,
+            code="ASSET_EXISTS_FAILED",
+            operation=f"Asset existence check for {asset_path}",
+        ))
 
     def delete_asset(self, asset_path: str) -> bool:
         """Delete an asset via EditorAssetLibrary.DeleteAsset.
@@ -963,7 +995,11 @@ except Exception as _e:
             "DeleteAsset",
             {"AssetPath": asset_path},
         )
-        return bool(result.get("ReturnValue", False))
+        return bool(self._require_asset_return_value(
+            result,
+            code="ASSET_DELETE_FAILED",
+            operation=f"Asset deletion for {asset_path}",
+        ))
 
     def find_asset_referencers(self, asset_path: str) -> list[str]:
         """Return list of assets that reference the given asset."""
@@ -972,7 +1008,19 @@ except Exception as _e:
             "FindPackageReferencersForAsset",
             {"AssetPath": asset_path, "bLoadAssetsToConfirm": False},
         )
-        return result.get("ReturnValue", [])
+        refs = self._require_asset_return_value(
+            result,
+            code="ASSET_REFERENCERS_FAILED",
+            operation=f"Asset referencer query for {asset_path}",
+        )
+        if not isinstance(refs, list):
+            raise UeCliError(
+                "ASSET_REFERENCERS_FAILED",
+                f"Asset referencer query for {asset_path} returned an invalid list.",
+                exit_code=3,
+                details=result,
+            )
+        return refs
 
     # ── Presets ──────────────────────────────────────────────────────────
 

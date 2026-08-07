@@ -13,7 +13,7 @@ from cli_anything.unreal.utils.ue_backend import (
     find_engine_root,
     find_generate_project_files,
     find_running_build_processes,
-    find_uat,
+    get_editor_binary_prefix,
     get_engine_version,
     kill_build_processes,
     run_build,
@@ -167,7 +167,9 @@ def _resolve_game_target(uproject_path: str) -> tuple[str | None, str | None]:
     return project_path.stem, None
 
 
-def _resolve_editor_target(uproject_path: str) -> tuple[str | None, str | None]:
+def _find_project_editor_target(
+    uproject_path: str,
+) -> tuple[str | None, str | None]:
     project_path = Path(uproject_path)
     source_dir = project_path.parent / "Source"
     editor_targets = []
@@ -193,6 +195,14 @@ def _resolve_editor_target(uproject_path: str) -> tuple[str | None, str | None]:
         )
     if editor_targets:
         return editor_targets[0], None
+    return None, None
+
+
+def _resolve_editor_target(uproject_path: str) -> tuple[str | None, str | None]:
+    project_target, target_error = _find_project_editor_target(uproject_path)
+    if project_target or target_error:
+        return project_target, target_error
+    project_path = Path(uproject_path)
     return project_path.stem + "Editor", None
 
 
@@ -1027,6 +1037,7 @@ def compile_project(
     log_file: str | None = None,
     on_start=None,
     modules: list[str] | tuple[str, ...] | None = None,
+    use_engine_editor_target_if_missing: bool = False,
 ) -> dict:
     try:
         modules = [validate_module_name(value) for value in (modules or ())]
@@ -1047,7 +1058,14 @@ def compile_project(
         return {"status": "error", "error": "Could not find engine root"}
 
     if modules:
-        target, target_error = _resolve_editor_target(uproject_path)
+        target_source = "project"
+        if use_engine_editor_target_if_missing:
+            target, target_error = _find_project_editor_target(uproject_path)
+            if not target and not target_error:
+                target = get_editor_binary_prefix(engine_root)
+                target_source = "engine"
+        else:
+            target, target_error = _resolve_editor_target(uproject_path)
         if target_error:
             return {"status": "error", "error": target_error}
         receipt_path, engine_plugin_products = _find_engine_plugin_module_products(
@@ -1116,6 +1134,16 @@ def compile_project(
             project_dir=str(Path(uproject_path).parent),
             on_start=on_start,
         )
+        if target_source == "engine":
+            normalized = _normalize_result(
+                result,
+                "Compile",
+                uproject_path=uproject_path,
+                engine_root=engine_root,
+            )
+            normalized["editor_target"] = target
+            normalized["editor_target_source"] = target_source
+            return normalized
         return _normalize_compile_result(
             result,
             uproject_path=uproject_path,

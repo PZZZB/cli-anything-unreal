@@ -5,6 +5,7 @@ import re
 import click
 
 from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_editor, require_project
+from cli_anything.unreal.errors import raise_for_legacy_error
 
 
 def _validate_custom_code(code: str) -> list[str]:
@@ -63,6 +64,7 @@ def material_list(state: AppState, content_path):
 
     api = require_editor(state)
     result = list_materials(api, content_path, state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_LIST_FAILED")
     output(result, state)
 
 
@@ -76,13 +78,7 @@ def material_info(state: AppState, material_path):
 
     api = require_editor(state)
     result = get_material_info(api, material_path, state.session.project_dir)
-    if "error" in result:
-        raise AppError(
-            result.get("code", "MATERIAL_INFO_FAILED"),
-            result["error"],
-            exit_code=3,
-            details=result,
-        )
+    raise_for_legacy_error(result, default_code="MATERIAL_INFO_FAILED")
     output(result, state)
 
 
@@ -96,6 +92,7 @@ def material_stats(state: AppState, material_path):
 
     api = require_editor(state)
     result = get_material_stats(api, material_path, state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_STATS_FAILED")
     output(result, state)
 
 
@@ -109,6 +106,7 @@ def material_errors(state: AppState, material_path):
 
     api = require_editor(state)
     result = get_material_errors(api, material_path, state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_ERRORS_FAILED")
     output(result, state)
 
 
@@ -122,6 +120,7 @@ def material_textures(state: AppState, material_path):
 
     api = require_editor(state)
     result = get_material_texture_list(api, material_path, state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_TEXTURE_LIST_FAILED")
     output(result, state)
 
 
@@ -139,7 +138,6 @@ def material_graph(state: AppState, material_path):
     Example: material get-graph /Game/M_Water
     """
     from cli_anything.unreal.core.materials import get_material_connections
-    from cli_anything.unreal.utils.mermaid import format_material_connections_mermaid
 
     api = require_editor(state)
     result = get_material_connections(api, material_path, state.session.project_dir)
@@ -334,6 +332,7 @@ def material_add_node(state: AppState, material_path, expression_class, pos_x, p
                                set_props=parsed_props,
                                add_input_names=list(add_inputs),
                                project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_ADD_NODE_FAILED")
     output(result, state)
 
 
@@ -355,6 +354,7 @@ def material_delete_node(state: AppState, material_path, node_name):
     api = require_editor(state)
     result = delete_material_node(api, material_path, node_name,
                                   project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_DELETE_NODE_FAILED")
     output(result, state)
 
 
@@ -389,6 +389,7 @@ def material_rename_custom_input(state: AppState, material_path, node_name,
         update_code=not no_update_code,
         project_dir=state.session.project_dir,
     )
+    raise_for_legacy_error(result, default_code="MATERIAL_RENAME_CUSTOM_INPUT_FAILED")
     output(result, state)
 
 
@@ -416,6 +417,7 @@ def material_connect(state: AppState, material_path, from_node, from_output, to_
     result = connect_material_nodes(api, material_path,
                                     from_node, from_output, to_node, to_input,
                                     project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_CONNECT_FAILED")
     output(result, state)
 
 
@@ -440,6 +442,7 @@ def material_disconnect(state: AppState, material_path, from_node, from_output, 
     result = disconnect_material_nodes(api, material_path,
                                        from_node, from_output, to_node, to_input,
                                        project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_DISCONNECT_FAILED")
     output(result, state)
 
 
@@ -459,8 +462,7 @@ def material_get_param(state: AppState, material_path, param_name):
 
     api = require_editor(state)
     result = get_material_param(api, material_path, param_name, project_dir=state.session.project_dir)
-    if "error" in result:
-        raise AppError("MATERIAL_PARAM_FAILED", result["error"], exit_code=3, details=result)
+    raise_for_legacy_error(result, default_code="MATERIAL_PARAM_FAILED")
     output(result, state)
 
 
@@ -485,6 +487,7 @@ def material_set_param(state: AppState, material_path, param_name, param_value, 
     result = set_material_param(api, material_path,
                                 param_name, param_value, param_type,
                                 project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_PARAM_FAILED")
     output(result, state)
 
 
@@ -502,6 +505,7 @@ def material_recompile(state: AppState, material_path):
     api = require_editor(state)
     result = recompile_material(api, material_path,
                                 project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_RECOMPILE_FAILED")
     output(result, state)
 
 
@@ -527,6 +531,7 @@ def material_hlsl_code(state: AppState, material_path):
 
     result = get_material_hlsl_code(api, material_path,
                                      project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="MATERIAL_HLSL_CODE_FAILED")
     output(result, state)
 
 

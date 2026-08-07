@@ -1,11 +1,6 @@
 """Tests for test_material.py — Uses synthetic data only, no UE editor required."""
 
 import json
-import os
-import subprocess
-import tempfile
-import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -255,7 +250,9 @@ class TestMaterials:
         assert result["available_platforms"] == ["PCD3D_SM6"]
         mock_api.get_cvar.assert_not_called()
         mock_api.exec_console.assert_not_called()
-        assert mock_exec.call_args.kwargs["save"] is False
+        from cli_anything.unreal.core.script_runner import SavePolicy
+
+        assert mock_exec.call_args.kwargs["save_policy"] is SavePolicy.NEVER
 
     @patch("cli_anything.unreal.core.materials.time.sleep")
     @patch("cli_anything.unreal.core.materials._exec_material_script")
@@ -303,7 +300,12 @@ class TestMaterials:
         assert result["shader_count"] == 1
         assert "CalcPixelMaterialInputs" in result["material_code"]
         assert len(mock_exec.call_args_list) == 2
-        assert all(call.kwargs["save"] is False for call in mock_exec.call_args_list)
+        from cli_anything.unreal.core.script_runner import SavePolicy
+
+        assert all(
+            call.kwargs["save_policy"] is SavePolicy.NEVER
+            for call in mock_exec.call_args_list
+        )
         mock_api.set_cvar.assert_any_call("r.DumpShaderDebugInfo", "1")
         mock_api.set_cvar.assert_any_call("r.DumpShaderDebugInfo", "0")
         mock_api.exec_console.assert_not_called()
@@ -447,13 +449,13 @@ class TestMaterials:
             },
         )
 
-        result = analyze_material(mock_api, "/Game/TestMat")
+        from cli_anything.unreal.errors import UeCliError
 
-        assert "issues" in result
-        assert "warnings" in result
-        assert "stats" in result
-        assert isinstance(result["issues"], list)
-        assert isinstance(result["warnings"], list)
+        with pytest.raises(UeCliError) as exc_info:
+            analyze_material(mock_api, "/Game/TestMat")
+
+        assert exc_info.value.code == "MATERIAL_ANALYZE_FAILED"
+        assert exc_info.value.message == "timeout"
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_analyze_material_high_textures(self, mock_exec_script):
@@ -581,6 +583,7 @@ class TestMaterials:
     def test_analyze_material_error(self, mock_exec_script):
         """Test handling of material not found."""
         from cli_anything.unreal.core.materials import analyze_material
+        from cli_anything.unreal.errors import UeCliError
 
         mock_exec_script.return_value = {"error": "timeout"}
 
@@ -588,9 +591,11 @@ class TestMaterials:
             describe={"errorMessage": "Object not found"},
         )
 
-        result = analyze_material(mock_api, "/Game/Missing")
-        # With no assets found and describe failing, should get error in info
-        assert "issues" in result or "error" in result.get("info", {})
+        with pytest.raises(UeCliError) as exc_info:
+            analyze_material(mock_api, "/Game/Missing")
+
+        assert exc_info.value.code == "MATERIAL_ANALYZE_FAILED"
+        assert exc_info.value.message == "timeout"
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_material_texture_list_with_nodes(self, mock_exec_script):
@@ -653,6 +658,31 @@ class TestMaterials:
             assert "nodes" in data["result"]
             assert data["result"]["node_count"] == 1
 
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_material_info_is_explicitly_read_only(self, mock_run):
+        from cli_anything.unreal.core.materials import get_material_info
+        from cli_anything.unreal.core.script_runner import SavePolicy
+
+        mock_run.return_value = {"nodes": [], "node_count": 0}
+        mock_api = self._make_mock_api(
+            assets={
+                "Assets": [
+                    {
+                        "Name": "M_Test",
+                        "Path": "/Game/M_Test.M_Test",
+                        "Class": "/Script/Engine.Material",
+                        "Metadata": {},
+                    }
+                ]
+            }
+        )
+
+        result = get_material_info(mock_api, "/Game/M_Test")
+
+        assert result["node_count"] == 0
+        assert mock_run.call_args.kwargs["save_policy"] is SavePolicy.NEVER
+        assert mock_run.call_args.kwargs["target_packages"] is None
+
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_material_info_cli_reports_editor_unreachable_after_connection_drop(self, mock_exec_script):
         """The CLI exposes a mid-query disconnect as a top-level protocol error."""
@@ -696,6 +726,32 @@ class TestMaterials:
         with patch("cli_anything.unreal.commands.material.require_editor", return_value=mock_api):
             result = runner.invoke(cli, [
                 "--output", "json", "material", "info", "/Game/MF_Test",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS"
+        assert data["details"]["asset_class"] == "MaterialFunction"
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_graph_cli_rejects_material_function_as_top_level_error(self, mock_exec_script):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec_script.return_value = {
+            "error": "Unsupported material asset class for material info: MaterialFunction",
+            "code": "MATERIAL_INFO_UNSUPPORTED_CLASS",
+            "material": "/Game/MF_Test.MF_Test",
+            "asset_class": "MaterialFunction",
+            "supported_classes": ["Material", "MaterialInstanceConstant"],
+        }
+        mock_api = self._make_mock_api(assets={"Assets": []})
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.material.require_editor", return_value=mock_api):
+            result = runner.invoke(cli, [
+                "--output", "json", "material", "get-graph", "/Game/MF_Test",
             ])
 
         assert result.exit_code == 3
@@ -1059,6 +1115,10 @@ class TestMaterialEditing:
             "Constant3Vector_0", "", "__material_output__", "BaseColor",
         )
         assert result["status"] == "ok"
+        script_template = mock_exec.call_args.args[1]
+        assert script_template.index("disconnect_output(mat") < script_template.index(
+            "mel.recompile_material(mat)"
+        )
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_disconnect_between_expressions_uses_bridge(self, mock_exec):
@@ -1112,8 +1172,13 @@ class TestMaterialEditing:
         script = mock_run.call_args.args[1]
         assert "_cli_load_material" in script
         assert "set_return" in script
-        assert "save_loaded_asset(mat" in script
-        assert "save_dirty_packages(False, True)" in script
+        assert "save_loaded_asset(mat" not in script
+        assert "save_dirty_packages(False, True)" not in script
+
+        from cli_anything.unreal.core.script_runner import SavePolicy
+
+        assert mock_run.call_args.kwargs["save_policy"] is SavePolicy.TARGET_PACKAGES
+        assert mock_run.call_args.kwargs["target_packages"] == ["/Game/MI_Test"]
 
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_get_param_uses_material_resolver(self, mock_run):
@@ -1208,6 +1273,10 @@ class TestMaterialEditing:
         result = recompile_material(api, "/Game/M_Test")
         assert result["status"] == "ok"
         assert mock_exec.call_args.kwargs["timeout"] == 120.0
+        from cli_anything.unreal.core.script_runner import SavePolicy
+
+        assert mock_exec.call_args.kwargs["save_policy"] is SavePolicy.TARGET_PACKAGES
+        assert mock_exec.call_args.kwargs["target_packages"] == ["/Game/M_Test"]
 
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_recompile_uses_material_resolver(self, mock_run):

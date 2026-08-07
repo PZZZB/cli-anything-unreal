@@ -12,7 +12,6 @@ Key Remote Control endpoints used:
 
 import time
 
-from typing import Optional
 
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
@@ -153,7 +152,7 @@ else:
         _actors.append(_row)
     result = {{"actors": _actors, "count": len(_actors)}}
 '''
-    return run_python_code(api, script)
+    return run_python_code(api, script, save=False)
 
 
 def list_actors_of_class(api: UEEditorAPI, actor_class: str) -> dict:

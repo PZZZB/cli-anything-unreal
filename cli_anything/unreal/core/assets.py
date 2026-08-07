@@ -453,10 +453,22 @@ def asset_delete(
     delete_path = _asset_object_path(asset_path)
     script = _SCRIPT_DELETE_ASSET.format(requested_path=asset_path, delete_path=delete_path)
     script_result = _exec(api, script, project_dir)
+    if "error" in script_result:
+        script_result.setdefault("code", "ASSET_DELETE_FAILED")
+        return script_result
     deleted = script_result.get("deleted", False)
 
+    if not deleted:
+        return {
+            "error": f"Failed to delete asset: {asset_path}",
+            "code": "ASSET_DELETE_FAILED",
+            "asset": asset_path,
+            "deleted": False,
+            "details": script_result,
+        }
+
     result = {
-        "status": "ok" if deleted else "failed",
+        "status": "ok",
         "asset": asset_path,
         "deleted": deleted,
     }
@@ -490,7 +502,14 @@ def asset_duplicate(
     script = _SCRIPT_DUPLICATE_ASSET.format(
         source_path=source_path, dest_path=dest_path,
     )
-    return _exec(api, script, project_dir)
+    result = _exec(api, script, project_dir)
+    if result.get("status") == "failed" or result.get("duplicated") is False:
+        return {
+            **result,
+            "error": f"Failed to duplicate asset: {source_path} -> {dest_path}",
+            "code": "ASSET_DUPLICATE_FAILED",
+        }
+    return result
 
 
 def asset_rename(
@@ -502,7 +521,14 @@ def asset_rename(
 ) -> dict:
     """Rename/move an asset."""
     script = _SCRIPT_RENAME_ASSET.format(source_path=source_path, dest_path=dest_path)
-    return _exec(api, script, project_dir)
+    result = _exec(api, script, project_dir)
+    if result.get("status") == "failed" or result.get("renamed") is False:
+        return {
+            **result,
+            "error": f"Failed to rename asset: {source_path} -> {dest_path}",
+            "code": "ASSET_RENAME_FAILED",
+        }
+    return result
 
 def get_asset_property(api: "UEEditorAPI", asset_path: str, property_name: str) -> dict:
     """Get a property value on a UAsset or Blueprint class default object."""
@@ -695,7 +721,9 @@ if not _property_read:
     return fallback
 
 def set_asset_property(api: "UEEditorAPI", asset_path: str, property_name: str, value) -> dict:
-    """Set a property value on a UAsset and mark it dirty."""
+    """Set a property and confirm that its target package was saved."""
+    from cli_anything.unreal.core.script_runner import SavePolicy, run_python_code
+
     exists_probe = api.does_asset_exist(asset_path)
         
     script = f'''
@@ -725,15 +753,35 @@ if asset:
         return {"error": f"Failed to load asset into memory: {asset_path}"}
         
     set_res = api.set_property(object_path, property_name, value)
-    
-    # Mark package dirty so it can be saved
-    dirty_script = f'''
-import unreal
-asset = unreal.EditorAssetLibrary.load_asset('{asset_path}')
-if asset:
-    unreal.EditorAssetLibrary.save_asset('{asset_path}', only_if_is_dirty=False)
-    unreal.log('SAVED')
-'''
-    api.exec_python_ex(dirty_script)
-    
-    return set_res
+    if (
+        not isinstance(set_res, dict)
+        or set_res.get("error")
+        or set_res.get("errorMessage")
+    ):
+        return {
+            "error": "Unreal Editor did not confirm the property write.",
+            "code": "ASSET_PROPERTY_WRITE_FAILED",
+            "asset": asset_path,
+            "property": property_name,
+            "response": set_res,
+        }
+
+    save_result = run_python_code(
+        api,
+        "result = {'status': 'ok'}",
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[asset_path],
+    )
+    if save_result.get("error"):
+        return {
+            **save_result,
+            "code": save_result.get("code", "PACKAGE_SAVE_FAILED"),
+            "asset": asset_path,
+            "property": property_name,
+        }
+
+    return {
+        **set_res,
+        "saved": True,
+        "saved_packages": save_result.get("saved_packages", [asset_path]),
+    }

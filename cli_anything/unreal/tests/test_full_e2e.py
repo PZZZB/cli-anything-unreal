@@ -178,6 +178,112 @@ class TestProjectE2E:
 class TestMaterialsE2E:
     """Test material queries against running editor."""
 
+    def test_material_reads_preserve_unrelated_dirty_package_and_report_function_error(
+        self, api, cli_runner, project_path, api_port,
+    ):
+        """Issue #80/#81: reads never save, and unsupported graphs fail truthfully."""
+        import hashlib
+
+        from cli_anything.unreal.core.script_runner import run_python_code
+        from cli_anything.unreal.unreal_cli import cli
+
+        query_path = "/Game/E2E_Issue81_QueryMaterial"
+        dirty_path = "/Game/E2E_Issue81_DirtyMaterial"
+        function_path = "/Game/E2E_Issue80_Function"
+        paths = [function_path, dirty_path, query_path]
+        cleanup = f'''
+import unreal
+paths = {paths!r}
+deleted = []
+for path in paths:
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        if unreal.EditorAssetLibrary.delete_asset(path):
+            deleted.append(path)
+unreal.SystemLibrary.collect_garbage()
+result = {{"deleted": deleted}}
+'''
+        run_python_code(api, cleanup, timeout=30.0, save=False)
+
+        setup = '''
+import unreal
+tools = unreal.AssetToolsHelpers.get_asset_tools()
+query = tools.create_asset(
+    "E2E_Issue81_QueryMaterial", "/Game", unreal.Material, unreal.MaterialFactoryNew()
+)
+dirty = tools.create_asset(
+    "E2E_Issue81_DirtyMaterial", "/Game", unreal.Material, unreal.MaterialFactoryNew()
+)
+function = tools.create_asset(
+    "E2E_Issue80_Function", "/Game", unreal.MaterialFunction,
+    unreal.MaterialFunctionFactoryNew()
+)
+assets = [query, dirty, function]
+if any(asset is None for asset in assets):
+    result = {"error": "Failed to create issue #80/#81 E2E assets"}
+else:
+    saved = [unreal.EditorAssetLibrary.save_loaded_asset(asset) for asset in assets]
+    result = {"status": "ok", "saved": saved}
+'''
+        setup_result = run_python_code(api, setup, timeout=60.0, save=False)
+        assert setup_result.get("status") == "ok", setup_result
+        assert all(setup_result.get("saved", [])), setup_result
+
+        dirty_file = Path(project_path).parent / "Content" / "E2E_Issue81_DirtyMaterial.uasset"
+        assert dirty_file.is_file()
+        before_hash = hashlib.sha256(dirty_file.read_bytes()).hexdigest()
+        before_mtime = dirty_file.stat().st_mtime_ns
+
+        make_dirty = f'''
+import unreal
+path = {dirty_path!r}
+asset = unreal.EditorAssetLibrary.load_asset(path)
+if asset is None:
+    result = {{"error": "Dirty test material did not load"}}
+else:
+    asset.modify()
+    asset.set_editor_property("two_sided", not bool(asset.get_editor_property("two_sided")))
+    dirty_packages = [
+        package.get_path_name().split(".")[0]
+        for package in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()
+    ]
+    result = {{"status": "ok", "dirty_packages": dirty_packages}}
+'''
+
+        try:
+            dirty_result = run_python_code(api, make_dirty, timeout=30.0, save=False)
+            assert dirty_result.get("status") == "ok", dirty_result
+            assert dirty_path in dirty_result.get("dirty_packages", []), dirty_result
+
+            common = [
+                "--output", "json", "--project", project_path,
+                "--port", str(api_port), "material",
+            ]
+            supported = cli_runner.invoke(cli, [*common, "info", query_path])
+            unsupported_info = cli_runner.invoke(cli, [*common, "info", function_path])
+            unsupported_graph = cli_runner.invoke(cli, [*common, "get-graph", function_path])
+
+            assert supported.exit_code == 0, supported.output
+            for failure in (unsupported_info, unsupported_graph):
+                assert failure.exit_code == 3, failure.output
+                failure_data = json.loads(failure.output)
+                assert failure_data["status"] == "error", failure_data
+                assert failure_data["code"] == "MATERIAL_INFO_UNSUPPORTED_CLASS", failure_data
+
+            dirty_after = run_python_code(api, '''
+import unreal
+result = {
+    "dirty_packages": [
+        package.get_path_name().split(".")[0]
+        for package in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()
+    ]
+}
+''', timeout=30.0, save=False)
+            assert dirty_path in dirty_after.get("dirty_packages", []), dirty_after
+            assert dirty_file.stat().st_mtime_ns == before_mtime
+            assert hashlib.sha256(dirty_file.read_bytes()).hexdigest() == before_hash
+        finally:
+            run_python_code(api, cleanup, timeout=30.0, save=False)
+
     def test_material_list(self, api, project_path):
         from cli_anything.unreal.core.materials import list_materials
 
@@ -507,136 +613,41 @@ class TestConsoleE2E:
 class TestMaterialEditingE2E:
     """Test material editing via MaterialEditingLibrary against running editor.
 
-    Creates a temporary material, adds/connects/disconnects/deletes nodes,
-    then cleans up.
+    Reuses one dedicated material and never forces expression GC between tests.
+    UE 5.7 can crash when Python requests garbage collection for expressions
+    that MaterialEditingLibrary just marked as garbage.
     """
 
     TEST_MATERIAL = "/Game/E2E_TestMaterial"
-    _material_created = False
+    _material_ready = False
 
     @pytest.fixture(autouse=True)
-    def _ensure_test_material(self, api, project_path):
-        """Create test material once (first test), clean nodes before each test."""
-        from cli_anything.unreal.core.materials import _exec_material_script
+    def _ensure_test_material(self, api):
+        """Create or load a stable test material without deleting its graph."""
+        from cli_anything.unreal.core.script_runner import run_python_code
 
-        project_dir = str(Path(project_path).parent)
-
-        if not TestMaterialEditingE2E._material_created:
-            # First test: create material
-            create_script = '''
+        if not TestMaterialEditingE2E._material_ready:
+            setup_script = '''
 import unreal
-import json
-
-mat_path = "/Game/E2E_TestMaterial"
-
 EAL = unreal.EditorAssetLibrary
-mel = unreal.MaterialEditingLibrary
-mat = None
-
-def _clear_material_expressions(_mat):
-    # Material.expressions is protected in UE 5.7+. Enumerate by outer instead.
-    def _is_valid(_obj):
-        try:
-            return unreal.SystemLibrary.is_valid(_obj)
-        except Exception:
-            return True
-
-    for _ in range(20):
-        exprs = [
-            expr for expr in unreal.ObjectIterator(unreal.MaterialExpression)
-            if expr.get_outer() == _mat and _is_valid(expr)
-        ]
-        if not exprs:
-            return True
-        for expr in exprs:
-            try:
-                mel.delete_material_expression(_mat, expr)
-            except Exception:
-                pass
-        unreal.SystemLibrary.collect_garbage()
-    return False
-
-if EAL.does_asset_exist(mat_path):
-    mat = EAL.load_asset(mat_path)
-    if mat is not None and not isinstance(mat, unreal.Material):
-        if EAL.delete_asset(mat_path):
-            unreal.SystemLibrary.collect_garbage()
-            mat = None
-        else:
-            result = {{"error": "Existing E2E_TestMaterial is not a Material and could not be deleted"}}
-            mat = None
-
-if mat is None and "result" not in globals():
-    factory = unreal.MaterialFactoryNew()
-    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
-    mat = asset_tools.create_asset("E2E_TestMaterial", "/Game", unreal.Material, factory)
-
-if mat is not None:
-    # Keep the fixture stable across repeated e2e runs: reuse an existing
-    # material if delete_asset is temporarily blocked, but clear its graph.
-    if not _clear_material_expressions(mat):
-        result = {{"error": "Failed to clear E2E_TestMaterial expressions"}}
-    else:
-        mel.recompile_material(mat)
-        mat.modify()
-        EAL.save_loaded_asset(mat)
-        result = {{"status": "ok", "name": mat.get_name()}}
-elif "result" not in globals():
-    result = {{"error": "Failed to create test material"}}
-'''
-            result = _exec_material_script(api, create_script, project_dir=project_dir)
-            if "error" in result:
-                pytest.skip(f"Could not create test material: {result['error']}")
-            TestMaterialEditingE2E._material_created = True
-        else:
-            # Subsequent tests: just clean nodes
-            clean_script = '''
-import unreal
-import json
-
-mat = unreal.EditorAssetLibrary.load_asset("/Game/E2E_TestMaterial")
-if mat is not None:
-    mel = unreal.MaterialEditingLibrary
-    def _clear_material_expressions(_mat):
-        # Material.expressions is protected in UE 5.7+. Enumerate by outer instead.
-        def _is_valid(_obj):
-            try:
-                return unreal.SystemLibrary.is_valid(_obj)
-            except Exception:
-                return True
-
-        for _ in range(20):
-            exprs = [
-                expr for expr in unreal.ObjectIterator(unreal.MaterialExpression)
-                if expr.get_outer() == _mat and _is_valid(expr)
-            ]
-            if not exprs:
-                return True
-            for expr in exprs:
-                try:
-                    mel.delete_material_expression(_mat, expr)
-                except Exception:
-                    pass
-            unreal.SystemLibrary.collect_garbage()
-        return False
-    if _clear_material_expressions(mat):
-        mel.recompile_material(mat)
-        result = {{"status": "ok"}}
-    else:
-        result = {{"error": "Failed to clear material expressions"}}
+ATH = unreal.AssetToolsHelpers.get_asset_tools()
+path = "/Game/E2E_TestMaterial"
+if EAL.does_asset_exist(path):
+    mat = EAL.load_asset(path)
 else:
-    result = {{"error": "material not loaded"}}
+    mat = ATH.create_asset(
+        "E2E_TestMaterial", "/Game", unreal.Material, unreal.MaterialFactoryNew()
+    )
+if mat is None or not isinstance(mat, unreal.Material):
+    result = {"error": "Could not load or create shared E2E material"}
+else:
+    result = {"status": "ok", "saved": EAL.save_loaded_asset(mat)}
 '''
-            _exec_material_script(api, clean_script, project_dir=project_dir)
-
+            setup = run_python_code(api, setup_script, timeout=60.0, save=False)
+            if setup.get("status") != "ok" or not setup.get("saved"):
+                pytest.skip(f"Could not prepare shared E2E material: {setup}")
+            TestMaterialEditingE2E._material_ready = True
         yield
-
-    @pytest.fixture(autouse=True, scope="class")
-    def _cleanup_after_all(self, request):
-        """Delete test material after all tests in this class."""
-        yield
-        # Reset flag for next test run
-        TestMaterialEditingE2E._material_created = False
 
     def test_add_node(self, api, project_path):
         """Test adding a node to a material."""
@@ -739,6 +750,10 @@ else:
             node_name, "", "__material_output__", "BaseColor",
             project_dir=project_dir,
         )
+        if disc.get("code") == "MATERIAL_DISCONNECT_UNSAFE_ENGINE":
+            assert disc.get("engine_version") == "5.7", disc
+            assert disc.get("operation") == "material_output", disc
+            return
         assert disc.get("status") == "ok"
 
     def test_disconnect_between_expressions(self, api, project_path):
@@ -783,6 +798,10 @@ else:
             const_name, "", multiply_name, "A",
             project_dir=project_dir,
         )
+        if disc.get("code") == "MATERIAL_DISCONNECT_UNSAFE_ENGINE":
+            assert disc.get("engine_version") == "5.7", disc
+            assert disc.get("operation") == "expression_input", disc
+            return
         assert disc.get("status") == "ok", f"disconnect failed: {disc}"
         assert disc.get("to") == multiply_name
         assert disc.get("to_input") == "A"

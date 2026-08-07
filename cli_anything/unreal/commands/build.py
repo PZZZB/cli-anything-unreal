@@ -307,22 +307,37 @@ def _run_task(command: str, payload: dict, *, timeout: int | None, no_wait: bool
             message = "Task did not finish (no timeout was set)."
         else:
             message = f"Task did not finish within {timeout}s."
-        return {
-            "task_id": task["task_id"],
+        progress = task_progress(current)
+        progress["wait"] = {
             "status": "timeout",
-            "progress": task_progress(current).get("progress", 0),
-            "suggested_poll_interval_seconds": 5,
-            "message": message,
             "code": timeout_code,
+            "timeout_seconds": timeout,
+            "task_continues": True,
         }
+        progress["next_command"] = f"ue-cli task status {task['task_id']}"
+        raise AppError(
+            timeout_code,
+            message,
+            exit_code=4,
+            details=progress,
+        )
 
     progress = task_progress(final_task)
-    if final_task.get("status") == "failed":
+    final_status = final_task.get("status")
+    if final_status in {"failed", "timeout"}:
         error = final_task.get("error", {})
         raise AppError(
-            error.get("code", "TASK_EXECUTION_FAILED"),
-            error.get("message", "Task execution failed"),
+            error.get("code", "TASK_TIMEOUT" if final_status == "timeout" else "TASK_EXECUTION_FAILED"),
+            error.get("message", "Task timed out" if final_status == "timeout" else "Task execution failed"),
             exit_code=3,
+            details=progress,
+        )
+    if final_status == "cancelled":
+        error = final_task.get("error", {})
+        raise AppError(
+            error.get("code", "TASK_CANCELLED"),
+            error.get("message", "Task was cancelled."),
+            exit_code=4,
             details=progress,
         )
     return progress

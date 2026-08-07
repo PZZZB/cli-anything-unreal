@@ -1,14 +1,8 @@
 """Tests for test_asset.py — Uses synthetic data only, no UE editor required."""
 
 import json
-import os
-import subprocess
-import tempfile
-import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 class TestAssets:
@@ -254,7 +248,8 @@ class TestAssets:
         mock_exec.return_value = {"deleted": False}
 
         result = asset_delete(api, "/Game/M_Old")
-        assert result["status"] == "failed"
+        assert result["code"] == "ASSET_DELETE_FAILED"
+        assert result["error"] == "Failed to delete asset: /Game/M_Old"
         assert result["deleted"] is False
 
     def test_asset_duplicate_dest_exists_no_force(self):
@@ -440,10 +435,19 @@ class TestAssets:
         }
         api.set_property.return_value = {"status": "ok"}
 
-        result = set_asset_property(api, "/Game/M_Test", "BlendMode", "Masked")
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value={
+                "status": "ok",
+                "saved": True,
+                "saved_packages": ["/Game/M_Test"],
+            },
+        ) as mock_save:
+            result = set_asset_property(api, "/Game/M_Test", "BlendMode", "Masked")
         assert result["status"] == "ok"
-        # Should have called exec_python_ex twice (once to load, once to save)
-        assert api.exec_python_ex.call_count == 2
+        assert result["saved"] is True
+        assert api.exec_python_ex.call_count == 1
+        assert mock_save.call_args.kwargs["target_packages"] == ["/Game/M_Test"]
 
     def test_asset_property_set_loads_when_exists_probe_is_stale(self):
         from cli_anything.unreal.core.assets import set_asset_property
@@ -455,13 +459,57 @@ class TestAssets:
         }
         api.set_property.return_value = {"status": "ok"}
 
-        result = set_asset_property(api, "/Game/M_Test", "BlendMode", "Masked")
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value={"status": "ok", "saved": True},
+        ):
+            result = set_asset_property(api, "/Game/M_Test", "BlendMode", "Masked")
         assert result["status"] == "ok"
         assert api.set_property.call_args.args == (
             "/Game/M_Test.M_Test",
             "BlendMode",
             "Masked",
         )
+
+    def test_asset_property_set_rejects_unconfirmed_write(self):
+        from cli_anything.unreal.core.assets import set_asset_property
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = True
+        api.exec_python_ex.return_value = {
+            "LogOutput": [{"Output": "LOADED_OBJECT:/Game/M_Test.M_Test"}]
+        }
+        api.set_property.return_value = {"error": "write rejected"}
+
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code"
+        ) as mock_save:
+            result = set_asset_property(api, "/Game/M_Test", "BlendMode", "Masked")
+
+        assert result["code"] == "ASSET_PROPERTY_WRITE_FAILED"
+        mock_save.assert_not_called()
+
+    def test_asset_property_set_reports_target_save_failure(self):
+        from cli_anything.unreal.core.assets import set_asset_property
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = True
+        api.exec_python_ex.return_value = {
+            "LogOutput": [{"Output": "LOADED_OBJECT:/Game/M_Test.M_Test"}]
+        }
+        api.set_property.return_value = {"status": "ok"}
+
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value={
+                "error": "PACKAGE_SAVE_FAILED: /Game/M_Test: save_asset returned false",
+                "code": "PACKAGE_SAVE_FAILED",
+            },
+        ):
+            result = set_asset_property(api, "/Game/M_Test", "BlendMode", "Masked")
+
+        assert result["code"] == "PACKAGE_SAVE_FAILED"
+        assert result["asset"] == "/Game/M_Test"
 
 
 # ═══════════════════════════════════════════════════════════════════════

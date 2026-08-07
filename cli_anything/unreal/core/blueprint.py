@@ -11,6 +11,7 @@ Uses two approaches:
 
 import json
 
+from cli_anything.unreal.core.script_runner import SavePolicy
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
@@ -593,6 +594,7 @@ def get_blueprint_info(
         api,
         _SCRIPT_BP_INFO,
         project_dir=project_dir,
+        save_policy=SavePolicy.NEVER,
         blueprint_path=blueprint_path,
     )
 
@@ -618,6 +620,8 @@ def add_function(
         api,
         _SCRIPT_ADD_FUNCTION,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[blueprint_path],
         blueprint_path=blueprint_path,
         func_name=func_name,
     )
@@ -644,6 +648,8 @@ def remove_function(
         api,
         _SCRIPT_REMOVE_FUNCTION,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[blueprint_path],
         blueprint_path=blueprint_path,
         func_name=func_name,
     )
@@ -673,6 +679,8 @@ def add_variable(
         api,
         _SCRIPT_ADD_VARIABLE,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[blueprint_path],
         blueprint_path=blueprint_path,
         var_name=var_name,
         var_type=var_type,
@@ -701,6 +709,8 @@ def remove_variable(
         api,
         _SCRIPT_REMOVE_VARIABLE,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[blueprint_path],
         blueprint_path=blueprint_path,
         var_name=var_name,
     )
@@ -725,6 +735,8 @@ def remove_unused_variables(
         api,
         _SCRIPT_REMOVE_UNUSED_VARS,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[blueprint_path],
         blueprint_path=blueprint_path,
     )
 
@@ -748,6 +760,8 @@ def compile_blueprint(
         api,
         _SCRIPT_COMPILE,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[blueprint_path],
         blueprint_path=blueprint_path,
     )
 
@@ -775,6 +789,8 @@ def rename_graph(
         api,
         _SCRIPT_RENAME_GRAPH,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[blueprint_path],
         blueprint_path=blueprint_path,
         old_name=old_name,
         new_name=new_name,
@@ -788,6 +804,8 @@ def _exec_blueprint_script(
     script_template: str,
     project_dir: str | None = None,
     timeout: float = 30.0,
+    save_policy: SavePolicy | str = SavePolicy.NEVER,
+    target_packages: list[str] | None = None,
     **kwargs,
 ) -> dict:
     """Execute a blueprint query Python script in the editor and read results.
@@ -816,4 +834,10 @@ def _exec_blueprint_script(
             json.dumps(_blueprint_asset_path_candidates(blueprint_path), ensure_ascii=False),
         )
     script_content = _BLUEPRINT_RESOLVER + "\n" + script_template.format(**kwargs)
-    return run_python_code(api, script_content, timeout=timeout)
+    return run_python_code(
+        api,
+        script_content,
+        timeout=timeout,
+        save_policy=save_policy,
+        target_packages=target_packages,
+    )

@@ -5,6 +5,18 @@ from unittest.mock import MagicMock, patch
 
 
 class TestUMGCore:
+    @patch("cli_anything.unreal.core.script_runner.run_python_code")
+    def test_umg_script_runner_is_read_only_by_default(self, mock_run):
+        from cli_anything.unreal.core.script_runner import SavePolicy
+        from cli_anything.unreal.core.umg import _exec_umg_script
+
+        mock_run.return_value = {"status": "ok"}
+
+        result = _exec_umg_script(MagicMock(), "result = {'status': 'ok'}")
+
+        assert result["status"] == "ok"
+        assert mock_run.call_args.kwargs["save_policy"] is SavePolicy.NEVER
+
     def test_widget_asset_path_candidates_normalizes_generated_class_and_subobject(self):
         from cli_anything.unreal.core.umg import _widget_asset_path_candidates
 
@@ -27,6 +39,7 @@ class TestUMGCore:
 
     @patch("cli_anything.unreal.core.umg._exec_umg_script")
     def test_create_widget_blueprint(self, mock_exec):
+        from cli_anything.unreal.core.script_runner import SavePolicy
         from cli_anything.unreal.core.umg import create_widget_blueprint
 
         mock_exec.return_value = {
@@ -42,9 +55,13 @@ class TestUMGCore:
         assert result["root"]["class"] == "CanvasPanel"
         script = mock_exec.call_args.args[1]
         assert "set_widget_blueprint_root" in script
+        assert "save_asset(" not in script
+        assert mock_exec.call_args.kwargs["save_policy"] is SavePolicy.TARGET_PACKAGES
+        assert mock_exec.call_args.kwargs["target_packages"] == ["/Game/UI/WBP_Hud"]
 
     @patch("cli_anything.unreal.core.umg._exec_umg_script")
     def test_add_widget_to_canvas(self, mock_exec):
+        from cli_anything.unreal.core.script_runner import SavePolicy
         from cli_anything.unreal.core.umg import add_widget_to_canvas
 
         mock_exec.return_value = {
@@ -73,6 +90,9 @@ class TestUMGCore:
         script = mock_exec.call_args.args[1]
         assert "add_widget_to_canvas" in script
         assert '"Ready"' in script
+        assert "save_asset(" not in script
+        assert mock_exec.call_args.kwargs["save_policy"] is SavePolicy.TARGET_PACKAGES
+        assert mock_exec.call_args.kwargs["target_packages"] == ["/Game/UI/WBP_Hud"]
 
     @patch("cli_anything.unreal.core.umg._exec_umg_script")
     def test_get_widget_tree(self, mock_exec):
@@ -147,6 +167,7 @@ class TestUMGCore:
 
     @patch("cli_anything.unreal.core.umg._exec_umg_script")
     def test_set_widget_image(self, mock_exec):
+        from cli_anything.unreal.core.script_runner import SavePolicy
         from cli_anything.unreal.core.umg import set_widget_image
 
         mock_exec.return_value = {
@@ -174,6 +195,9 @@ class TestUMGCore:
         assert "set_position = True" in script
         assert "set_size = True" in script
         assert "set_z_order = True" in script
+        assert "save_asset(" not in script
+        assert mock_exec.call_args.kwargs["save_policy"] is SavePolicy.TARGET_PACKAGES
+        assert mock_exec.call_args.kwargs["target_packages"] == ["/Game/UI/WBP_Hud"]
 
     @patch("cli_anything.unreal.core.umg._exec_umg_script")
     def test_set_widget_image_can_update_brush_image_size_without_resource(self, mock_exec):

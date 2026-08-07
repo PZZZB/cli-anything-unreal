@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -535,6 +534,56 @@ class TestBuildSuccessPaths:
         )
         mock_run_uat.assert_not_called()
         assert result["status"] == "ok"
+
+    def test_compile_module_can_use_engine_editor_target_for_blueprint_project(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.build import compile_project
+
+        project_dir = tmp_path / "BlueprintOnly"
+        project_dir.mkdir()
+        uproject = project_dir / "BlueprintOnly.uproject"
+        uproject.write_text(
+            '{"FileVersion": 3, "EngineAssociation": "4.26"}',
+            encoding="utf-8",
+        )
+        engine_root = self._mock_engine_root()
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build.get_editor_binary_prefix",
+            return_value="UE4Editor",
+        ), patch(
+            "cli_anything.unreal.core.build.run_build",
+            return_value={"returncode": 0, "log_file": "compile.log"},
+        ) as mock_run_build:
+            result = compile_project(
+                str(uproject),
+                engine_root=engine_root,
+                modules=("CliAnythingBridge",),
+                use_engine_editor_target_if_missing=True,
+            )
+
+        mock_run_build.assert_called_once_with(
+            engine_root,
+            "UE4Editor",
+            "Win64",
+            "Development",
+            extra_args=[
+                f"-Project={uproject}",
+                "-Module=CliAnythingBridge",
+                "-WaitMutex",
+            ],
+            log_file=None,
+            log_label="compile",
+            project_dir=str(project_dir),
+            on_start=None,
+        )
+        assert result["status"] == "ok"
+        assert result["editor_target"] == "UE4Editor"
+        assert result["editor_target_source"] == "engine"
 
     def test_compile_rejects_engine_plugin_module_before_ubt(self, temp_project):
         from cli_anything.unreal.core.build import compile_project
@@ -2917,6 +2966,7 @@ class TestBuildStopAndDetect:
         from cli_anything.unreal.core.tasks import (
             create_task,
             load_task,
+            transition_task,
             update_task_fields,
         )
 
@@ -2924,12 +2974,112 @@ class TestBuildStopAndDetect:
         task = create_task("build.compile", {"project_path": "P.uproject"})
 
         update_task_fields(task["task_id"], worker_pid=44001)
-        update_task_fields(task["task_id"], status="running", started_at=123.0)
+        transition_task(task["task_id"], status="running", started_at=123.0)
 
         saved = load_task(task["task_id"])
         assert saved["worker_pid"] == 44001
         assert saved["status"] == "running"
         assert saved["started_at"] == 123.0
+
+        with pytest.raises(ValueError, match="transition_task"):
+            update_task_fields(task["task_id"], status="failed")
+
+    def test_transition_task_terminal_state_rejects_late_worker_result(
+        self, tmp_path, monkeypatch
+    ):
+        from cli_anything.unreal.core.tasks import create_task, transition_task
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task("editor.launch", {"project_path": "P.uproject"})
+        transition_task(task["task_id"], status="running", phase="spawning")
+        cancelled = transition_task(
+            task["task_id"],
+            status="cancelled",
+            phase="exited",
+            error=None,
+            cancelled=True,
+        )
+
+        late = transition_task(
+            task["task_id"],
+            status="completed",
+            phase="online",
+            result_patch={"late_worker": True},
+        )
+
+        assert cancelled["status"] == "cancelled"
+        assert late["status"] == "cancelled"
+        assert late["phase"] == "exited"
+        assert "late_worker" not in late.get("result", {})
+
+    def test_transition_task_cancel_request_wins_over_completion(
+        self, tmp_path, monkeypatch
+    ):
+        from cli_anything.unreal.core.tasks import (
+            _request_task_cancel,
+            create_task,
+            transition_task,
+        )
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task("editor.launch", {"project_path": "P.uproject"})
+        transition_task(task["task_id"], status="running", phase="waiting_remote_control")
+        _request_task_cancel(task["task_id"])
+
+        result = transition_task(
+            task["task_id"],
+            status="completed",
+            phase="online",
+            result_patch={"status": "online"},
+        )
+
+        assert result["status"] == "cancelled"
+        assert result["phase"] == "exited"
+        assert result["cancelled"] is True
+        assert "result" not in result
+
+    def test_transition_task_timeout_recovery_requires_expected_state(
+        self, tmp_path, monkeypatch
+    ):
+        from cli_anything.unreal.core.tasks import create_task, transition_task
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task("editor.launch", {"project_path": "P.uproject"})
+        transition_task(task["task_id"], status="running", phase="waiting_remote_control")
+        transition_task(task["task_id"], status="timeout", phase="blocked")
+
+        rejected = transition_task(task["task_id"], status="completed", phase="online")
+        recovered = transition_task(
+            task["task_id"],
+            expected_statuses={"timeout"},
+            status="completed",
+            phase="online",
+            result_patch={"reconciled": True},
+            error=None,
+        )
+
+        assert rejected["status"] == "timeout"
+        assert rejected["phase"] == "blocked"
+        assert recovered["status"] == "completed"
+        assert recovered["phase"] == "online"
+        assert recovered["result"]["reconciled"] is True
+
+    def test_task_progress_exposes_phase_separately_from_status(
+        self, tmp_path, monkeypatch
+    ):
+        from cli_anything.unreal.core.tasks import create_task, task_progress, transition_task
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task("editor.launch", {"project_path": "P.uproject"})
+        task = transition_task(
+            task["task_id"],
+            status="running",
+            phase="deploying_bridge",
+        )
+
+        progress = task_progress(task)
+        assert progress["status"] == "running"
+        assert progress["phase"] == "deploying_bridge"
 
     def test_finalize_build_task_respects_failed_cancel_state(
         self, tmp_path, monkeypatch
@@ -2940,13 +3090,13 @@ class TestBuildStopAndDetect:
             _request_task_cancel,
             create_task,
             load_task,
-            update_task_fields,
+            transition_task,
         )
 
         monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
         task = create_task("build.compile", {"project_path": "P.uproject"})
         _request_task_cancel(task["task_id"])
-        update_task_fields(
+        transition_task(
             task["task_id"],
             status="running",
             cancel_requested=True,
@@ -2964,6 +3114,36 @@ class TestBuildStopAndDetect:
         assert result["cancelled"] is False
         assert saved["status"] == "completed"
         assert saved["cancel_result"]["remaining"] == [45001]
+
+    def test_finalize_build_task_does_not_overwrite_terminal_failure(
+        self, tmp_path, monkeypatch
+    ):
+        from cli_anything.unreal.core.tasks import (
+            _finalize_build_task,
+            create_task,
+            load_task,
+            transition_task,
+        )
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        task = create_task("build.compile", {"project_path": "P.uproject"})
+        transition_task(task["task_id"], status="running")
+        failed = transition_task(
+            task["task_id"],
+            status="failed",
+            error={"code": "TASK_WORKER_EXITED", "message": "worker exited"},
+        )
+
+        late = _finalize_build_task(
+            task["task_id"],
+            {"status": "ok", "log_file": "late.log"},
+        )
+
+        assert late == failed
+        saved = load_task(task["task_id"])
+        assert saved["status"] == "failed"
+        assert saved["error"]["code"] == "TASK_WORKER_EXITED"
+        assert "result" not in saved
 
     def test_finalize_build_task_preserves_specific_failure_code(
         self, tmp_path, monkeypatch

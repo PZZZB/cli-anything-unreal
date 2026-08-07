@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Optional
 
 from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
+from cli_anything.unreal.core.script_runner import SavePolicy
+from cli_anything.unreal.errors import raise_for_legacy_error
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
@@ -552,11 +554,6 @@ else:
                     mel.recompile_material(mat)
                 except Exception as e:
                     warnings.append("recompile: " + str(e))
-                try:
-                    unreal.EditorAssetLibrary.save_loaded_asset(mat)
-                except Exception as e:
-                    warnings.append("save: " + str(e))
-
                 after_names = _input_names(target)
                 result = {{
                     "status": "ok",
@@ -895,25 +892,6 @@ else:
                 result = {{"status": "ok", "action": "set_param", "material": loaded_asset_path, "param": param_name, "type": "texture", "value": param_value_raw, "set_return": set_return}}
         else:
             result = {{"error": "Unknown param_type: " + param_type + ". Use scalar, vector, or texture."}}
-        if "error" not in result:
-            save_errors = []
-            saved = False
-            try:
-                mat.modify()
-            except Exception as e:
-                save_errors.append("modify: " + str(e))
-            try:
-                saved = bool(unreal.EditorAssetLibrary.save_loaded_asset(mat, only_if_is_dirty=False))
-            except Exception as e:
-                save_errors.append("save_loaded_asset: " + str(e))
-            if not saved:
-                try:
-                    saved = bool(unreal.EditorLoadingAndSavingUtils.save_dirty_packages(False, True))
-                except Exception as e:
-                    save_errors.append("save_dirty_packages: " + str(e))
-            result["saved"] = saved
-            if save_errors:
-                result["save_warnings"] = save_errors
     except Exception as e:
         result = {{"error": "set_param failed: " + str(e)}}
 '''
@@ -1003,6 +981,8 @@ def get_material_info(
     api: UEEditorAPI,
     material_path: str,
     project_dir: str | None = None,
+    *,
+    require_deep: bool = False,
 ) -> dict:
     """Get detailed information about a material.
 
@@ -1049,6 +1029,7 @@ def get_material_info(
         api,
         _SCRIPT_MATERIAL_DETAIL,
         project_dir=project_dir,
+        save_policy=SavePolicy.NEVER,
         material_path=material_path.rsplit(".", 1)[0] if "." in material_path else material_path,
     )
 
@@ -1067,6 +1048,10 @@ def get_material_info(
     else:
         # Python script failed — record as note, RC API data still available
         _raise_if_editor_became_unreachable(api, script_result)
+        if require_deep:
+            return script_result
+        if not basic_info:
+            return script_result
         basic_info["detail_note"] = (
             f"Python script unavailable ({script_result['error']}). "
             "Node-level details require the EditorScriptingUtilities / Python plugin. "
@@ -1093,9 +1078,8 @@ def get_material_stats(
     Returns:
         Dict with shader stats.
     """
-    info = get_material_info(api, material_path, project_dir)
-    if "error" in info:
-        return info
+    info = get_material_info(api, material_path, project_dir, require_deep=True)
+    raise_for_legacy_error(info, default_code="MATERIAL_STATS_FAILED")
 
     return {
         "path": material_path,
@@ -1225,6 +1209,7 @@ def get_material_errors(
         api,
         _PLUGIN_GET_ERRORS_SCRIPT,
         timeout=15.0,
+        save_policy=SavePolicy.NEVER,
         material_path=material_path,
     )
 
@@ -1276,6 +1261,7 @@ def get_material_hlsl_code(
         api,
         _PLUGIN_GET_HLSL_CODE_SCRIPT,
         timeout=60.0,
+        save_policy=SavePolicy.NEVER,
         material_path=material_path,
         mat_name=mat_name,
     )
@@ -1326,6 +1312,7 @@ def get_material_shader_source(
         api,
         _PLUGIN_GET_SHADER_SOURCE_SCRIPT,
         timeout=120.0,
+        save_policy=SavePolicy.NEVER,
         material_path=material_path,
         mat_name=mat_name,
     )
@@ -1359,9 +1346,8 @@ def get_material_texture_list(
     Returns:
         {"textures": [...]}
     """
-    info = get_material_info(api, material_path, project_dir)
-    if "error" in info:
-        return info
+    info = get_material_info(api, material_path, project_dir, require_deep=True)
+    raise_for_legacy_error(info, default_code="MATERIAL_TEXTURE_LIST_FAILED")
 
     textures = info.get("textures", [])
     tex_params = info.get("texture_parameters", [])
@@ -1406,9 +1392,8 @@ def get_material_connections(
             "orphan_nodes": [str, ..],
         }
     """
-    info = get_material_info(api, material_path, project_dir)
-    if "error" in info:
-        return info
+    info = get_material_info(api, material_path, project_dir, require_deep=True)
+    raise_for_legacy_error(info, default_code="MATERIAL_GRAPH_FAILED")
 
     mat_outputs = info.get("material_outputs", {})
     nodes = info.get("nodes", [])
@@ -1483,9 +1468,8 @@ def analyze_material(
     warnings = []
 
     # Get full material info
-    info = get_material_info(api, material_path, project_dir)
-    if "error" in info:
-        return {"issues": [info["error"]], "warnings": [], "stats": {}, "info": info}
+    info = get_material_info(api, material_path, project_dir, require_deep=True)
+    raise_for_legacy_error(info, default_code="MATERIAL_ANALYZE_FAILED")
 
     # ── Analysis rules ────────────────────────────────────────────────
 
@@ -1609,6 +1593,8 @@ def add_material_node(
         api,
         _SCRIPT_ADD_NODE,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[material_path],
         material_path=material_path,
         expression_class=expression_class,
         pos_x=str(pos_x),
@@ -1641,6 +1627,8 @@ def delete_material_node(
         api,
         _SCRIPT_DELETE_NODE,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[material_path],
         material_path=material_path,
         node_name=node_name,
     )
@@ -1666,6 +1654,8 @@ def rename_custom_input(
         api,
         _SCRIPT_RENAME_CUSTOM_INPUT,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[material_path],
         material_path=repr(material_path),
         node_name=repr(node_name),
         old_name=repr(old_name),
@@ -1704,6 +1694,8 @@ def connect_material_nodes(
         api,
         _SCRIPT_CONNECT,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[material_path],
         material_path=material_path,
         from_node=from_node,
         from_output=from_output,
@@ -1739,6 +1731,8 @@ def disconnect_material_nodes(
         api,
         _SCRIPT_DISCONNECT,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[material_path],
         material_path=material_path,
         from_node=from_node,
         from_output=from_output,
@@ -1769,6 +1763,7 @@ def get_material_param(
         api,
         _SCRIPT_GET_PARAM,
         project_dir=project_dir,
+        save_policy=SavePolicy.NEVER,
         material_path=material_path,
         param_name=param_name,
     )
@@ -1801,6 +1796,8 @@ def set_material_param(
         api,
         _SCRIPT_SET_PARAM,
         project_dir=project_dir,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[material_path],
         material_path=material_path,
         param_name=param_name,
         param_value=param_value,
@@ -1828,6 +1825,8 @@ def recompile_material(
         _SCRIPT_RECOMPILE,
         project_dir=project_dir,
         timeout=120.0,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[material_path],
         material_path=material_path,
     )
 
@@ -1957,7 +1956,7 @@ def get_material_hlsl(
             _PLUGIN_GET_ACTIVE_SHADER_PLATFORM_SCRIPT,
             project_dir=project_dir,
             timeout=10.0,
-            save=False,
+            save_policy=SavePolicy.NEVER,
         )
         if "error" in platform_result:
             platform_result.setdefault("code", "MATERIAL_SHADER_DUMP_BRIDGE_UNAVAILABLE")
@@ -1988,7 +1987,7 @@ def get_material_hlsl(
                 _PLUGIN_RECOMPILE_SHADER_DUMP_SCRIPT,
                 project_dir=project_dir,
                 timeout=30.0,
-                save=False,
+                save_policy=SavePolicy.NEVER,
                 material_path=material_path,
             )
             if "error" in recompile_result:
@@ -2178,7 +2177,9 @@ def _exec_material_script(
     script_template: str,
     project_dir: str | None = None,
     timeout: float = 30.0,
-    save: bool = True,
+    save: bool | None = None,
+    save_policy: SavePolicy | str | None = None,
+    target_packages: list[str] | None = None,
     **kwargs,
 ) -> dict:
     """Execute a material query Python script in the editor and read results.
@@ -2192,7 +2193,10 @@ def _exec_material_script(
         script_template: Python script template with {placeholders}.
         project_dir: Unused — kept for backwards compatibility.
         timeout: HTTP request timeout in seconds.
-        save: Whether script-runner should auto-save dirty packages.
+        save: Backwards-compatible boolean save flag.
+        save_policy: Explicit package persistence policy. Material operations
+            default to read-only; mutation callers must name target packages.
+        target_packages: Packages owned by a targeted mutation.
         **kwargs: Template variables.
 
     Returns:
@@ -2208,4 +2212,13 @@ def _exec_material_script(
             json.dumps(_material_asset_path_candidates(material_path), ensure_ascii=False),
         )
     script_content = _MATERIAL_RESOLVER + "\n" + script_template.format(**kwargs)
-    return run_python_code(api, script_content, timeout=timeout, save=save)
+    if save_policy is None and save is None:
+        save_policy = SavePolicy.NEVER
+    return run_python_code(
+        api,
+        script_content,
+        timeout=timeout,
+        save=save,
+        save_policy=save_policy,
+        target_packages=target_packages,
+    )

@@ -3,9 +3,6 @@
 import ast
 import json
 import os
-import subprocess
-import tempfile
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -516,30 +513,6 @@ class TestCLI:
         assert data["result"][0]["log_error"] == "Plugin 'libzstd' failed to load"
 
     @patch("cli_anything.unreal.utils.ue_backend.preflight_check")
-    def test_editor_launch_preflight_failed_includes_startup_precheck(self, mock_preflight, temp_project):
-        from click.testing import CliRunner
-        from cli_anything.unreal.unreal_cli import cli
-
-        mock_preflight.return_value = {
-            "ready": False,
-            "engine": {"errors": ["engine error"], "warnings": ["engine warning"]},
-            "project": {"errors": ["project error"], "warnings": []},
-        }
-
-        runner = CliRunner()
-        with patch("cli_anything.unreal.commands.editor.submit_task", return_value={"task_id": "launch-task"}):
-            result = runner.invoke(cli, [
-                "--output", "json", "--project", temp_project["uproject"],
-                "editor", "launch", "--no-wait",
-            ])
-
-        assert result.exit_code == 0
-        data = json.loads(result.output)
-        assert data["status"] == "success"
-        assert data["result"]["status"] == "submitted"
-        assert "task_id" in data["result"]
-
-    @patch("cli_anything.unreal.utils.ue_backend.preflight_check")
     def test_top_level_preflight_alias(self, mock_preflight, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -561,42 +534,6 @@ class TestCLI:
         assert data["status"] == "success"
         assert data["result"]["ready"] is True
         mock_preflight.assert_called_once()
-
-    @patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None)
-    @patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None)
-    @patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={"deployed": False})
-    @patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Engine/Binaries/Win64/UnrealEditor.exe")
-    @patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine")
-    @patch("cli_anything.unreal.commands.editor.sp.Popen")
-    def test_editor_launch_success_includes_startup_precheck(
-        self,
-        mock_popen,
-        _mock_find_engine_root,
-        _mock_find_editor_exe,
-        _mock_deploy_bridge,
-        _mock_check_already_running,
-        _mock_check_port_in_use,
-        temp_project,
-    ):
-        from click.testing import CliRunner
-        from cli_anything.unreal.unreal_cli import cli
-
-        mock_proc = MagicMock()
-        mock_proc.pid = 12345
-        mock_popen.return_value = mock_proc
-
-        runner = CliRunner()
-        with patch("cli_anything.unreal.commands.editor.submit_task", return_value={"task_id": "launch-task"}):
-            result = runner.invoke(cli, [
-                "--output", "json", "--project", temp_project["uproject"],
-                "editor", "launch", "--no-wait",
-            ])
-
-        assert result.exit_code == 0
-        data = json.loads(result.output)
-        assert data["status"] == "success"
-        assert data["result"]["status"] == "submitted"
-        assert "task_id" in data["result"]
 
     def test_session_status(self, temp_project):
         from click.testing import CliRunner
@@ -625,7 +562,7 @@ class TestCLI:
         assert data["result"]["project"] == "TestProject"
         assert data["result"]["has_binaries"] is True
 
-    def test_port_option(self):
+    def test_port_option(self, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
 
@@ -633,8 +570,10 @@ class TestCLI:
         with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
             {"port": 30015, "alive": True, "info": {"ok": True}},
         ]), \
-             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
-             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+                 {"pid": 1234, "project": temp_project["uproject"]},
+             ]):
             result = runner.invoke(cli, [
                 "--output", "json", "--port", "30015",
                 "editor", "status",
@@ -1033,8 +972,10 @@ class TestCLI:
                 [],
                 [{"port": 30055, "alive": True, "info": {"ok": True}}],
              ]), \
-             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
-             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+                 {"pid": 1234, "project": temp_project["uproject"]},
+             ]):
             result = runner.invoke(cli, [
                 "--output", "json", "--project", temp_project["uproject"],
                 "editor", "status",
@@ -1052,8 +993,10 @@ class TestCLI:
         with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
                 {"port": 30010, "alive": True, "info": {"ok": True}},
              ]), \
-             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
-             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+                 {"pid": 1234, "project": temp_project["uproject"]},
+             ]):
             result = runner.invoke(cli, [
                 "--output", "json", "--project", temp_project["uproject"],
                 "editor", "status",
@@ -1076,12 +1019,13 @@ class TestCLI:
         )
 
         runner = CliRunner()
-        with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", side_effect=[
-                [],
-                [{"port": 30099, "alive": True, "info": {"ok": True}}],
+        with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[
+                {"port": 30099, "alive": True, "info": {"ok": True}},
              ]), \
-             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
-             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[]):
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=1234), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+                 {"pid": 1234, "project": temp_project["uproject"]},
+             ]):
             result = runner.invoke(cli, [
                 "--output", "json", "--project", temp_project["uproject"],
                 "--port", "30099",
@@ -1231,6 +1175,161 @@ class TestCLI:
         data = json.loads(result.output)
         assert data["code"] == "EDITOR_UNREACHABLE"
         assert created_ports == [30010]
+
+    def test_editor_status_infers_nearest_cwd_project(self, temp_project, monkeypatch):
+        """Unqualified status inside a project tree filters unrelated editors."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        project_path = str(Path(temp_project["uproject"]).resolve())
+        other_project = str(Path(temp_project["dir"]).with_name("Other") / "Other.uproject")
+        monkeypatch.chdir(Path(temp_project["dir"]) / "Content" / "Materials")
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value=r"F:\Engine"), \
+             patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[
+                 {
+                     "status": "online",
+                     "pid": 99999,
+                     "port": 30011,
+                     "project_path": other_project,
+                 },
+             ]) as scan_status:
+            result = runner.invoke(cli, ["--output", "json", "editor", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["result"] == []
+        scan_state = scan_status.call_args.args[0]
+        assert Path(scan_state.session.project_path).resolve() == Path(project_path)
+        assert scan_state.project_is_inferred is True
+
+    def test_editor_command_infers_cwd_project_before_live_port_recovery(
+        self,
+        temp_project,
+        monkeypatch,
+    ):
+        """A unique unrelated editor is never selected from inside a project tree."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        project_path = str(Path(temp_project["uproject"]).resolve())
+        other_project = str(Path(temp_project["dir"]).with_name("Other") / "Other.uproject")
+        monkeypatch.chdir(temp_project["dir"])
+        created_ports = []
+
+        class FakeAPI:
+            def __init__(self, port):
+                self.port = port
+                self.project_path = None
+                created_ports.append(port)
+
+            def is_alive(self):
+                return False
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value=r"F:\Engine"), \
+             patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", FakeAPI), \
+             patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[
+                 {
+                     "status": "online",
+                     "pid": 99999,
+                     "port": 30011,
+                     "project_path": other_project,
+                 },
+             ]) as scan_status, \
+             patch("cli_anything.unreal.core.scene.open_level") as open_level:
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "editor", "open-level", "/Game/Maps/TestMap",
+            ])
+
+        assert result.exit_code == 4, result.output
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_UNREACHABLE"
+        assert created_ports == [30010]
+        scan_state = scan_status.call_args.args[0]
+        assert Path(scan_state.session.project_path).resolve() == Path(project_path)
+        open_level.assert_not_called()
+
+    def test_editor_command_rejects_ambiguous_cwd_projects(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        (tmp_path / "One.uproject").write_text("{}", encoding="utf-8")
+        (tmp_path / "Two.uproject").write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI") as api_cls:
+            result = CliRunner().invoke(cli, [
+                "--output", "json",
+                "editor", "open-level", "/Game/Maps/TestMap",
+            ])
+
+        assert result.exit_code == 2, result.output
+        data = json.loads(result.output)
+        assert data["code"] == "PROJECT_AMBIGUOUS"
+        assert len(data["details"]["candidates"]) == 2
+        api_cls.assert_not_called()
+
+    def test_editor_status_all_allows_ambiguous_cwd_projects(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        (tmp_path / "One.uproject").write_text("{}", encoding="utf-8")
+        (tmp_path / "Two.uproject").write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        with patch(
+            "cli_anything.unreal.commands.editor._scan_editor_status_instances",
+            return_value=[],
+        ) as scan:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "editor", "status", "--all",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["result"] == []
+        assert scan.call_args.args[0].session.project_path is None
+
+    def test_explicit_port_keeps_inferred_project_owner_guard(
+        self,
+        temp_project,
+        monkeypatch,
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        project_path = str(Path(temp_project["uproject"]).resolve())
+        other_project = str(Path(temp_project["dir"]).with_name("Other") / "Other.uproject")
+        monkeypatch.chdir(temp_project["dir"])
+
+        class FakeAPI:
+            def __init__(self, port):
+                self.port = port
+                self.project_path = None
+
+            def is_alive(self):
+                return True
+
+            @staticmethod
+            def _get_pid_listening_on_port(_port):
+                return 222
+
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", FakeAPI), \
+             patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value=r"F:\Engine"), \
+             patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+                 {"pid": 111, "project": project_path},
+                 {"pid": 222, "project": other_project},
+             ]), \
+             patch("cli_anything.unreal.core.scene.open_level") as open_level:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "--port", "30011",
+                "editor", "open-level", "/Game/Maps/TestMap",
+            ])
+
+        assert result.exit_code == 3, result.output
+        assert json.loads(result.output)["code"] == "EDITOR_PROJECT_NOT_RUNNING"
+        open_level.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════════════

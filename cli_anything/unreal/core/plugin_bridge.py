@@ -519,6 +519,7 @@ def compile_bridge_plugin(
         log_file=log_file,
         on_start=on_start,
         modules=[_PLUGIN_NAME],
+        use_engine_editor_target_if_missing=True,
     )
     result = {
         **base,
@@ -556,12 +557,19 @@ def compile_bridge_plugin(
             "recovery_command": recovery_command,
         }
 
-    output_validation = _validate_win64_editor_build_products(
-        uproject_path,
-        resolved_engine_root,
-        config,
-        [_PLUGIN_NAME],
-    )
+    if compile_result.get("editor_target_source") == "engine":
+        output_validation = {
+            "status": "ok",
+            "validation": "bridge_binary",
+            "editor_target": compile_result.get("editor_target"),
+        }
+    else:
+        output_validation = _validate_win64_editor_build_products(
+            uproject_path,
+            resolved_engine_root,
+            config,
+            [_PLUGIN_NAME],
+        )
     result["output_validation"] = output_validation or {"status": "ok"}
     if output_validation.get("status") == "error":
         return {

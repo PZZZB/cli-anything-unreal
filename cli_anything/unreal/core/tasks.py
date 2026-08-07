@@ -15,8 +15,15 @@ from pathlib import Path
 
 FINAL_TASK_STATUSES = {"completed", "failed", "timeout", "cancelled"}
 BUILD_TASK_COMMANDS = {"build.compile", "build.cook", "build.package"}
+EDITOR_LAUNCH_SPAWN_GRACE_SECONDS = 30
 _WINDOWS_TASK_IO_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
 _WINDOWS_PROCESS_IDENTITY_QUERY_TIMEOUT_SECONDS = 3
+_UNCHANGED = object()
+_TASK_STATUS_TRANSITIONS = {
+    "submitted": {"running", "failed", "cancelled"},
+    "running": {"running", "compiling", "completed", "failed", "timeout", "cancelled"},
+    "compiling": {"compiling", "running", "completed", "failed", "timeout", "cancelled"},
+}
 
 
 class TaskLockTimeout(TimeoutError):
@@ -259,6 +266,120 @@ def _recorded_process_identity_matches(recorded: dict, current: dict) -> bool:
     return True
 
 
+def _terminate_just_spawned_process(proc, recorded_identity: dict | None) -> dict:
+    """Stop a process spawned across a cancellation race using exact identity."""
+
+    pid = int(proc.pid)
+    if sys.platform == "win32" and recorded_identity:
+        from cli_anything.unreal.utils.ue_backend import (
+            _kill_process_tree_result,
+            _windows_process_identity,
+        )
+
+        current_identity = _windows_process_identity(pid)
+        if not current_identity.get("query_ok"):
+            return {
+                "ok": False,
+                "pid": pid,
+                "identity_query_failed": True,
+                "process": current_identity,
+            }
+        if not current_identity.get("found"):
+            return {
+                "ok": True,
+                "pid": pid,
+                "already_exited": True,
+                "process": current_identity,
+            }
+        if not _recorded_process_identity_matches(recorded_identity, current_identity):
+            return {
+                "ok": False,
+                "pid": pid,
+                "ownership_mismatch": True,
+                "process": current_identity,
+            }
+        result = _kill_process_tree_result(pid)
+        result.setdefault("process", current_identity)
+        return result
+
+    # ``Popen`` still owns the exact process handle here, so this fallback does
+    # not depend on a reusable numeric PID.
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "ok": False,
+                "pid": pid,
+                "method": "popen_terminate",
+                "error": str(exc),
+                "still_running": True,
+            }
+        except AttributeError as exc:
+            return {
+                "ok": False,
+                "pid": pid,
+                "method": "popen_terminate",
+                "error": str(exc),
+                "exit_unverified": True,
+            }
+        return {"ok": True, "pid": pid, "method": "popen_terminate"}
+    except Exception as exc:
+        return {"ok": False, "pid": pid, "error": str(exc)}
+
+
+def _cancel_spawned_editor_if_requested(
+    task_id: str,
+    task: dict,
+    proc,
+    process_identity: dict | None,
+) -> dict | None:
+    """Resolve the cancel-after-check race immediately after editor spawn."""
+
+    if task.get("status") == "running" and not _task_cancel_requested(task_id):
+        return None
+    cleanup = _terminate_just_spawned_process(proc, process_identity)
+    update_task_fields(task_id, spawn_cancel_cleanup=cleanup)
+    if not cleanup.get("ok"):
+        current = load_task(task_id) or task
+        current_status = str(current.get("status") or "running")
+        if current_status in FINAL_TASK_STATUSES:
+            return transition_task(
+                task_id,
+                expected_statuses={"cancelled"},
+                status="failed",
+                phase="exited",
+                cancelled=False,
+                error={
+                    "code": "TASK_CANCEL_FAILED",
+                    "message": (
+                        "A newly spawned editor exit could not be verified after "
+                        "cancellation."
+                    ),
+                    "details": cleanup,
+                },
+                spawn_cancel_cleanup_failed=True,
+            ) or current
+        return transition_task(
+            task_id,
+            status=current_status,
+            cancelled=False,
+            error={
+                "code": "TASK_CANCEL_FAILED",
+                "message": "A newly spawned editor could not be safely terminated.",
+            },
+        ) or current
+    return transition_task(
+        task_id,
+        status="cancelled",
+        phase="exited",
+        error=None,
+        cancelled=True,
+        remove=("error",),
+    ) or task
+
+
 def _query_owned_task_process(
     role: str,
     pid: int,
@@ -319,6 +440,7 @@ def create_task(command: str, payload: dict) -> dict:
         "command": command,
         "payload": payload,
         "status": "submitted",
+        "task_state_version": 2,
         "created_at": now,
         "updated_at": now,
         "suggested_poll_interval_seconds": 5,
@@ -377,12 +499,97 @@ def update_task_fields(
     **fields,
 ) -> dict | None:
     """Atomically merge task fields without dropping another process's metadata."""
+    if (updates and "status" in updates) or "status" in fields:
+        raise ValueError("Task status changes must use transition_task().")
     with _task_lock(task_id):
         task = _load_task_unlocked(task_id)
         if task is None:
             return None
         if updates:
             task.update(updates)
+        task.update(fields)
+        for key in remove:
+            task.pop(key, None)
+        return _write_task_unlocked(task)
+
+
+def transition_task(
+    task_id: str,
+    *,
+    expected_statuses: set[str] | tuple[str, ...] | list[str] | None = None,
+    status: str,
+    phase: str | None | object = _UNCHANGED,
+    result_patch: dict | None = None,
+    result_remove: tuple[str, ...] = (),
+    error: dict | None | object = _UNCHANGED,
+    remove: tuple[str, ...] = (),
+    **fields,
+) -> dict | None:
+    """Atomically apply one guarded task-state transition.
+
+    Terminal states cannot be overwritten. A verified timeout recovery or
+    cancellation-cleanup failure must name its current terminal state through
+    ``expected_statuses``. A pending cancellation wins over late worker output.
+    """
+
+    with _task_lock(task_id):
+        task = _load_task_unlocked(task_id)
+        if task is None:
+            return None
+
+        current_status = str(task.get("status") or "submitted")
+        if expected_statuses is not None and current_status not in set(expected_statuses):
+            return task
+
+        requested_status = str(status)
+        if current_status in FINAL_TASK_STATUSES and requested_status == current_status:
+            return task
+        cancellation_pending = bool(
+            (_task_cancel_requested(task_id) or task.get("cancel_requested"))
+            and fields.get("cancelled", task.get("cancelled")) is not False
+            and current_status not in FINAL_TASK_STATUSES
+        )
+        if cancellation_pending and requested_status != "cancelled":
+            requested_status = "cancelled"
+            fields = {"cancelled": True}
+            result_patch = None
+            result_remove = ()
+            phase = "exited"
+            error = None
+
+        transition_allowed = requested_status == current_status
+        expected = set(expected_statuses or ())
+        if not transition_allowed and current_status == "timeout":
+            transition_allowed = requested_status == "cancelled" or (
+                requested_status == "completed" and expected == {"timeout"}
+            )
+        elif not transition_allowed and current_status == "cancelled":
+            transition_allowed = requested_status == "failed" and expected == {"cancelled"}
+        elif not transition_allowed and current_status not in FINAL_TASK_STATUSES:
+            transition_allowed = requested_status in _TASK_STATUS_TRANSITIONS.get(
+                current_status,
+                set(),
+            )
+        if not transition_allowed:
+            return task
+
+        task["status"] = requested_status
+        if phase is not _UNCHANGED:
+            if phase is None:
+                task.pop("phase", None)
+            else:
+                task["phase"] = str(phase)
+        if result_patch or result_remove:
+            merged_result = dict(task.get("result", {}))
+            for key in result_remove:
+                merged_result.pop(key, None)
+            merged_result.update(result_patch or {})
+            task["result"] = merged_result
+        if error is not _UNCHANGED:
+            if error is None:
+                task.pop("error", None)
+            else:
+                task["error"] = error
         task.update(fields)
         for key in remove:
             task.pop(key, None)
@@ -413,6 +620,8 @@ def _finalize_build_task(
             task.update(status="cancelled", cancelled=True)
             task.pop("error", None)
             return _write_task_unlocked(task)
+        if task.get("status") in FINAL_TASK_STATUSES:
+            return task
         if exception:
             return None
 
@@ -640,6 +849,8 @@ def task_progress(task: dict) -> dict:
         "status": status,
         "suggested_poll_interval_seconds": task.get("suggested_poll_interval_seconds", 5),
     }
+    if "phase" in task:
+        result["phase"] = task["phase"]
     if "pid" in task:
         result["pid"] = task["pid"]
     if "worker_pid" in task:
@@ -690,7 +901,7 @@ def _worker_spawn_attempt(error: OSError, creationflags: int, *, mode: str) -> d
 def _raise_worker_spawn_error(task_id: str, attempts: list[dict]) -> None:
     error = TaskWorkerSpawnError(task_id, attempts)
     try:
-        update_task_fields(task_id, status="failed", error=error.as_task_error())
+        transition_task(task_id, status="failed", error=error.as_task_error())
     except OSError:
         # Preserve the process-creation failure if task-state persistence is
         # independently blocked.
@@ -773,7 +984,20 @@ def spawn_worker(task_id: str) -> int:
     if worker_identity:
         updates["worker_process_identity"] = worker_identity
     try:
-        update_task_fields(task_id, updates)
+        latest = transition_task(
+            task_id,
+            expected_statuses={"submitted"},
+            status="submitted",
+            **updates,
+        )
+        if (
+            latest is not None
+            and latest.get("status") == "running"
+            and int(latest.get("worker_pid") or 0) == int(proc.pid)
+        ):
+            # The child claimed the task before the parent published its PID.
+            # Its atomic claim already contains the same identity.
+            pass
     except PermissionError:
         # The worker is already alive and will persist its own PID/status. Do
         # not tell the caller launch failed while that task still exists.
@@ -828,14 +1052,30 @@ def cancel_task(task_id: str) -> dict | None:
     task = load_task(task_id)
     if task is None:
         return None
-    if task.get("status") in FINAL_TASK_STATUSES:
-        task["cancelled"] = False
-        return save_task(task)
+    if task.get("status") in {"completed", "failed", "cancelled"}:
+        return task
 
     command = task.get("command")
     payload = task.get("payload", {})
     _request_task_cancel(task_id)
     task = update_task_fields(task_id, cancel_requested=True) or task
+
+    if (
+        command == "editor.launch"
+        and not task.get("pid")
+        and task.get("status") not in FINAL_TASK_STATUSES
+    ):
+        # Do not kill/finalize the worker while it may be between the last
+        # cancel check and Popen. The worker publishes any new editor identity,
+        # rechecks this marker, terminates that exact process, then commits the
+        # terminal cancellation itself.
+        return transition_task(
+            task_id,
+            status=str(task.get("status") or "submitted"),
+            phase="cancelling",
+            error=None,
+            cancel_requested=True,
+        ) or task
 
     if command in BUILD_TASK_COMMANDS:
         from cli_anything.unreal.utils.ue_backend import (
@@ -1039,15 +1279,16 @@ def cancel_task(task_id: str) -> dict | None:
             },
         }
         if remaining:
-            updates.update({
-                "status": "running",
-                "cancelled": False,
-                "error": {
+            return transition_task(
+                task_id,
+                status="running",
+                error={
                     "code": "TASK_CANCEL_FAILED",
                     "message": "Build task cancellation left processes running.",
                 },
-            })
-            return update_task_fields(task_id, updates) or task
+                cancelled=False,
+                **updates,
+            ) or task
 
         if (
             command == "build.compile"
@@ -1074,26 +1315,108 @@ def cancel_task(task_id: str) -> dict | None:
                         f"inspection failed: {exc}"
                     ),
                 }
-        updates.update({"status": "cancelled", "cancelled": True})
-        return update_task_fields(
+        return transition_task(
             task_id,
-            updates,
+            status="cancelled",
+            error=None,
+            cancelled=True,
             remove=("error",),
+            **updates,
         ) or task
 
-    pid = task.get("pid") or task.get("worker_pid")
-    if pid:
-        try:
-            from cli_anything.unreal.utils.ue_backend import _kill_process_tree
+    process_specs = []
+    if task.get("pid"):
+        process_specs.append((
+            "editor",
+            int(task["pid"]),
+            task.get("editor_process_identity"),
+        ))
+    if task.get("worker_pid") and int(task["worker_pid"]) not in {
+        item[1] for item in process_specs
+    }:
+        process_specs.append((
+            "worker",
+            int(task["worker_pid"]),
+            task.get("worker_process_identity"),
+        ))
 
-            _kill_process_tree(int(pid))
-        except Exception:
-            pass
+    kill_results = []
+    if process_specs:
+        from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
 
-    return update_task_fields(
+        for role, pid, recorded_identity in process_specs:
+            if sys.platform == "win32":
+                if not recorded_identity:
+                    kill_result = {
+                        "ok": False,
+                        "pid": pid,
+                        "role": role,
+                        "identity_missing": True,
+                        "error": "Recorded process identity is unavailable; refusing to kill an unverified PID.",
+                    }
+                    kill_results.append(kill_result)
+                    continue
+                from cli_anything.unreal.utils.ue_backend import _windows_process_identity
+
+                current_identity = _windows_process_identity(pid)
+                if not current_identity.get("query_ok"):
+                    kill_result = {
+                        "ok": False,
+                        "pid": pid,
+                        "role": role,
+                        "identity_query_failed": True,
+                        "process": current_identity,
+                    }
+                    kill_results.append(kill_result)
+                    continue
+                if not current_identity.get("found"):
+                    kill_results.append({
+                        "ok": True,
+                        "pid": pid,
+                        "role": role,
+                        "already_exited": True,
+                        "process": current_identity,
+                    })
+                    continue
+                if not _recorded_process_identity_matches(
+                    recorded_identity,
+                    current_identity,
+                ):
+                    kill_results.append({
+                        "ok": False,
+                        "pid": pid,
+                        "role": role,
+                        "ownership_mismatch": True,
+                        "process": current_identity,
+                    })
+                    continue
+            try:
+                kill_result = _kill_process_tree_result(pid)
+            except Exception as exc:
+                kill_result = {"ok": False, "pid": pid, "error": str(exc)}
+            kill_result["role"] = role
+            kill_results.append(kill_result)
+
+    failures = [item for item in kill_results if not item.get("ok")]
+    if failures:
+        current_status = str(task.get("status") or "running")
+        return transition_task(
+            task_id,
+            status=current_status,
+            error={
+                "code": "TASK_CANCEL_FAILED",
+                "message": "Task cancellation could not safely terminate every verified process.",
+            },
+            cancelled=False,
+            cancel_result={"processes": kill_results},
+        ) or task
+
+    return transition_task(
         task_id,
         status="cancelled",
+        error=None,
         cancelled=True,
+        cancel_result={"processes": kill_results},
         remove=("error",),
     ) or task
 
@@ -1106,22 +1429,32 @@ def run_task_worker(task_id: str) -> dict:
         return task
 
     if _task_cancel_requested(task_id):
-        return update_task_fields(
+        return transition_task(
             task_id,
             status="cancelled",
+            error=None,
             cancelled=True,
             remove=("error",),
         ) or task
 
     worker_updates = {
-        "status": "running",
         "started_at": time.time(),
         "worker_pid": os.getpid(),
     }
     worker_identity = _capture_windows_process_identity(os.getpid())
     if worker_identity:
         worker_updates["worker_process_identity"] = worker_identity
-    task = update_task_fields(task_id, worker_updates) or task
+    task = transition_task(
+        task_id,
+        expected_statuses={"submitted"},
+        status="running",
+        **worker_updates,
+    ) or task
+    if (
+        task.get("status") != "running"
+        or int(task.get("worker_pid") or 0) != os.getpid()
+    ):
+        return task
 
     command = task.get("command")
     if command == "build.compile":
@@ -1142,14 +1475,13 @@ def _run_build_task(task: dict, func_name: str, *, estimated_total_seconds: int)
 
     def _on_start(proc):
         updates = {
-            "status": "running",
             "pid": proc.pid,
             "estimated_total_seconds": estimated_total_seconds,
         }
         build_identity = _capture_windows_process_identity(proc.pid)
         if build_identity:
             updates["build_process_identity"] = build_identity
-        update_task_fields(task["task_id"], updates)
+        transition_task(task["task_id"], status="running", **updates)
 
     kwargs = {
         "uproject_path": payload["project_path"],
@@ -1247,11 +1579,57 @@ def _map_recovery_crash_diagnostics(log_file: Path, project_dir: str | None) -> 
     return diagnostics
 
 
+def _claim_editor_launch_task(task_id: str, project_path: str) -> dict | None:
+    """Claim one project's launch slot; return the older active blocker."""
+
+    target = _normalize_project_path(project_path)
+    claim_lock_id = f"editor-launch-{uuid.uuid5(uuid.NAMESPACE_URL, target).hex}"
+    with _task_lock(claim_lock_id):
+        current = load_task(task_id)
+        if current is None:
+            return None
+        candidates = []
+        now = time.time()
+        for candidate in iter_tasks():
+            if candidate.get("command") != "editor.launch":
+                continue
+            if candidate.get("status") in FINAL_TASK_STATUSES:
+                continue
+            if now - float(candidate.get("updated_at") or candidate.get("created_at") or 0) > 7200:
+                continue
+            candidate_project = str(candidate.get("payload", {}).get("project_path", ""))
+            if not candidate_project or _normalize_project_path(candidate_project) != target:
+                continue
+            if candidate.get("task_id") != task_id:
+                if not candidate.get("worker_pid"):
+                    created_at = float(candidate.get("created_at") or 0)
+                    if (
+                        candidate.get("status") != "submitted"
+                        or now - created_at > EDITOR_LAUNCH_SPAWN_GRACE_SECONDS
+                    ):
+                        continue
+                elif _probe_task_process(candidate, "worker").get("state") != "running":
+                    continue
+            candidates.append(candidate)
+
+        candidates.sort(
+            key=lambda item: (
+                float(item.get("created_at") or 0),
+                str(item.get("task_id") or ""),
+            )
+        )
+        winner = candidates[0] if candidates else current
+        if winner.get("task_id") != task_id:
+            return winner
+        update_task_fields(task_id, launch_claimed_at=time.time())
+        return None
+
+
 def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict:
     import subprocess as sp
+    from types import SimpleNamespace
 
-    from cli_anything.unreal.commands import AppState
-    from cli_anything.unreal.commands.editor import (
+    from cli_anything.unreal.core.editor_lifecycle import (
         _build_launch_cmd,
         _check_already_running,
         _check_port_in_use,
@@ -1261,6 +1639,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         _summarize_startup_precheck,
         _wait_for_api,
     )
+    from cli_anything.unreal.core.session import Session
     from cli_anything.unreal.utils.ue_backend import (
         ensure_remote_control_config,
         find_editor_exe,
@@ -1269,17 +1648,53 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     )
 
     payload = task["payload"]
-    state = AppState()
-    state.json_output = True
-    state.session.load_project(payload["project_path"])
+    task_id = task["task_id"]
+    session = Session()
+    session.load_project(payload["project_path"])
+    state = SimpleNamespace(json_output=True, session=session)
     if payload.get("port") is not None:
         state.session.port = int(payload["port"])
 
+    task = transition_task(
+        task_id,
+        expected_statuses={"submitted", "running"},
+        status="running",
+        phase="preflight",
+        requested_port=state.session.port,
+        resolved_port=state.session.port,
+    ) or task
+    if task.get("status") != "running":
+        return task
+
+    blocker = _claim_editor_launch_task(task_id, state.session.project_path)
+    if blocker is not None:
+        return transition_task(
+            task_id,
+            status="failed",
+            phase="blocked",
+            error={
+                "code": "EDITOR_LAUNCH_ALREADY_ACTIVE",
+                "message": "Another editor launch task is already active for this project.",
+                "details": {
+                    "active_task_id": blocker.get("task_id"),
+                    "active_status": blocker.get("status"),
+                    "project_path": state.session.project_path,
+                },
+            },
+            result_patch={
+                "active_task_id": blocker.get("task_id"),
+                "active_status": blocker.get("status"),
+            },
+        ) or task
+
     launch_error = _remote_control_launch_error(payload.get("extra_args"))
     if launch_error:
-        task["status"] = "failed"
-        task["error"] = launch_error
-        return save_task(task)
+        return transition_task(
+            task_id,
+            status="failed",
+            phase="blocked",
+            error=launch_error,
+        ) or task
 
     launch_binary_prefix = (
         get_editor_binary_prefix(state.session.engine_root)
@@ -1311,6 +1726,13 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "reason": "plugin_unavailable",
         }
     else:
+        task = transition_task(
+            task_id,
+            status="running",
+            phase="preparing_remote_control",
+        ) or task
+        if task.get("status") != "running":
+            return task
         remote_control_prepare = ensure_remote_control_config(
             state.session.project_dir,
             engine_root=state.session.engine_root,
@@ -1320,37 +1742,57 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     startup_precheck = _summarize_startup_precheck(preflight)
     if not preflight.get("ready"):
-        task["status"] = "failed"
-        task["error"] = {
-            "code": "PREFLIGHT_FAILED",
-            "message": "Editor preflight failed",
-            "details": startup_precheck,
-        }
-        task["result"] = {
-            "startup_precheck": startup_precheck,
-            "preflight": preflight,
-            "remote_control_prepare": remote_control_prepare,
-        }
-        return save_task(task)
+        return transition_task(
+            task_id,
+            status="failed",
+            phase="blocked",
+            error={
+                "code": "PREFLIGHT_FAILED",
+                "message": "Editor preflight failed",
+                "details": startup_precheck,
+            },
+            result_patch={
+                "startup_precheck": startup_precheck,
+                "preflight": preflight,
+                "remote_control_prepare": remote_control_prepare,
+            },
+        ) or task
 
     editor_exe = find_editor_exe(state.session.engine_root)
     if not editor_exe:
-        task["status"] = "failed"
-        task["error"] = {
-            "code": "EDITOR_NOT_FOUND",
-            "message": f"UnrealEditor.exe not found in {state.session.engine_root}",
-        }
-        return save_task(task)
+        return transition_task(
+            task_id,
+            status="failed",
+            phase="blocked",
+            error={
+                "code": "EDITOR_NOT_FOUND",
+                "message": f"UnrealEditor.exe not found in {state.session.engine_root}",
+            },
+        ) or task
 
     dup_result = _check_already_running(state.session, state)
-    if dup_result is not None and dup_result.get("status") == "already_running":
-        task["status"] = "failed"
-        task["error"] = {
-            "code": "ALREADY_RUNNING",
-            "message": dup_result.get("message", "Editor already running"),
-        }
-        task["result"] = dup_result
-        return save_task(task)
+    if dup_result is not None:
+        duplicate_status = dup_result.get("status")
+        duplicate_code = {
+            "already_running": "ALREADY_RUNNING",
+            "starting": "EDITOR_STARTING",
+            "zombie": "EDITOR_ALREADY_RUNNING_OFFLINE",
+        }.get(duplicate_status, "EDITOR_ALREADY_RUNNING")
+        return transition_task(
+            task_id,
+            status="failed",
+            phase="blocked",
+            error={
+                "code": duplicate_code,
+                "message": dup_result.get("message", "Editor already running"),
+                "details": {
+                    **dup_result,
+                    "decision": "preserve_existing_editor",
+                    "requires_user_input": False,
+                },
+            },
+            result_patch=dup_result,
+        ) or task
 
     port_result = _check_port_in_use(state.session.port, state)
     if port_result is not None:
@@ -1358,6 +1800,16 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         from cli_anything.unreal.utils.ue_backend import resolve_available_port
         new_port = resolve_available_port(state.session.project_dir, state.session.port)
         state.session.port = new_port
+
+    task = transition_task(
+        task_id,
+        status="running",
+        phase="deploying_bridge",
+        resolved_port=state.session.port,
+        result_patch={"port": state.session.port},
+    ) or task
+    if task.get("status") != "running":
+        return task
 
     bridge_enabled_changed = False
     compile_reason = None
@@ -1367,17 +1819,20 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         or deploy_result.get("action") == "update_pending_locked"
     ):
         deploy_locked = deploy_result.get("action") == "update_pending_locked"
-        task["status"] = "failed"
-        task["error"] = {
-            "code": "BRIDGE_DEPLOY_LOCKED" if deploy_locked else "BRIDGE_DEPLOY_FAILED",
-            "message": deploy_result.get(
-                "warning" if deploy_locked else "error",
-                "CliAnythingBridge deployment failed",
-            ),
-            "details": deploy_result,
-        }
-        task["result"] = {"bridge_deploy": deploy_result}
-        return save_task(task)
+        return transition_task(
+            task_id,
+            status="failed",
+            phase="blocked",
+            error={
+                "code": "BRIDGE_DEPLOY_LOCKED" if deploy_locked else "BRIDGE_DEPLOY_FAILED",
+                "message": deploy_result.get(
+                    "warning" if deploy_locked else "error",
+                    "CliAnythingBridge deployment failed",
+                ),
+                "details": deploy_result,
+            },
+            result_patch={"bridge_deploy": deploy_result},
+        ) or task
 
     # Auto-enable CliAnythingBridge in .uproject
     from cli_anything.unreal.utils.ue_backend import _ensure_plugin_enabled
@@ -1394,20 +1849,24 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         compile_reason = f"Bridge plugin source {deploy_result.get('action')} requires compilation."
 
     if compile_reason:
-        task = load_task(task["task_id"]) or task
-        task["status"] = "compiling"
-        task["estimated_total_seconds"] = estimated_total_seconds
-        task["result"] = {
-            "project": state.session.project_name,
-            "editor_exe": editor_exe,
-            "startup_precheck": startup_precheck,
-            "remote_control_prepare": remote_control_prepare,
-            "bridge_deploy": deploy_result,
-            "bridge_enabled_changed": bridge_enabled_changed,
-            "bridge_binary_status": bridge_binary_status,
-            "compile_reason": compile_reason,
-        }
-        save_task(task)
+        task = transition_task(
+            task_id,
+            status="compiling",
+            phase="compiling_bridge",
+            estimated_total_seconds=estimated_total_seconds,
+            result_patch={
+                "project": state.session.project_name,
+                "editor_exe": editor_exe,
+                "startup_precheck": startup_precheck,
+                "remote_control_prepare": remote_control_prepare,
+                "bridge_deploy": deploy_result,
+                "bridge_enabled_changed": bridge_enabled_changed,
+                "bridge_binary_status": bridge_binary_status,
+                "compile_reason": compile_reason,
+            },
+        ) or task
+        if task.get("status") != "compiling":
+            return task
 
         from cli_anything.unreal.core.plugin_bridge import (
             compile_bridge_plugin,
@@ -1418,47 +1877,76 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             state.session.project_path,
             engine_root=state.session.engine_root,
         )
-        task = load_task(task["task_id"]) or task
-        task["result"] = dict(task.get("result", {}))
-        task["result"]["compile_result"] = compile_result
         if compile_result.get("status") != "ok":
             rollback = rollback_plugin_deployment(deploy_result)
-            task["result"]["bridge_rollback"] = rollback
             error_details = dict(compile_result)
             error_details["bridge_rollback"] = rollback
-            task["status"] = "failed"
-            task["error"] = {
-                "code": compile_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
-                "message": compile_result.get(
-                    "error",
-                    "Bridge plugin targeted compilation failed.",
-                ),
-                "details": error_details,
-            }
-            return save_task(task)
+            return transition_task(
+                task_id,
+                status="failed",
+                phase="blocked",
+                error={
+                    "code": compile_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
+                    "message": compile_result.get(
+                        "error",
+                        "Bridge plugin targeted compilation failed.",
+                    ),
+                    "details": error_details,
+                },
+                result_patch={
+                    "compile_result": compile_result,
+                    "bridge_rollback": rollback,
+                },
+            ) or task
 
         bridge_binary_status = get_plugin_binary_status(
             state.session.project_dir,
             engine_root=state.session.engine_root,
         )
-        task["result"]["bridge_binary_status"] = bridge_binary_status
         if not bridge_binary_status.get("ready", False):
             rollback = rollback_plugin_deployment(deploy_result)
-            task["result"]["bridge_rollback"] = rollback
             error_details = dict(bridge_binary_status)
             error_details["bridge_rollback"] = rollback
-            task["status"] = "failed"
-            task["error"] = {
-                "code": "BRIDGE_BINARY_NOT_READY",
-                "message": bridge_binary_status.get("message", "Bridge plugin binary is still not ready after compilation."),
-                "details": error_details,
-            }
-            return save_task(task)
-        task["result"]["bridge_deployment_commit"] = finalize_plugin_deployment(
-            deploy_result
-        )
-        task["result"]["precompiled_bridge"] = True
-        save_task(task)
+            return transition_task(
+                task_id,
+                status="failed",
+                phase="blocked",
+                error={
+                    "code": "BRIDGE_BINARY_NOT_READY",
+                    "message": bridge_binary_status.get(
+                        "message",
+                        "Bridge plugin binary is still not ready after compilation.",
+                    ),
+                    "details": error_details,
+                },
+                result_patch={
+                    "compile_result": compile_result,
+                    "bridge_binary_status": bridge_binary_status,
+                    "bridge_rollback": rollback,
+                },
+            ) or task
+        task = transition_task(
+            task_id,
+            status="compiling",
+            phase="compiling_bridge",
+            result_patch={
+                "compile_result": compile_result,
+                "bridge_binary_status": bridge_binary_status,
+                "bridge_deployment_commit": finalize_plugin_deployment(deploy_result),
+                "precompiled_bridge": True,
+            },
+        ) or task
+        if task.get("status") != "compiling":
+            return task
+
+    task = transition_task(
+        task_id,
+        status="running",
+        phase="spawning",
+        estimated_total_seconds=estimated_total_seconds,
+    ) or task
+    if task.get("status") != "running":
+        return task
 
     cmd = _build_launch_cmd(
         editor_exe,
@@ -1472,15 +1960,18 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         state.session.project_name,
         payload.get("extra_args"),
     )
+    if _task_cancel_requested(task_id):
+        return transition_task(
+            task_id,
+            status="cancelled",
+            phase="exited",
+            error=None,
+            cancelled=True,
+        ) or task
     proc = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+    process_identity = _capture_windows_process_identity(proc.pid)
 
-    task = load_task(task["task_id"]) or task
-    task["pid"] = proc.pid
-    task["log_file"] = str(log_file)
-    task["estimated_total_seconds"] = estimated_total_seconds
-    task["status"] = "running"
-    task_result = dict(task.get("result", {}))
-    task_result.update({
+    task_result = {
         "pid": proc.pid,
         "project": state.session.project_name,
         "editor_exe": editor_exe,
@@ -1489,21 +1980,42 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         "remote_control_prepare": remote_control_prepare,
         "bridge_deploy": deploy_result,
         "bridge_binary_status": bridge_binary_status,
-    })
-    task["result"] = task_result
+        "port": state.session.port,
+        "delivery_state": "accepted",
+    }
     if compile_reason:
-        task["result"]["compile_reason"] = compile_reason
-        task["result"]["precompiled_bridge"] = True
-    save_task(task)
+        task_result["compile_reason"] = compile_reason
+        task_result["precompiled_bridge"] = True
+    identity_fields = {}
+    if process_identity:
+        identity_fields["editor_process_identity"] = process_identity
+    task = transition_task(
+        task_id,
+        status="running",
+        phase="waiting_remote_control",
+        result_patch=task_result,
+        pid=proc.pid,
+        log_file=str(log_file),
+        estimated_total_seconds=estimated_total_seconds,
+        resolved_port=state.session.port,
+        **identity_fields,
+    ) or task
+    cancelled_task = _cancel_spawned_editor_if_requested(
+        task_id,
+        task,
+        proc,
+        process_identity,
+    )
+    if cancelled_task is not None:
+        return cancelled_task
 
     def _record_launch_progress(progress: dict) -> None:
-        latest = load_task(task["task_id"]) or task
-        latest_result = dict(latest.get("result", {}))
-        latest_result.update(progress)
-        update_task_fields(
-            task["task_id"],
+        transition_task(
+            task_id,
+            status="running",
+            phase="waiting_remote_control",
             log_file=str(log_file),
-            result=latest_result,
+            result_patch=progress,
         )
 
     wait_result = _wait_for_api(
@@ -1517,11 +2029,14 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     # Auto-compile and retry if plugin failed to load
     if wait_result.get("status") == "error_dialog" and "failed to load" in wait_result.get("error", ""):
-        task = load_task(task["task_id"]) or task
-        task["status"] = "compiling"
-        task["result"] = dict(task.get("result", {}))
-        task["result"]["compile_reason"] = "Bridge plugin failed to load"
-        save_task(task)
+        task = transition_task(
+            task_id,
+            status="compiling",
+            phase="compiling_bridge",
+            result_patch={"compile_reason": "Bridge plugin failed to load"},
+        ) or task
+        if task.get("status") != "compiling":
+            return task
 
         from cli_anything.unreal.core.plugin_bridge import (
             compile_bridge_plugin,
@@ -1536,22 +2051,35 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             rollback = rollback_plugin_deployment(deploy_result)
             error_details = dict(compile_result)
             error_details["bridge_rollback"] = rollback
-            task["status"] = "failed"
-            task["error"] = {
-                "code": compile_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
-                "message": compile_result.get(
-                    "error",
-                    "Bridge plugin targeted compilation failed.",
-                ),
-                "details": error_details,
-            }
-            task["result"]["compile_result"] = compile_result
-            task["result"]["bridge_rollback"] = rollback
-            return save_task(task)
+            return transition_task(
+                task_id,
+                status="failed",
+                phase="blocked",
+                error={
+                    "code": compile_result.get("code", "BRIDGE_MODULE_COMPILE_FAILED"),
+                    "message": compile_result.get(
+                        "error",
+                        "Bridge plugin targeted compilation failed.",
+                    ),
+                    "details": error_details,
+                },
+                result_patch={
+                    "compile_result": compile_result,
+                    "bridge_rollback": rollback,
+                },
+            ) or task
 
-        task["result"]["bridge_deployment_commit"] = finalize_plugin_deployment(
-            deploy_result
-        )
+        task = transition_task(
+            task_id,
+            status="running",
+            phase="spawning",
+            result_patch={
+                "compile_result": compile_result,
+                "bridge_deployment_commit": finalize_plugin_deployment(deploy_result),
+            },
+        ) or task
+        if task.get("status") != "running":
+            return task
 
         # Relaunch after successful compilation
         cmd = _build_launch_cmd(
@@ -1561,14 +2089,40 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             payload.get("extra_args"),
             unattended=bool(payload.get("unattended", False)),
         )
+        if _task_cancel_requested(task_id):
+            return transition_task(
+                task_id,
+                status="cancelled",
+                phase="exited",
+                error=None,
+                cancelled=True,
+            ) or task
         proc = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
 
-        task = load_task(task["task_id"]) or task
-        task["pid"] = proc.pid
-        task["status"] = "running"
-        task["result"]["pid"] = proc.pid
-        task["result"]["recompiled"] = True
-        save_task(task)
+        process_identity = _capture_windows_process_identity(proc.pid)
+        identity_fields = {}
+        if process_identity:
+            identity_fields["editor_process_identity"] = process_identity
+        task = transition_task(
+            task_id,
+            status="running",
+            phase="waiting_remote_control",
+            result_patch={
+                "pid": proc.pid,
+                "recompiled": True,
+                "delivery_state": "accepted",
+            },
+            pid=proc.pid,
+            **identity_fields,
+        ) or task
+        cancelled_task = _cancel_spawned_editor_if_requested(
+            task_id,
+            task,
+            proc,
+            process_identity,
+        )
+        if cancelled_task is not None:
+            return cancelled_task
 
         wait_result = _wait_for_api(
             proc,
@@ -1581,6 +2135,14 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     requested_map = payload.get("map_path")
     if wait_result.get("status") == "online" and requested_map:
+        task = transition_task(
+            task_id,
+            status="running",
+            phase="verifying_map",
+            result_patch=wait_result,
+        ) or task
+        if task.get("status") != "running":
+            return task
         from cli_anything.unreal.core.scene import _verify_current_level, open_level
         from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
@@ -1666,24 +2228,23 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             f'ue-cli --project "{state.session.project_path}" editor status',
         )
 
-    task = load_task(task["task_id"]) or task
-    task["log_file"] = str(log_file)
-    merged_result = dict(task.get("result", {}))
-    merged_result.update(wait_result)
-    task["result"] = merged_result
     wait_status = wait_result.get("status")
     if wait_status == "online":
-        task["status"] = "completed"
+        final_status = "completed"
+        final_phase = "online"
+        final_error = None
     elif wait_status == "timeout":
-        task["status"] = "timeout"
-        task["error"] = {
+        final_status = "timeout"
+        final_phase = "blocked"
+        final_error = {
             "code": "TASK_TIMEOUT",
             "message": wait_result.get("error", "Editor startup timed out"),
             "details": wait_result,
         }
     elif wait_status == "blocked_by_restore_packages":
-        task["status"] = "failed"
-        task["error"] = {
+        final_status = "failed"
+        final_phase = "blocked"
+        final_error = {
             "code": "EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES",
             "message": wait_result.get(
                 "error",
@@ -1692,24 +2253,35 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "details": wait_result,
         }
     elif wait_status == "map_mismatch":
-        task["status"] = "failed"
-        task["error"] = {
+        final_status = "failed"
+        final_phase = "blocked"
+        final_error = {
             "code": "EDITOR_LAUNCH_MAP_MISMATCH",
             "message": wait_result.get("error", "Editor launch map verification failed"),
             "details": wait_result,
         }
     elif wait_status == "map_recovery_crashed":
-        task["status"] = "failed"
-        task["error"] = {
+        final_status = "failed"
+        final_phase = "exited"
+        final_error = {
             "code": "EDITOR_CRASHED_DURING_MAP_RECOVERY",
             "message": wait_result.get("error", "Editor crashed during launch map recovery."),
             "details": wait_result,
         }
     else:
-        task["status"] = "failed"
-        task["error"] = {
+        final_status = "failed"
+        final_phase = "exited"
+        final_error = {
             "code": "TASK_EXECUTION_FAILED",
             "message": wait_result.get("error", "Editor startup failed"),
             "details": wait_result,
         }
-    return save_task(task)
+    return transition_task(
+        task_id,
+        status=final_status,
+        phase=final_phase,
+        result_patch=wait_result,
+        error=final_error,
+        log_file=str(log_file),
+        resolved_port=state.session.port,
+    ) or task

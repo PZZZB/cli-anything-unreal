@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from cli_anything.unreal.core.script_runner import SavePolicy
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
@@ -202,9 +203,15 @@ else:
                 result["action"] = "create"
                 result["widget"] = asset_path
                 _cli_compile_blueprint(bp)
-                EAL.save_asset(asset_path, only_if_is_dirty=False)
 """
-    return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
+    return _exec_umg_script(
+        api,
+        script,
+        project_dir=project_dir,
+        timeout=timeout,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[widget_path],
+    )
 
 
 def add_widget_to_canvas(
@@ -262,9 +269,15 @@ else:
         )
         if result.get("status") == "ok":
             _cli_compile_blueprint(bp)
-            unreal.EditorAssetLibrary.save_asset(loaded_asset_path, only_if_is_dirty=False)
 """
-    return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
+    return _exec_umg_script(
+        api,
+        script,
+        project_dir=project_dir,
+        timeout=timeout,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[widget_path],
+    )
 
 
 def set_widget_image(
@@ -382,9 +395,15 @@ else:
             if result.get("status") == "ok":
                 result["widget_blueprint"] = loaded_asset_path
                 _cli_compile_blueprint(bp)
-                unreal.EditorAssetLibrary.save_asset(loaded_asset_path, only_if_is_dirty=False)
 """
-    return _exec_umg_script(api, script, project_dir=project_dir, timeout=timeout)
+    return _exec_umg_script(
+        api,
+        script,
+        project_dir=project_dir,
+        timeout=timeout,
+        save_policy=SavePolicy.TARGET_PACKAGES,
+        target_packages=[widget_path],
+    )
 
 
 def get_widget_tree(
@@ -745,7 +764,16 @@ def _exec_umg_script(
     script_content: str,
     project_dir: str | None = None,
     timeout: float = 60.0,
+    *,
+    save_policy: SavePolicy | str = SavePolicy.NEVER,
+    target_packages: list[str] | None = None,
 ) -> dict:
     from cli_anything.unreal.core.script_runner import run_python_code
 
-    return run_python_code(api, script_content, timeout=timeout)
+    return run_python_code(
+        api,
+        script_content,
+        timeout=timeout,
+        save_policy=save_policy,
+        target_packages=target_packages,
+    )

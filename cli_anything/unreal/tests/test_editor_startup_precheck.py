@@ -19,6 +19,39 @@ def mini_project(tmp_path):
     return str(uproject)
 
 
+@pytest.fixture(autouse=True)
+def _clean_dirty_state_for_existing_close_tests(request, monkeypatch):
+    """Legacy close lifecycle tests operate on an explicitly clean editor."""
+
+    if "editor_close" not in request.node.name:
+        return
+    import cli_anything.unreal.commands as command_helpers
+    from cli_anything.unreal.commands import editor as editor_commands
+
+    if "dirty" not in request.node.name:
+        monkeypatch.setattr(
+            editor_commands,
+            "_query_dirty_editor_packages",
+            lambda _api: {"map_packages": [], "content_packages": [], "count": 0},
+        )
+    if "other_project" not in request.node.name:
+        monkeypatch.setattr(
+            editor_commands,
+            "_guard_editor_project",
+            lambda _state, _api_cls: {"pid": 0, "project": "verified-by-test"},
+        )
+        monkeypatch.setattr(
+            command_helpers,
+            "_guard_editor_project",
+            lambda _state, _api_cls: {"pid": 0, "project": "verified-by-test"},
+        )
+        monkeypatch.setattr(
+            editor_commands,
+            "_partition_editor_close_targets",
+            lambda targets, _owner_pid: (targets[:1], targets[1:]),
+        )
+
+
 def test_editor_status_offline_api_blocked_includes_log_error(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
@@ -37,7 +70,7 @@ def test_editor_status_offline_api_blocked_includes_log_error(mini_project):
             "editor", "status",
         ])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert data["status"] == "success"
     assert data["result"][0]["status"] == "offline"
@@ -162,7 +195,7 @@ def test_editor_status_rechecks_project_port_before_reporting_unreachable(mini_p
         [],
         [{"port": 30010, "alive": True, "info": {"ok": True}}],
     ]) as scan_ports, \
-         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=None), \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=100256), \
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 100256, "project": mini_project},
          ]), \
@@ -742,7 +775,7 @@ def test_editor_status_scans_running_project_config_ports_outside_default_range(
     ]
 
 
-def test_editor_status_uses_config_port_when_owner_pid_unavailable(mini_project):
+def test_editor_status_does_not_claim_config_port_when_owner_pid_unavailable(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
@@ -765,17 +798,13 @@ def test_editor_status_uses_config_port_when_owner_pid_unavailable(mini_project)
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["status"] == "success"
-    assert data["result"] == [
-        {
-            "status": "online",
-            "pid": 1234,
-            "port": 30020,
-            "project_path": mini_project,
-            "bridge_version": "1.13",
-            "bundled_version": "1.13",
-            "plugin_match": True,
-        },
-    ]
+    process_entry = next(item for item in data["result"] if item.get("pid") == 1234)
+    unknown_entry = next(item for item in data["result"] if item.get("ownership") == "unknown")
+    assert process_entry["status"] in {"offline", "unreachable"}
+    assert process_entry["project_path"] == mini_project
+    assert unknown_entry["status"] == "online"
+    assert unknown_entry["port"] == 30020
+    assert unknown_entry["project_path"] is None
 
 
 def test_editor_list_command_removed():
@@ -793,7 +822,7 @@ def test_editor_list_command_removed():
 
 def test_check_port_in_use_detects_plain_tcp_listener():
     from cli_anything.unreal.commands import AppState
-    from cli_anything.unreal.commands.editor import _check_port_in_use
+    from cli_anything.unreal.core.editor_lifecycle import _check_port_in_use
 
     state = AppState()
     state.session.port = 30020
@@ -813,7 +842,7 @@ def test_editor_close_kills_matching_zombie_project_process(mini_project):
     runner = CliRunner()
     other_project = str(Path(mini_project).with_name("Other.uproject"))
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
-         patch("cli_anything.unreal.commands.editor._discover_online_editor_port", return_value=None), \
+         patch("cli_anything.unreal.commands._discover_online_editor_port", return_value=None), \
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 1234, "project": mini_project},
              {"pid": 5678, "project": other_project},
@@ -821,7 +850,7 @@ def test_editor_close_kills_matching_zombie_project_process(mini_project):
          patch("cli_anything.unreal.utils.ue_backend._kill_process_tree_result", return_value={"ok": True}) as kill_process:
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
-            "editor", "close",
+            "editor", "close", "--force",
         ])
 
     assert result.exit_code == 0, result.output
@@ -1164,11 +1193,7 @@ def test_editor_close_kills_matching_project_process_after_graceful_timeout(mini
         ])
 
     assert result.exit_code == 0, result.output
-    mock_api.call_function.assert_called_once_with(
-        "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils",
-        "SaveDirtyPackages",
-        {"bSaveMapPackages": True, "bSaveContentPackages": True},
-    )
+    mock_api.call_function.assert_not_called()
     mock_api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
     kill_process.assert_called_once_with(1234)
     data = json.loads(result.output)
@@ -1250,7 +1275,7 @@ def test_editor_close_terminates_stale_peer_without_waiting_for_it(mini_project)
         api_class._get_pid_listening_on_port.return_value = 78808
         result = CliRunner().invoke(cli, [
             "--output", "json", "--project", mini_project,
-            "editor", "close",
+            "editor", "close", "--force",
         ])
 
     assert result.exit_code == 0, result.output
@@ -1301,7 +1326,7 @@ def test_editor_close_reports_failed_stale_peer_after_active_exit(mini_project):
         api_class._get_pid_listening_on_port.return_value = 78808
         result = CliRunner().invoke(cli, [
             "--output", "json", "--project", mini_project,
-            "editor", "close",
+            "editor", "close", "--force",
         ])
 
     assert result.exit_code == 3
@@ -1664,10 +1689,12 @@ def test_editor_close_does_not_quit_other_project_on_same_port(mini_project):
     mock_api.is_alive.return_value = True
     other_project = str(Path(mini_project).with_name("Other.uproject"))
 
-    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api) as api_cls, \
          patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1111, "project": mini_project},
              {"pid": 5678, "project": other_project},
          ]):
+        api_cls._get_pid_listening_on_port.return_value = 5678
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "close",
@@ -1678,7 +1705,133 @@ def test_editor_close_does_not_quit_other_project_on_same_port(mini_project):
     data = json.loads(result.output)
     assert data["status"] == "error"
     assert data["code"] == "EDITOR_PROJECT_NOT_RUNNING"
-    assert data["details"]["running_editors"] == [{"pid": 5678, "project": other_project}]
+    assert data["details"]["running_editors"] == [
+        {"pid": 1111, "project": mini_project},
+        {"pid": 5678, "project": other_project},
+    ]
+
+
+def test_editor_close_force_targets_project_when_other_project_owns_port(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    api = MagicMock()
+    api.is_alive.return_value = True
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    running = [
+        {"pid": 1111, "project": mini_project},
+        {"pid": 5678, "project": other_project},
+    ]
+    closed = {
+        "status": "closed",
+        "method": "process_tree_kill",
+        "closed_processes": [{"pid": 1111, "project": mini_project}],
+    }
+
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=api) as api_cls, \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=running), \
+         patch(
+             "cli_anything.unreal.commands.editor._kill_matching_project_editors",
+             return_value=closed,
+         ) as kill:
+        api_cls._get_pid_listening_on_port.return_value = 5678
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close", "--force",
+        ])
+
+    assert result.exit_code == 0, result.output
+    api.exec_console.assert_not_called()
+    assert kill.call_args.args[:2] == (mini_project, 30010)
+    assert json.loads(result.output)["result"]["closed_processes"] == [
+        {"pid": 1111, "project": mini_project}
+    ]
+
+
+def test_editor_close_saves_dirty_packages_automatically(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    api = MagicMock()
+    api.is_alive.side_effect = [True, False]
+    api.call_function.side_effect = [
+        {"OutDirtyPackages": []},
+        {"OutDirtyPackages": ["/Game/M_Unsaved"]},
+        {"ReturnValue": True},
+    ]
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=api), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.commands.editor._wait_for_project_editor_exit", return_value={
+             "status": "closed", "method": "process_exit",
+         }):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)["result"]
+    assert data["save_evidence"]["saved_count"] == 1
+    assert data["save_evidence"]["content_packages"] == ["/Game/M_Unsaved"]
+    api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
+    assert api.call_function.call_args_list[-1].args[1] == "SaveDirtyPackages"
+
+
+def test_editor_close_force_is_explicit_and_skips_dirty_query(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    api = MagicMock()
+    api.is_alive.side_effect = [True, False]
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=api), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.commands.editor._wait_for_project_editor_exit", return_value={
+             "status": "closed", "method": "process_exit",
+         }):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close", "--force",
+        ])
+
+    assert result.exit_code == 0, result.output
+    api.call_function.assert_not_called()
+    api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
+
+
+def test_editor_close_offline_process_requires_discard_authorization(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    api = MagicMock()
+    api.is_alive.return_value = False
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=api), \
+         patch("cli_anything.unreal.commands._discover_online_editor_port", return_value=None), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend._kill_process_tree_result") as kill:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.output)["code"] == "EDITOR_DIRTY_STATE_UNKNOWN"
+    kill.assert_not_called()
+
+
+def test_dirty_package_query_rejects_null_return_value():
+    from cli_anything.unreal.commands import AppError
+    from cli_anything.unreal.commands.editor import _dirty_package_names
+
+    with pytest.raises(AppError) as exc_info:
+        _dirty_package_names({"ReturnValue": None}, "GetDirtyContentPackages")
+
+    assert exc_info.value.code == "EDITOR_DIRTY_STATE_UNKNOWN"
 
 
 def test_editor_launch_preflight_failed_includes_startup_precheck(mini_project):
@@ -1692,38 +1845,6 @@ def test_editor_launch_preflight_failed_includes_startup_precheck(mini_project):
         "project": {"errors": ["project error"], "warnings": []},
     }), \
          patch("cli_anything.unreal.commands.editor.submit_task", return_value={"task_id": "launch-task"}):
-        result = runner.invoke(cli, [
-            "--output", "json", "--project", mini_project,
-            "editor", "launch", "--no-wait",
-        ])
-
-    assert result.exit_code == 0
-    data = json.loads(result.output)
-    assert data["status"] == "success"
-    assert data["result"]["status"] == "submitted"
-    assert "task_id" in data["result"]
-
-
-def test_editor_launch_success_includes_startup_precheck(mini_project):
-    from click.testing import CliRunner
-    from cli_anything.unreal.unreal_cli import cli
-
-    runner = CliRunner()
-    mock_proc = MagicMock()
-    mock_proc.pid = 4242
-
-    with patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
-         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Engine/Binaries/Win64/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={"deployed": False}), \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
-         patch("cli_anything.unreal.commands.editor.submit_task", return_value={"task_id": "launch-task"}), \
-         patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
-             "ready": True,
-             "engine": {"errors": [], "warnings": ["engine warning"]},
-             "project": {"errors": [], "warnings": ["project warning"]},
-         }):
         result = runner.invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "launch", "--no-wait",
@@ -1810,7 +1931,7 @@ def test_build_launch_cmd_filters_empty_extra_args():
 
 
 def test_resolve_launch_log_file_uses_case_insensitive_quoted_abslog(tmp_path):
-    from cli_anything.unreal.commands.editor import _resolve_launch_log_file
+    from cli_anything.unreal.core.editor_lifecycle import _resolve_launch_log_file
 
     custom_log = tmp_path / "Custom Logs" / "Startup.log"
     result = _resolve_launch_log_file(
@@ -1823,7 +1944,7 @@ def test_resolve_launch_log_file_uses_case_insensitive_quoted_abslog(tmp_path):
 
 
 def test_resolve_launch_log_file_defaults_to_project_log(tmp_path):
-    from cli_anything.unreal.commands.editor import _resolve_launch_log_file
+    from cli_anything.unreal.core.editor_lifecycle import _resolve_launch_log_file
 
     result = _resolve_launch_log_file(tmp_path, "Project", ["-nosound"])
 
@@ -2160,8 +2281,8 @@ def test_editor_launch_no_extra_args_yields_empty_list(mini_project):
 # 鈹€鈹€ plugin-upgrade relaunch uses _build_launch_cmd 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
-def test_editor_launch_treats_matching_project_process_offline_when_api_owner_differs(mini_project):
-    """A live API on another PID must not make a same-project offline editor ALREADY_RUNNING."""
+def test_editor_launch_preserves_matching_project_process_when_api_owner_differs(mini_project):
+    """A live API on another PID must not cause the target editor to be killed."""
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
@@ -2190,10 +2311,12 @@ def test_editor_launch_treats_matching_project_process_offline_when_api_owner_di
             "editor", "launch", "--no-wait",
         ])
 
-    assert result.exit_code == 0, result.output
-    kill_proc.assert_called_once_with(60504)
-    assert captured["command"] == "editor.launch"
-    assert captured["payload"]["project_path"] == mini_project
+    assert result.exit_code == 3, result.output
+    kill_proc.assert_not_called()
+    assert captured == {}
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_ALREADY_RUNNING_OFFLINE"
+    assert data["details"]["decision"] == "preserve_existing_editor"
 
 
 def test_editor_launch_does_not_kill_process_owned_by_active_launch_task(mini_project, tmp_path, monkeypatch):
@@ -2359,6 +2482,57 @@ def test_editor_launch_returns_progress_when_final_task_read_is_blocked(mini_pro
     )
 
 
+def test_editor_launch_reload_of_cancelled_task_is_nonzero(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    cancelled = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "cancelled",
+        "error": {"code": "TASK_CANCELLED", "message": "Cancelled."},
+    }
+    with patch(
+        "cli_anything.unreal.commands.editor.submit_task",
+        return_value={"task_id": "launch-task", "command": "editor.launch"},
+    ), patch(
+        "cli_anything.unreal.commands.editor.wait_for_task",
+        return_value=None,
+    ), patch(
+        "cli_anything.unreal.commands.editor.load_task",
+        return_value=cancelled,
+    ), patch(
+        "cli_anything.unreal.commands.editor._check_already_running",
+        return_value=None,
+    ):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--timeout", "1",
+        ])
+
+    assert result.exit_code == 4
+    assert json.loads(result.output)["code"] == "TASK_CANCELLED"
+
+
+def test_editor_cancel_failure_is_nonzero():
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    failed = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "running",
+        "error": {"code": "TASK_CANCEL_FAILED", "message": "Still running."},
+    }
+    with patch("cli_anything.unreal.commands.editor.cancel_task", return_value=failed):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "editor", "cancel", "launch-task",
+        ])
+
+    assert result.exit_code == 4
+    assert json.loads(result.output)["code"] == "TASK_CANCEL_FAILED"
+
+
 def test_editor_launch_returns_progress_without_post_wait_editor_scan(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
@@ -2446,9 +2620,10 @@ def test_editor_launch_does_not_recover_map_launch_without_level_verification(mi
             "editor", "launch", "--map", requested_map, "--timeout", "120",
         ])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 4, result.output
     data = json.loads(result.output)
-    assert data["result"]["status"] == "timeout"
+    assert data["code"] == "EDITOR_LAUNCH_TIMEOUT"
+    assert data["details"]["status"] == "timeout"
 
 
 def test_editor_launch_recovers_map_launch_after_exact_level_verification(mini_project):
@@ -2530,6 +2705,11 @@ def test_editor_status_reconciles_timed_out_map_launch_when_exact_editor_is_onli
     task.update({
         "status": "timeout",
         "pid": 68348,
+        "editor_process_identity": {
+            "pid": 68348,
+            "creation_time": 123456,
+            "image_path": "F:/MockEngine/UnrealEditor.exe",
+        },
         "error": {"code": "TASK_TIMEOUT", "message": "startup timed out"},
         "result": {
             "status": "timeout",
@@ -2555,11 +2735,21 @@ def test_editor_status_reconciles_timed_out_map_launch_when_exact_editor_is_onli
             "bundled_version": "1.18",
             "plugin_match": True,
         }]), \
-         patch(
-             "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
-             return_value=68348,
-         ), \
-         patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification):
+             patch(
+                 "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+                 return_value=68348,
+             ), \
+             patch(
+                 "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+                 return_value={
+                     "query_ok": True,
+                     "found": True,
+                     "pid": 68348,
+                     "creation_time": 123456,
+                     "image_path": "F:/MockEngine/UnrealEditor.exe",
+                 },
+             ), \
+             patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification):
         result = CliRunner().invoke(cli, [
             "--output", "json", "--project", mini_project,
             "editor", "status", task["task_id"],
@@ -2571,6 +2761,7 @@ def test_editor_status_reconciles_timed_out_map_launch_when_exact_editor_is_onli
     assert progress["result"]["status"] == "online"
     assert progress["result"]["launch_task_status"] == "timeout"
     assert progress["result"]["recovered_from"] == "launch_task_status"
+    assert progress["result"]["process_identity_verified"] is True
     assert "failure_kind" not in progress["result"]
     assert "api_route_healthy" not in progress["result"]
     assert "next_command" not in progress["result"]
@@ -2634,6 +2825,50 @@ def test_editor_launch_recovery_rejects_port_owned_by_different_pid(mini_project
     assert result is None
 
 
+def test_editor_launch_recovery_rejects_reused_pid_identity(mini_project):
+    from cli_anything.unreal.commands import AppState
+    from cli_anything.unreal.commands.editor import _recover_online_launch_result
+
+    state = AppState()
+    state.session.load_project(mini_project)
+    task = {
+        "task_id": "launch-task",
+        "command": "editor.launch",
+        "status": "timeout",
+        "task_state_version": 2,
+        "pid": 68348,
+        "resolved_port": 30011,
+        "payload": {"project_path": mini_project, "port": 30010},
+        "editor_process_identity": {
+            "pid": 68348,
+            "creation_time": 111,
+            "image_path": "F:/MockEngine/UnrealEditor.exe",
+        },
+    }
+
+    with patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
+        "status": "online",
+        "pid": 68348,
+        "port": 30011,
+        "project_path": mini_project,
+    }]), patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+        return_value=68348,
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+        return_value={
+            "query_ok": True,
+            "found": True,
+            "pid": 68348,
+            "creation_time": 222,
+            "image_path": "F:/MockEngine/UnrealEditor.exe",
+        },
+    ):
+        result = _recover_online_launch_result(state, task["task_id"], task)
+
+    assert result is None
+
+
 def test_editor_launch_recovery_requires_task_pid(mini_project):
     from cli_anything.unreal.commands import AppState
     from cli_anything.unreal.commands.editor import _recover_online_launch_result
@@ -2679,9 +2914,12 @@ def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
     mock_api.is_alive.side_effect = [True, False, True]
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.commands.editor._find_matching_project_editors", return_value=([{"pid": 1234, "project": mini_project}], [{"pid": 1234, "project": mini_project}])), \
+         patch("cli_anything.unreal.commands.editor.require_editor", return_value=mock_api), \
          patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
          patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=["1.0", "2.0"]), \
          patch("cli_anything.unreal.commands.editor._close_editor_for_project", return_value={"status": "closed"}), \
+         patch("cli_anything.unreal.commands.editor._wait_for_project_editor_exit", return_value={"status": "closed"}), \
          patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
              "deployed": True, "action": "updated", "version": "2.0", "plugin_dir": "/tmp/plugin"
          }), \
@@ -2694,7 +2932,7 @@ def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
             "editor", "plugin-upgrade",
         ])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     # The relaunch Popen call must include -nosplash and -unattended
     relaunch_calls = [cmd for cmd in popen_calls if cmd and str(cmd[0]).endswith("UnrealEditor.exe")]
     assert len(relaunch_calls) == 1
@@ -2713,9 +2951,12 @@ def test_plugin_upgrade_uses_editor_close_helper(mini_project):
     mock_api.is_alive.side_effect = [True, False, True]
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.commands.editor._find_matching_project_editors", return_value=([{"pid": 1234, "project": mini_project}], [{"pid": 1234, "project": mini_project}])), \
+         patch("cli_anything.unreal.commands.editor.require_editor", return_value=mock_api), \
          patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
          patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=["1.0", "2.0"]), \
          patch("cli_anything.unreal.commands.editor._close_editor_for_project", return_value={"status": "closed"}) as mock_close, \
+         patch("cli_anything.unreal.commands.editor._wait_for_project_editor_exit", return_value={"status": "closed"}), \
          patch("cli_anything.unreal.core.plugin_bridge.ensure_plugin_deployed", return_value={
              "deployed": True, "action": "updated", "version": "2.0", "plugin_dir": "/tmp/plugin"
          }), \
@@ -2746,6 +2987,8 @@ def test_plugin_upgrade_kills_residual_project_editor_before_compile(mini_projec
     mock_api.is_alive.side_effect = [True, False, True]
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=mock_api), \
+         patch("cli_anything.unreal.commands.editor._find_matching_project_editors", return_value=([{"pid": 1234, "project": mini_project}], [{"pid": 1234, "project": mini_project}])), \
+         patch("cli_anything.unreal.commands.editor.require_editor", return_value=mock_api), \
          patch("cli_anything.unreal.core.plugin_bridge.get_bundled_version", return_value="2.0"), \
          patch("cli_anything.unreal.core.plugin_bridge.get_loaded_plugin_version", side_effect=["1.0", "2.0"]), \
          patch("cli_anything.unreal.commands.editor._close_editor_for_project", return_value={"status": "closed"}), \
@@ -2841,9 +3084,9 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date", "version": "1.13"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=True), \
@@ -2853,8 +3096,8 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
              "message": "Bridge plugin binary is ready.",
          }), \
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin", return_value={"status": "ok"}) as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc) as mock_popen, \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=[
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", side_effect=[
              {"status": "error_dialog", "error": "Plugin 'CliAnythingBridge' failed to load because module 'CliAnythingBridge' could not be found."},
              {"status": "online"},
          ]):
@@ -2900,12 +3143,12 @@ def test_run_editor_launch_task_precompiles_when_bridge_binary_missing(tmp_path)
             "project": {"ready": True, "errors": [], "warnings": []},
             "remote_control": {"configured": True},
         },
-    ]) as mock_preflight, \
+    ]), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
@@ -2922,8 +3165,8 @@ def test_run_editor_launch_task_precompiles_when_bridge_binary_missing(tmp_path)
              },
          ], create=True), \
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin", return_value={"status": "ok"}) as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={"status": "online"}):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     mock_compile.assert_called_once()
@@ -2964,9 +3207,9 @@ def test_run_editor_launch_task_restores_previous_bridge_on_compile_failure(tmp_
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value=deploy), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value=deploy), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
          patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
              "ready": False,
@@ -2980,7 +3223,7 @@ def test_run_editor_launch_task_restores_previous_bridge_on_compile_failure(tmp_
              "returncode": 6,
          }), \
          patch("cli_anything.unreal.core.plugin_bridge.rollback_plugin_deployment", return_value=rollback) as mock_rollback, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen") as mock_popen:
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen") as mock_popen:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     mock_rollback.assert_called_once_with(deploy)
@@ -3017,11 +3260,11 @@ def test_run_editor_launch_task_stops_when_bridge_upgrade_is_locked(tmp_path):
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value=deploy), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value=deploy), \
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin") as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen") as mock_popen:
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen") as mock_popen:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     mock_compile.assert_not_called()
@@ -3071,9 +3314,9 @@ def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
          }) as mock_prepare_remote, \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
@@ -3083,8 +3326,8 @@ def test_run_editor_launch_task_skips_compile_when_plugin_loads_ok(tmp_path):
              "message": "Bridge plugin binary is ready.",
          }), \
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin") as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={"status": "online"}):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     mock_prepare_remote.assert_called_once()
@@ -3131,9 +3374,9 @@ def test_run_editor_launch_task_recovers_requested_map_with_open_level(tmp_path,
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/Win64/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
@@ -3143,8 +3386,8 @@ def test_run_editor_launch_task_recovers_requested_map_with_open_level(tmp_path,
              "message": "Bridge plugin binary is ready.",
          }), \
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin") as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online", "port": 30010}), \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={"status": "online", "port": 30010}), \
          patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification) as mock_verify, \
          patch("cli_anything.unreal.core.scene.open_level", return_value=recovery) as mock_open_level:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
@@ -3202,9 +3445,9 @@ def test_run_editor_launch_task_recovers_map_after_open_level_connection_reset(t
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/Win64/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
@@ -3214,8 +3457,8 @@ def test_run_editor_launch_task_recovers_map_after_open_level_connection_reset(t
              "message": "Bridge plugin binary is ready.",
          }), \
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin") as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=[
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", side_effect=[
              {"status": "online", "port": 30010},
              {"status": "online", "port": 30010, "recovered_after": "open_level_connection_reset"},
          ]) as mock_wait_for_api, \
@@ -3288,9 +3531,9 @@ def test_run_editor_launch_task_reports_crash_during_map_recovery(tmp_path, monk
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/Win64/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
@@ -3300,8 +3543,8 @@ def test_run_editor_launch_task_reports_crash_during_map_recovery(tmp_path, monk
              "message": "Bridge plugin binary is ready.",
          }), \
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin") as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=[
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", side_effect=[
              {"status": "online", "port": 30010},
              recovery_crash,
          ]), \
@@ -3356,9 +3599,9 @@ def test_run_editor_launch_task_fails_when_requested_map_is_not_active(tmp_path,
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/Win64/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
@@ -3368,8 +3611,8 @@ def test_run_editor_launch_task_fails_when_requested_map_is_not_active(tmp_path,
              "message": "Bridge plugin binary is ready.",
          }), \
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin") as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online", "port": 30010}), \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={"status": "online", "port": 30010}), \
          patch("cli_anything.unreal.core.scene._verify_current_level", return_value=verification) as mock_verify, \
          patch("cli_anything.unreal.core.scene.open_level", return_value=recovery) as mock_open_level:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
@@ -3409,9 +3652,9 @@ def test_run_editor_launch_task_deploys_bridge_for_ue4(tmp_path):
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockUE4"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockUE4/Binaries/UE4Editor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True,
              "action": "already_up_to_date",
          }) as mock_deploy, \
@@ -3421,8 +3664,8 @@ def test_run_editor_launch_task_deploys_bridge_for_ue4(tmp_path):
              "reason": "ok",
          }), \
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin") as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={"status": "online"}):
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={"status": "online"}):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     mock_deploy.assert_called_once()
@@ -3457,7 +3700,7 @@ def test_run_editor_launch_task_does_not_deploy_ue4_bridge_before_preflight_fail
              "status": "unavailable",
              "changes": [],
          }) as mock_prepare_remote, \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge") as mock_deploy:
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge") as mock_deploy:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     mock_deploy.assert_not_called()
@@ -3489,9 +3732,9 @@ def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=True), \
@@ -3503,8 +3746,8 @@ def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
          patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin", return_value={
              "status": "error", "error": "Build failed", "returncode": 1
          }) as mock_compile, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=mock_proc) as mock_popen, \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={
              "status": "error_dialog", "error": "Plugin 'CliAnythingBridge' failed to load because module 'CliAnythingBridge' could not be found."
          }) as mock_wait:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
@@ -3516,8 +3759,81 @@ def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
     assert result["error"]["code"] == "BRIDGE_MODULE_COMPILE_FAILED"
 
 
+def test_wait_for_api_requires_spawned_process_to_own_port(tmp_path):
+    from cli_anything.unreal.commands import AppState
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
+
+    proc = MagicMock(pid=4242)
+    proc.poll.return_value = None
+    api = MagicMock()
+    api.is_alive.return_value = True
+    log_file = tmp_path / "Editor.log"
+    log_file.write_text("", encoding="utf-8")
+    state = AppState()
+    progress = []
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+        return_value=api,
+    ) as api_cls, patch(
+        "cli_anything.unreal.core.editor_lifecycle.time.time",
+        side_effect=[0.0, 0.0, 0.0, 0.0, 2.0],
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle.time.sleep",
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle._restore_packages_blocker",
+        return_value=None,
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle._diagnose_api_unreachable",
+        return_value={},
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle._check_log_errors_incremental",
+        return_value=(None, 0),
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle._check_log_errors",
+        return_value=None,
+    ):
+        api_cls._get_pid_listening_on_port.return_value = 9999
+        result = _wait_for_api(
+            proc,
+            30010,
+            1,
+            log_file,
+            state,
+            on_progress=progress.append,
+        )
+
+    assert result["status"] == "timeout"
+    assert any(item["startup_phase"] == "waiting_for_port_owner" for item in progress)
+    assert any(item.get("port_owner_pid") == 9999 for item in progress)
+
+
+def test_wait_for_api_accepts_verified_spawned_process_owner(tmp_path):
+    from cli_anything.unreal.commands import AppState
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
+
+    proc = MagicMock(pid=4242)
+    proc.poll.return_value = None
+    api = MagicMock()
+    api.is_alive.return_value = True
+    log_file = tmp_path / "Editor.log"
+    state = AppState()
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+        return_value=api,
+    ) as api_cls:
+        api_cls._get_pid_listening_on_port.return_value = 4242
+        result = _wait_for_api(proc, 30010, 1, log_file, state)
+
+    assert result["status"] == "online"
+    assert result["process_id"] == 4242
+    assert result["port_owner_pid"] == 4242
+    assert result["port_owner_verified"] is True
+
+
 def test_wait_for_api_timeout_reports_listening_port_with_http_server_log_hints(tmp_path):
-    from cli_anything.unreal.commands.editor import _wait_for_api
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
 
     log_dir = tmp_path / "Saved" / "Logs"
     log_dir.mkdir(parents=True)
@@ -3543,9 +3859,9 @@ def test_wait_for_api_timeout_reports_listening_port_with_http_server_log_hints(
     state.json_output = True
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
-         patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True), \
-         patch("cli_anything.unreal.commands.editor.time.time", side_effect=[100.0, 101.0, 101.0]), \
-         patch("cli_anything.unreal.commands.editor.time.sleep"):
+         patch("cli_anything.unreal.core.editor_lifecycle._tcp_port_accepts_connection", return_value=True), \
+         patch("cli_anything.unreal.core.editor_lifecycle.time.time", side_effect=[100.0, 101.0, 101.0]), \
+         patch("cli_anything.unreal.core.editor_lifecycle.time.sleep"):
         result = _wait_for_api(proc, 30010, 1, log_file, state)
 
     assert result["status"] == "timeout"
@@ -3559,7 +3875,7 @@ def test_wait_for_api_timeout_reports_listening_port_with_http_server_log_hints(
 
 
 def test_api_unreachable_diagnostics_find_http_server_hints_outside_log_tail(tmp_path):
-    from cli_anything.unreal.commands.editor import _diagnose_api_unreachable
+    from cli_anything.unreal.core.editor_lifecycle import _diagnose_api_unreachable
 
     log_file = tmp_path / "RXGame.log"
     log_file.write_text(
@@ -3579,7 +3895,7 @@ def test_api_unreachable_diagnostics_find_http_server_hints_outside_log_tail(tmp
         encoding="utf-8",
     )
 
-    with patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True):
+    with patch("cli_anything.unreal.core.editor_lifecycle._tcp_port_accepts_connection", return_value=True):
         result = _diagnose_api_unreachable(log_file, 30010)
 
     assert result["likely_cause"] == "remote_control_port_bind_failed"
@@ -3590,7 +3906,7 @@ def test_api_unreachable_diagnostics_find_http_server_hints_outside_log_tail(tmp
 
 
 def test_wait_for_api_timeout_keeps_startup_log_window_for_diagnostics(tmp_path):
-    from cli_anything.unreal.commands.editor import _wait_for_api
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
 
     log_file = tmp_path / "RXGame.log"
     log_file.write_text("", encoding="utf-8")
@@ -3614,9 +3930,9 @@ def test_wait_for_api_timeout_keeps_startup_log_window_for_diagnostics(tmp_path)
         return False
 
     with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", side_effect=write_unhealthy_log), \
-         patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True), \
-         patch("cli_anything.unreal.commands.editor.time.time", side_effect=[100.0, 100.1, 103.1, 103.1, 104.0]), \
-         patch("cli_anything.unreal.commands.editor.time.sleep"):
+         patch("cli_anything.unreal.core.editor_lifecycle._tcp_port_accepts_connection", return_value=True), \
+         patch("cli_anything.unreal.core.editor_lifecycle.time.time", side_effect=[100.0, 100.1, 103.1, 103.1, 104.0]), \
+         patch("cli_anything.unreal.core.editor_lifecycle.time.sleep"):
         result = _wait_for_api(proc, 30010, 3, log_file, state)
 
     assert result["status"] == "timeout"
@@ -3625,7 +3941,7 @@ def test_wait_for_api_timeout_keeps_startup_log_window_for_diagnostics(tmp_path)
 
 
 def test_remote_control_diagnostics_ignore_old_and_other_port_bind_failures(tmp_path):
-    from cli_anything.unreal.commands.editor import _diagnose_api_unreachable
+    from cli_anything.unreal.core.editor_lifecycle import _diagnose_api_unreachable
 
     log_file = tmp_path / "RXGame.log"
     log_file.write_text(
@@ -3644,7 +3960,7 @@ def test_remote_control_diagnostics_ignore_old_and_other_port_bind_failures(tmp_
         encoding="utf-8",
     )
 
-    with patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True):
+    with patch("cli_anything.unreal.core.editor_lifecycle._tcp_port_accepts_connection", return_value=True):
         result = _diagnose_api_unreachable(log_file, 30011)
 
     assert result["http_server_restart_status"] == "completed"
@@ -3653,7 +3969,7 @@ def test_remote_control_diagnostics_ignore_old_and_other_port_bind_failures(tmp_
 
 
 def test_remote_control_log_hints_prioritize_target_bind_and_restart_evidence(tmp_path):
-    from cli_anything.unreal.commands.editor import _diagnose_api_unreachable
+    from cli_anything.unreal.core.editor_lifecycle import _diagnose_api_unreachable
 
     log_file = tmp_path / "RXGame.log"
     log_file.write_text(
@@ -3667,7 +3983,7 @@ def test_remote_control_log_hints_prioritize_target_bind_and_restart_evidence(tm
         encoding="utf-8",
     )
 
-    with patch("cli_anything.unreal.commands.editor._tcp_port_accepts_connection", return_value=True):
+    with patch("cli_anything.unreal.core.editor_lifecycle._tcp_port_accepts_connection", return_value=True):
         result = _diagnose_api_unreachable(log_file, 30011)
 
     assert any("unable to bind to 127.0.0.1:30011" in hint for hint in result["log_hints"])
@@ -3675,7 +3991,7 @@ def test_remote_control_log_hints_prioritize_target_bind_and_restart_evidence(tm
 
 
 def test_wait_for_api_crash_reports_progress_and_bounded_log_tail(tmp_path):
-    from cli_anything.unreal.commands.editor import _wait_for_api
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
 
     log_file = tmp_path / "RXGame.log"
     log_file.write_text("previous launch\n", encoding="utf-8")
@@ -3695,7 +4011,7 @@ def test_wait_for_api_crash_reports_progress_and_bounded_log_tail(tmp_path):
     progress = []
 
     with patch(
-        "cli_anything.unreal.commands.editor.time.time",
+        "cli_anything.unreal.core.editor_lifecycle.time.time",
         side_effect=[100.0, 101.0, 102.0],
     ):
         result = _wait_for_api(
@@ -3776,7 +4092,7 @@ def test_detect_ue_dialogs_matches_restore_packages_top_level_for_process(monkey
 
 
 def test_wait_for_api_reports_restore_packages_blocker(tmp_path):
-    from cli_anything.unreal.commands.editor import _wait_for_api
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
 
     log_file = tmp_path / "TestProj.log"
     log_file.write_text("", encoding="utf-8")
@@ -3796,13 +4112,13 @@ def test_wait_for_api_reports_restore_packages_blocker(tmp_path):
         "cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive",
         return_value=False,
     ), patch(
-        "cli_anything.unreal.commands.editor._restore_packages_blocker",
+        "cli_anything.unreal.core.editor_lifecycle._restore_packages_blocker",
         return_value=blocker,
     ), patch(
-        "cli_anything.unreal.commands.editor.time.time",
+        "cli_anything.unreal.core.editor_lifecycle.time.time",
         side_effect=[100.0, 100.1],
     ), patch(
-        "cli_anything.unreal.commands.editor.time.monotonic",
+        "cli_anything.unreal.core.editor_lifecycle.time.monotonic",
         return_value=200.0,
     ):
         result = _wait_for_api(
@@ -3860,9 +4176,9 @@ def test_run_editor_launch_task_persists_wait_progress(tmp_path, monkeypatch):
         "project": {"errors": [], "warnings": []},
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
@@ -3871,8 +4187,13 @@ def test_run_editor_launch_task_persists_wait_progress(tmp_path, monkeypatch):
              "reason": "ok",
              "message": "Bridge plugin binary is ready.",
          }), \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", side_effect=report_progress):
+         patch("cli_anything.unreal.core.tasks._capture_windows_process_identity", return_value={
+             "pid": 4242,
+             "creation_time": 123456,
+             "image_path": "F:/MockEngine/UnrealEditor.exe",
+         }), \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", side_effect=report_progress):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     assert result["status"] == "completed"
@@ -3881,6 +4202,98 @@ def test_run_editor_launch_task_persists_wait_progress(tmp_path, monkeypatch):
     assert result["result"]["startup_phase"] == "waiting_for_remote_control"
     assert result["result"]["elapsed_seconds"] == 15
     assert result["result"]["process_alive"] is True
+    assert result["requested_port"] == 30010
+    assert result["resolved_port"] == 30010
+    assert result["editor_process_identity"]["creation_time"] == 123456
+
+
+def test_run_editor_launch_task_cancel_wins_over_late_online_result(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import (
+        _request_task_cancel,
+        _run_editor_launch_task,
+        create_task,
+    )
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    project_dir = tmp_path / "CancelWins"
+    project_dir.mkdir()
+    uproject = project_dir / "CancelWins.uproject"
+    uproject.write_text(
+        '{"FileVersion": 3, "EngineAssociation": "5.7"}',
+        encoding="utf-8",
+    )
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+    proc = MagicMock(pid=4242)
+
+    def cancel_then_report_online(*_args, **_kwargs):
+        _request_task_cancel(task["task_id"])
+        return {"status": "online", "port": 30010}
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.core.tasks._capture_windows_process_identity", return_value=None), \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", side_effect=cancel_then_report_online):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    assert result["status"] == "cancelled"
+    assert result["phase"] == "exited"
+    assert result["cancelled"] is True
+    assert "error" not in result
+    assert result["result"].get("status") != "online"
+
+
+def test_second_project_launch_task_is_rejected_before_spawn(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import (
+        _run_editor_launch_task,
+        create_task,
+        transition_task,
+        update_task_fields,
+    )
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    project_dir = tmp_path / "OneLaunch"
+    project_dir.mkdir()
+    uproject = project_dir / "OneLaunch.uproject"
+    uproject.write_text(
+        '{"FileVersion": 3, "EngineAssociation": "5.7"}',
+        encoding="utf-8",
+    )
+    older = create_task("editor.launch", {"project_path": str(uproject), "port": 30010})
+    update_task_fields(older["task_id"], worker_pid=41001)
+    transition_task(older["task_id"], status="running")
+    newer = create_task("editor.launch", {"project_path": str(uproject), "port": 30010})
+
+    with patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.core.tasks._probe_task_process", return_value={"state": "running"}), \
+         patch("cli_anything.unreal.utils.ue_backend.preflight_check") as preflight, \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen") as popen:
+        result = _run_editor_launch_task(newer, estimated_total_seconds=120)
+
+    assert result["status"] == "failed"
+    assert result["phase"] == "blocked"
+    assert result["error"]["code"] == "EDITOR_LAUNCH_ALREADY_ACTIVE"
+    assert result["error"]["details"]["active_task_id"] == older["task_id"]
+    preflight.assert_not_called()
+    popen.assert_not_called()
 
 
 def test_run_editor_launch_task_rejects_nullrhi_before_preflight(tmp_path, monkeypatch):
@@ -3901,7 +4314,7 @@ def test_run_editor_launch_task_rejects_nullrhi_before_preflight(tmp_path, monke
     })
 
     with patch("cli_anything.unreal.utils.ue_backend.preflight_check") as mock_preflight, \
-         patch("cli_anything.unreal.commands.editor.sp.Popen") as mock_popen:
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen") as mock_popen:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     assert result["status"] == "failed"
@@ -3936,9 +4349,9 @@ def test_run_editor_launch_task_timeout_returns_exact_poll_command(tmp_path, mon
         "project": {"errors": [], "warnings": []},
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
@@ -3947,8 +4360,8 @@ def test_run_editor_launch_task_timeout_returns_exact_poll_command(tmp_path, mon
              "reason": "ok",
              "message": "Bridge plugin binary is ready.",
          }), \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={
              "status": "timeout",
              "port": 30010,
              "process_alive": True,
@@ -3988,9 +4401,9 @@ def test_run_editor_launch_task_reports_restore_packages_error(tmp_path, monkeyp
         "project": {"errors": [], "warnings": []},
     }), \
          patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/UnrealEditor.exe"), \
-         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._check_port_in_use", return_value=None), \
-         patch("cli_anything.unreal.commands.editor._deploy_bridge", return_value={
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
              "deployed": True, "action": "already_up_to_date"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
@@ -3999,8 +4412,8 @@ def test_run_editor_launch_task_reports_restore_packages_error(tmp_path, monkeyp
              "reason": "ok",
              "message": "Bridge plugin binary is ready.",
          }), \
-         patch("cli_anything.unreal.commands.editor.sp.Popen", return_value=proc), \
-         patch("cli_anything.unreal.commands.editor._wait_for_api", return_value={
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={
              "status": "blocked_by_restore_packages",
              "startup_phase": "blocked_by_restore_packages",
              "process_alive": True,
@@ -4023,7 +4436,7 @@ def test_run_editor_launch_task_reports_restore_packages_error(tmp_path, monkeyp
 
 def test_summarize_startup_precheck_includes_bridge_plugin_issues():
     """_summarize_startup_precheck includes bridge_plugin issues as warnings."""
-    from cli_anything.unreal.commands.editor import _summarize_startup_precheck
+    from cli_anything.unreal.core.editor_lifecycle import _summarize_startup_precheck
 
     check = {
         "ready": True,
@@ -4038,17 +4451,3 @@ def test_summarize_startup_precheck_includes_bridge_plugin_issues():
     result = _summarize_startup_precheck(check)
     assert "CliAnythingBridge plugin not enabled in .uproject" in result["warnings"]
     assert not any(warning.startswith("Fixed:") for warning in result["warnings"])
-
-
-def test_remove_tree_with_retries_handles_locked_dll():
-    from pathlib import Path
-    from unittest.mock import patch
-    from cli_anything.unreal.commands.editor import _remove_tree_with_retries
-
-    with patch("pathlib.Path.exists", return_value=True), \
-         patch("shutil.rmtree", side_effect=[PermissionError("locked"), None]) as mock_rmtree, \
-         patch("time.sleep") as mock_sleep:
-        _remove_tree_with_retries(Path("F:/Test574/Plugins/CliAnythingBridge"), attempts=2, delay=0.01)
-
-    assert mock_rmtree.call_count == 2
-    mock_sleep.assert_called_once_with(0.01)

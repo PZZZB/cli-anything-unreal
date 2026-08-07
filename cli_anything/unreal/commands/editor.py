@@ -6,7 +6,6 @@ import ast
 import codecs
 import json
 import re
-import socket
 import subprocess as sp
 import sys
 import time
@@ -17,7 +16,8 @@ import click
 from cli_anything.unreal.commands import (
     AppError,
     AppState,
-    _discover_online_editor_port,
+    _guard_editor_project,
+    ensure_inferred_project,
     handle_error,
     output,
     require_editor,
@@ -28,14 +28,14 @@ from cli_anything.unreal.core.tasks import (
     TaskLockTimeout,
     TaskWorkerSpawnError,
     cancel_task,
-    iter_tasks,
     load_task,
-    save_task,
     submit_task,
     task_data_path,
     task_progress,
+    transition_task,
     wait_for_task,
 )
+from cli_anything.unreal.errors import raise_for_legacy_error
 
 
 DEFAULT_EDITOR_LAUNCH_FOREGROUND_WAIT_SECONDS = 30
@@ -104,6 +104,8 @@ def _load_command_project(state: AppState, project_path: str | None) -> None:
             exit_code=3,
             suggestion="Pass --project <path-to.uproject> before or after editor launch.",
         )
+    state.project_is_explicit = True
+    state.project_is_inferred = False
     if not state.port_is_explicit:
         from cli_anything.unreal.utils.ue_backend import read_rc_port
 
@@ -431,38 +433,6 @@ def _add_transient_unreachable_hint(entry: dict, observation: dict) -> None:
         entry["next_command"] = f'ue-cli --project "{project_path}" editor status'
 
 
-def _active_launch_task_for_project(
-    project_path: str | None,
-    pid: int | None = None,
-    *,
-    timeout: float | None = None,
-) -> dict | None:
-    if not project_path:
-        return None
-    now = time.time()
-    for task in iter_tasks(timeout=timeout):
-        if task.get("command") != "editor.launch":
-            continue
-        if task.get("status") in FINAL_TASK_STATUSES:
-            continue
-        if now - float(task.get("updated_at") or task.get("created_at") or 0) > 7200:
-            continue
-        payload = task.get("payload") or {}
-        if not _same_project_path(payload.get("project_path"), project_path):
-            continue
-        task_pid = task.get("pid") or (task.get("result") or {}).get("pid")
-        if pid is not None and task_pid is not None:
-            try:
-                if int(task_pid) != int(pid):
-                    continue
-            except (TypeError, ValueError):
-                continue
-        if pid is not None and task_pid is None:
-            continue
-        return task
-    return None
-
-
 def _add_launching_recovery_hint(entry: dict, task: dict) -> None:
     entry["status"] = "launching"
     entry["task_id"] = task.get("task_id")
@@ -736,7 +706,11 @@ def _scan_editor_status_instances(
         port = port_by_pid.get(pid) if pid is not None else None
         if port is None and pid is not None:
             configured_proc_port = proc_config_port_by_pid.get(pid)
-            if configured_proc_port in online_by_port:
+            if (
+                configured_proc_port in online_by_port
+                and pid_by_port.get(configured_proc_port) is not None
+                and int(pid_by_port[configured_proc_port]) == pid
+            ):
                 port = configured_proc_port
         if port is None and pid is not None and _same_project_path(project_path, state.session.project_path):
             probe_port = int(
@@ -773,7 +747,7 @@ def _scan_editor_status_instances(
                 pid_by_port[probe_port] = owner_pid
                 if owner_pid:
                     port_by_pid[int(owner_pid)] = probe_port
-                if owner_pid is None or int(owner_pid) == pid:
+                if owner_pid is not None and int(owner_pid) == pid:
                     port = probe_port
                     port_by_pid[pid] = probe_port
         if port is not None:
@@ -816,14 +790,18 @@ def _scan_editor_status_instances(
         owner_pid = pid_by_port.get(port)
         owner = process_by_pid.get(int(owner_pid)) if owner_pid else None
         project_path = owner.get("project") if owner else None
-        if project_path is None and state.session.project_path and port == state.session.port:
-            project_path = state.session.project_path
         entry = _compact_editor_entry(
             "online",
             int(owner_pid) if owner_pid else None,
             port,
             project_path,
         )
+        if owner_pid is None:
+            entry["ownership"] = "unknown"
+        elif owner is None:
+            entry["ownership"] = "unverified_process"
+        else:
+            entry["ownership"] = "verified"
         instances.append(entry)
 
     instances = _deduplicate_editor_status_instances(instances)
@@ -881,7 +859,9 @@ def _recover_online_launch_result(
         return max(0.01, min(limit, remaining))
 
     try:
-        task_port = payload.get("port")
+        task_port = current_task.get("resolved_port")
+        if task_port is None:
+            task_port = payload.get("port")
         scan_range = str(task_port) if task_port is not None else "30010-30020"
         scan_timeout = (
             bounded_timeout(status_timeout)
@@ -934,6 +914,26 @@ def _recover_online_launch_result(
     if owner_pid is None or int(owner_pid) != int(task_pid):
         return None
 
+    recorded_identity = current_task.get("editor_process_identity")
+    identity_verified = False
+    if recorded_identity:
+        try:
+            from cli_anything.unreal.core.tasks import _recorded_process_identity_matches
+            from cli_anything.unreal.utils.ue_backend import _windows_process_identity
+
+            current_identity = _windows_process_identity(int(task_pid))
+        except Exception:
+            return None
+        if not isinstance(current_identity, dict) or not (
+            current_identity.get("query_ok")
+            and current_identity.get("found")
+            and _recorded_process_identity_matches(recorded_identity, current_identity)
+        ):
+            return None
+        identity_verified = True
+    elif sys.platform == "win32" and int(current_task.get("task_state_version") or 1) >= 2:
+        return None
+
     requested_map = payload.get("map_path")
     map_verification = None
     if requested_map:
@@ -959,6 +959,7 @@ def _recover_online_launch_result(
     result["command"] = "editor.launch"
     result["launch_task_status"] = current_task.get("status", "unknown")
     result["recovered_from"] = recovered_from
+    result["process_identity_verified"] = identity_verified
     if not result.get("pid") and current_task.get("pid"):
         result["pid"] = current_task.get("pid")
     if current_task.get("log_file") and not result.get("log_file"):
@@ -1006,13 +1007,25 @@ def editor_status(state: AppState, scan_range, show_all, timeout, project_path, 
                 status_timeout=timeout,
             )
             if recovered is not None:
-                task["status"] = "completed"
-                task["result"] = recovered
-                task.pop("error", None)
-                task = save_task(task)
+                task = transition_task(
+                    task_id,
+                    expected_statuses={"timeout"},
+                    status="completed",
+                    phase="online",
+                    result_patch=recovered,
+                    result_remove=(
+                        "failure_kind",
+                        "api_route_healthy",
+                        "next_command",
+                        "error",
+                    ),
+                    error=None,
+                ) or task
         output(task_progress(task), state)
         return
 
+    if not show_all:
+        ensure_inferred_project(state)
     instances = _scan_editor_status_instances(
         state,
         scan_range,
@@ -1099,27 +1112,6 @@ def viewport_bookmark_jump(state: AppState, index, timeout):
     output({"status": "jumped", "index": index, "window": window, "before": before, "after": after}, state)
 
 
-def _summarize_startup_precheck(check: dict) -> dict:
-    errors = check.get("engine", {}).get("errors", []) + check.get("project", {}).get("errors", [])
-    warnings = check.get("engine", {}).get("warnings", []) + check.get("project", {}).get("warnings", [])
-    for issue in check.get("bridge_plugin", {}).get("issues", []):
-        warnings.append(issue)
-    return {
-        "ready": check.get("ready", False),
-        "errors": errors,
-        "warnings": warnings,
-    }
-
-
-def _same_project_path(left: str | None, right: str | None) -> bool:
-    if not left or not right:
-        return False
-    try:
-        return Path(left).resolve().as_posix().lower() == Path(right).resolve().as_posix().lower()
-    except Exception:
-        return Path(left).as_posix().lower() == Path(right).as_posix().lower()
-
-
 def _find_matching_project_editors(project_path: str | None) -> tuple[list[dict], list[dict]]:
     from cli_anything.unreal.utils.ue_backend import find_running_editors
 
@@ -1176,26 +1168,21 @@ def _capture_project_editor_targets(matches: list[dict]) -> list[dict]:
     return targets
 
 
-def _partition_editor_close_targets(targets: list[dict], port: int) -> tuple[list[dict], list[dict]]:
+def _partition_editor_close_targets(targets: list[dict], owner_pid: int) -> tuple[list[dict], list[dict]]:
     """Separate the editor receiving QUIT_EDITOR from same-project stale peers."""
-    if len(targets) < 2:
-        return targets, []
-
-    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
-
-    try:
-        api_owner_pid = UEEditorAPI._get_pid_listening_on_port(port)
-        api_owner_pid = int(api_owner_pid) if api_owner_pid is not None else None
-    except (OSError, TypeError, ValueError):
-        api_owner_pid = None
-
-    if api_owner_pid is None:
-        return targets, []
-
-    graceful_targets = [target for target in targets if int(target["pid"]) == api_owner_pid]
+    graceful_targets = [target for target in targets if int(target["pid"]) == int(owner_pid)]
     if not graceful_targets:
-        return targets, []
-    stale_targets = [target for target in targets if int(target["pid"]) != api_owner_pid]
+        raise AppError(
+            "EDITOR_PROJECT_VERIFICATION_FAILED",
+            f"Editor port owner PID {owner_pid} is not one of the verified project editor processes.",
+            exit_code=3,
+            suggestion="Retry after editor process discovery is stable; no editor request was sent.",
+            details={
+                "listener_pid": int(owner_pid),
+                "target_pids": sorted(int(target["pid"]) for target in targets),
+            },
+        )
+    stale_targets = [target for target in targets if int(target["pid"]) != int(owner_pid)]
     return graceful_targets, stale_targets
 
 
@@ -1236,6 +1223,170 @@ def _finish_partitioned_editor_close(
             details=result,
         )
     return result
+
+
+def _editor_launch_terminal_result(
+    state: AppState,
+    task_id: str,
+    task: dict,
+) -> dict:
+    """Return verified success or raise for every unsuccessful terminal state."""
+    progress = task_progress(task)
+    status = task.get("status")
+    if status == "completed":
+        return progress
+    if status == "timeout":
+        online_result = _recover_online_launch_result(state, task_id, task)
+        if online_result is not None:
+            return online_result
+    error = task.get("error") or {}
+    defaults = {
+        "failed": ("TASK_EXECUTION_FAILED", "Editor launch failed.", 3),
+        "timeout": ("EDITOR_LAUNCH_TIMEOUT", "Editor launch timed out.", 4),
+        "cancelled": ("EDITOR_LAUNCH_CANCELLED", "Editor launch was cancelled.", 4),
+    }
+    code, message, exit_code = defaults.get(
+        status,
+        ("EDITOR_LAUNCH_STATE_INVALID", "Editor launch ended in an invalid state.", 3),
+    )
+    raise AppError(
+        error.get("code", code),
+        error.get("message", message),
+        exit_code=exit_code,
+        details=progress,
+    )
+
+
+def _dirty_package_names(response: object, operation: str) -> list[str]:
+    """Extract a verified dirty-package out parameter from Remote Control."""
+
+    if not isinstance(response, dict):
+        raise AppError(
+            "EDITOR_DIRTY_STATE_UNKNOWN",
+            f"{operation} returned an unrecognized response; the editor was not asked to quit.",
+            exit_code=3,
+            details={"operation": operation, "response": str(response)},
+        )
+    if response.get("error") or response.get("errorMessage"):
+        message = response.get("error") or response.get("errorMessage")
+        raise AppError(
+            "EDITOR_DIRTY_STATE_UNKNOWN",
+            f"Could not inspect dirty packages: {message}",
+            exit_code=3,
+            details={"operation": operation, "response": response},
+        )
+
+    value = None
+    found = False
+    for key, candidate in response.items():
+        if str(key).replace("_", "").casefold() in {
+            "outdirtypackages",
+            "returnvalue",
+        }:
+            value = candidate
+            found = True
+            break
+    if not found or not isinstance(value, (list, tuple)):
+        raise AppError(
+            "EDITOR_DIRTY_STATE_UNKNOWN",
+            f"{operation} did not return a verifiable dirty-package list; the editor was not asked to quit.",
+            exit_code=3,
+            details={"operation": operation, "response": response},
+        )
+
+    names = []
+    for item in value or []:
+        if isinstance(item, dict):
+            item_name = next(
+                (
+                    item.get(key)
+                    for key in (
+                        "ObjectPath",
+                        "objectPath",
+                        "PathName",
+                        "path_name",
+                        "Name",
+                        "name",
+                    )
+                    if item.get(key)
+                ),
+                None,
+            )
+            names.append(str(item_name or item))
+        else:
+            names.append(str(item))
+    return names
+
+
+def _query_dirty_editor_packages(api) -> dict:
+    object_path = "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils"
+    try:
+        maps = _dirty_package_names(
+            api.call_function(object_path, "GetDirtyMapPackages", {}),
+            "GetDirtyMapPackages",
+        )
+        content = _dirty_package_names(
+            api.call_function(object_path, "GetDirtyContentPackages", {}),
+            "GetDirtyContentPackages",
+        )
+    except AppError:
+        raise
+    except Exception as exc:
+        raise AppError(
+            "EDITOR_DIRTY_STATE_UNKNOWN",
+            "Could not inspect dirty packages; the editor was not asked to quit.",
+            exit_code=3,
+            suggestion=(
+                "Retry when Remote Control is responsive; use editor close --force only "
+                "when the request already authorizes data loss."
+            ),
+            details={"error": str(exc)},
+        ) from exc
+    return {
+        "map_packages": maps,
+        "content_packages": content,
+        "count": len(maps) + len(content),
+    }
+
+
+def _save_all_dirty_editor_packages(api) -> None:
+    """Save all dirty packages and require Unreal to confirm success."""
+
+    try:
+        response = api.call_function(
+            "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils",
+            "SaveDirtyPackages",
+            {"bSaveMapPackages": True, "bSaveContentPackages": True},
+        )
+    except Exception as exc:
+        raise AppError(
+            "EDITOR_SAVE_BEFORE_CLOSE_FAILED",
+            "Saving dirty packages failed; the editor was not asked to quit.",
+            exit_code=3,
+            details={"error": str(exc)},
+        ) from exc
+    if (
+        not isinstance(response, dict)
+        or response.get("error")
+        or response.get("errorMessage")
+        or response.get("ReturnValue") is not True
+    ):
+        raise AppError(
+            "EDITOR_SAVE_BEFORE_CLOSE_FAILED",
+            "Unreal Editor did not confirm that all dirty packages were saved; the editor was not asked to quit.",
+            exit_code=3,
+            details={"response": response},
+        )
+
+
+def _save_dirty_editor_packages_if_needed(api) -> dict:
+    dirty = _query_dirty_editor_packages(api)
+    if dirty["count"]:
+        _save_all_dirty_editor_packages(api)
+    return {
+        **dirty,
+        "saved_count": dirty["count"],
+    }
 
 
 def _project_process_exit_evidence(
@@ -1508,109 +1659,6 @@ def _kill_matching_project_editors(
     return result
 
 
-def _check_already_running(session, state) -> dict | None:
-    from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs, find_running_editors
-    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
-
-    running = find_running_editors()
-    api = UEEditorAPI(port=state.session.port)
-    api_alive = api.is_alive()
-    api_owner_pid = None
-    if api_alive:
-        try:
-            api_owner_pid = UEEditorAPI._get_pid_listening_on_port(state.session.port)
-        except Exception:
-            api_owner_pid = None
-    dialogs = detect_ue_dialogs() if sys.platform == "win32" else []
-    for editor_proc in running:
-        proc_project = editor_proc.get("project", "")
-        if _same_project_path(proc_project, session.project_path):
-            editor_pid = int(editor_proc["pid"])
-            api_belongs_to_editor = api_alive and (api_owner_pid is None or int(api_owner_pid) == editor_pid)
-            if api_belongs_to_editor:
-                return {
-                    "status": "already_running",
-                    "pid": editor_pid,
-                    "project": proc_project,
-                    "message": f"Editor is already running for this project (PID {editor_pid}).",
-                }
-            active_launch = _active_launch_task_for_project(proc_project, editor_pid)
-            if active_launch:
-                starting = {
-                    "status": "starting",
-                    "pid": editor_pid,
-                    "project": proc_project,
-                    "port": state.session.port,
-                    "task_id": active_launch.get("task_id"),
-                    "launch_task_status": active_launch.get("status"),
-                    "message": f"Editor launch is already in progress for this project (PID {editor_pid}), but the API is not reachable yet.",
-                    "suggestion": "Wait for the active launch task or inspect it with editor status <task_id> before retrying launch.",
-                }
-                if active_launch.get("task_id"):
-                    starting["next_command"] = f'ue-cli --project "{proc_project}" editor status {active_launch["task_id"]}'
-                return starting
-            zombie = {
-                "status": "zombie",
-                "pid": editor_pid,
-                "project": proc_project,
-                "message": f"Found UnrealEditor.exe for this project but the API is not reachable on port {state.session.port}.",
-                "suggestion": "Stale process will be automatically terminated on next launch. Run editor launch to proceed.",
-            }
-            if api_alive and api_owner_pid is not None:
-                zombie["api_owner_pid"] = int(api_owner_pid)
-                zombie["message"] = (
-                    f"Found UnrealEditor.exe for this project (PID {editor_pid}) but Remote Control "
-                    f"port {state.session.port} belongs to PID {api_owner_pid}."
-                )
-            if dialogs:
-                zombie["dialogs"] = [{"title": dialog["title"]} for dialog in dialogs]
-                zombie["status"] = "starting"
-                zombie["message"] = f"Editor process exists for this project but startup is still blocked or incomplete on port {state.session.port}."
-                zombie["suggestion"] = "Wait briefly or dismiss any blocking dialogs before retrying."
-            return zombie
-    return None
-
-
-def _check_port_in_use(poll_port, state) -> dict | None:
-    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
-
-    api_check = UEEditorAPI(port=poll_port)
-    if api_check.is_alive():
-        return {
-            "status": "already_running",
-            "port": poll_port,
-            "message": f"An editor is already responding on port {poll_port}.",
-        }
-    from cli_anything.unreal.utils.ue_backend import is_tcp_port_in_use
-
-    if is_tcp_port_in_use(poll_port):
-        return {
-            "status": "port_in_use",
-            "port": poll_port,
-            "message": f"TCP port {poll_port} is already in use.",
-        }
-    return None
-
-
-def _remove_tree_with_retries(path: Path, *, attempts: int = 30, delay: float = 1.0) -> None:
-    """Remove a tree, waiting for Unreal to release locked plugin DLLs."""
-    import shutil
-
-    if not path.exists():
-        return
-    last_error = None
-    for attempt in range(attempts):
-        try:
-            shutil.rmtree(str(path))
-            return
-        except PermissionError as exc:
-            last_error = exc
-            if attempt == attempts - 1:
-                break
-            time.sleep(delay)
-    raise last_error
-
-
 def _wait_for_project_editor_exit(
     project_path: str | None,
     port: int,
@@ -1719,72 +1767,6 @@ def _extract_compile_lock_error(log_file: str | None) -> dict:
     return details
 
 
-def _deploy_bridge(session, state) -> dict:
-    from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
-
-    return ensure_plugin_deployed(session.project_dir, preserve_existing=True)
-
-
-def _launch_extra_arg_parts(arg) -> tuple[str, str | None]:
-    raw = str(arg).strip()
-    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
-        raw = raw[1:-1].strip()
-    token = raw.lstrip("-/")
-    name, separator, value = token.partition("=")
-    if not separator:
-        return name.casefold(), None
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        value = value[1:-1]
-    return name.casefold(), value
-
-
-def _remote_control_launch_error(extra_args) -> dict | None:
-    for arg in extra_args or ():
-        name, _ = _launch_extra_arg_parts(arg)
-        if name != "nullrhi":
-            continue
-        return {
-            "code": "EDITOR_LAUNCH_NULLRHI_UNSUPPORTED",
-            "message": "editor launch cannot use Remote Control with -NullRHI.",
-            "suggestion": "Remove -NullRHI; controlled editor launch requires a render-capable UnrealEditor process.",
-            "details": {
-                "incompatible_argument": str(arg),
-                "required_service": "WebRemoteControl",
-                "editor_started": False,
-            },
-        }
-    return None
-
-
-def _resolve_launch_log_file(project_dir, project_name, extra_args=None) -> Path:
-    for arg in extra_args or ():
-        name, value = _launch_extra_arg_parts(arg)
-        if name == "abslog" and value:
-            return Path(value)
-    return Path(project_dir) / "Saved" / "Logs" / f"{project_name}.log"
-
-
-def _build_launch_cmd(
-    editor_exe,
-    project_path,
-    map_path,
-    extra_args=None,
-    *,
-    unattended: bool = False,
-) -> list:
-    cmd = [editor_exe, project_path]
-    if map_path:
-        # Unreal parses maps as URL parameters only before command-line flags.
-        cmd.append(map_path)
-    cmd.append("-nosplash")
-    if unattended:
-        cmd.append("-unattended")
-    if extra_args:
-        cmd.extend(str(arg) for arg in extra_args if arg is not None and str(arg) != "")
-    return cmd
-
-
 def _require_rooted_level_path(path: str) -> str:
     normalized = str(path).strip()
     if normalized.startswith("/"):
@@ -1828,474 +1810,17 @@ def _normalize_launch_map_path(map_path: str | None, project_dir: str) -> str | 
     return "/Game/" + relative_path.with_suffix("").as_posix()
 
 
-_FATAL_LOG_PATTERNS = [
-    "modules are missing or built with a different engine version",
-    "Still incompatible or missing module:",
-    "Engine modules cannot be compiled at runtime",
-    "Missing or incompatible modules",
-    "Plugin .* failed to load",
-    "Fatal Error:",
-    "Assertion failed:",
-]
-
-
-def _extract_log_error(text: str) -> tuple[str | None, str | None]:
-    for pattern in _FATAL_LOG_PATTERNS:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            start = max(0, match.start() - 100)
-            end = min(len(text), match.end() + 300)
-            return text[start:end].strip(), pattern
-    return None, None
-
-
-def _check_log_errors(log_file: Path) -> str | None:
-    if not log_file.exists():
-        return None
-    try:
-        text = log_file.read_text(encoding="utf-8", errors="replace")
-        excerpt, _pattern = _extract_log_error(text)
-        return excerpt
-    except Exception:
-        return None
-
-
-def _check_log_errors_incremental(log_file: Path, offset: int) -> tuple[str | None, int]:
-    if not log_file.exists():
-        return None, offset
-    try:
-        size = log_file.stat().st_size
-        if offset < 0 or offset > size:
-            offset = 0
-        with log_file.open("r", encoding="utf-8", errors="replace") as handle:
-            handle.seek(offset)
-            text = handle.read()
-            new_offset = handle.tell()
-        if not text:
-            return None, new_offset
-        excerpt, _pattern = _extract_log_error(text)
-        return excerpt, new_offset
-    except Exception:
-        return None, offset
-
-
-def _tcp_port_accepts_connection(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> bool:
-    try:
-        with socket.create_connection((host, int(port)), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _read_log_tail(log_file: Path, max_bytes: int = 128 * 1024) -> str:
-    if not log_file.exists():
-        return ""
-    try:
-        size = log_file.stat().st_size
-        with log_file.open("rb") as handle:
-            if size > max_bytes:
-                handle.seek(size - max_bytes)
-            data = handle.read()
-        return data.decode("utf-8", errors="replace")
-    except OSError:
-        return ""
-
-
-def _bounded_log_tail_lines(
-    log_file: Path,
-    *,
-    since_offset: int | None = None,
-    limit: int = 8,
-    max_line_chars: int = 500,
-) -> list[str]:
-    """Return a small startup-log tail suitable for structured error output."""
-    if not log_file.exists():
-        return []
-    try:
-        size = log_file.stat().st_size
-        offset = int(since_offset or 0)
-        if offset < 0 or offset > size:
-            offset = 0
-        with log_file.open("rb") as handle:
-            handle.seek(max(offset, size - 128 * 1024, 0))
-            text = handle.read().decode("utf-8", errors="replace")
-    except OSError:
-        return []
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return [
-        line if len(line) <= max_line_chars else line[:max_line_chars] + "..."
-        for line in lines[-limit:]
-    ]
-
-
-
-
-def _remote_control_health_from_lines(
-    lines: list[str],
-    *,
-    limit: int = 8,
-    target_port: int | None = None,
-) -> dict:
-    falcon_lines = [line for line in lines if re.search(r"FalconTunnel|connect failed", line, re.IGNORECASE)]
-    http_restart_lines = [
-        line for line in lines
-        if re.search(r"LogHttpServerModule:.*(Stopping all listeners|All listeners stopped|Starting all listeners|All listeners started)", line, re.IGNORECASE)
-        or re.search(r"Start(Http|Gateway|Websocket)Server on port", line, re.IGNORECASE)
-        or re.search(r"HttpListener.*(unable to bind|Created new HttpListener)", line, re.IGNORECASE)
-    ]
-    remote_lines = [
-        line for line in lines
-        if re.search(r"RemoteControl|WebRemoteControl|WebSocket", line, re.IGNORECASE)
-    ]
-
-    latest_stop = max(
-        (
-            index for index, line in enumerate(lines)
-            if re.search(r"LogHttpServerModule:.*Stopping all listeners", line, re.IGNORECASE)
-        ),
-        default=None,
-    )
-    cycle_lines = lines[latest_stop:] if latest_stop is not None else lines
-    cycle_http_lines = [line for line in cycle_lines if line in http_restart_lines]
-    cycle_falcon_lines = [line for line in cycle_lines if line in falcon_lines]
-
-    def _mentions_target_port(line: str) -> bool:
-        if target_port is None:
-            return True
-        return bool(re.search(rf"(?<!\d){re.escape(str(target_port))}(?!\d)", line))
-
-    target_bind_lines = [
-        line for line in cycle_lines
-        if re.search(r"HttpListener.*unable to bind", line, re.IGNORECASE)
-        and _mentions_target_port(line)
-    ]
-    restart_completed = bool(
-        latest_stop is not None
-        and any(
-            re.search(r"LogHttpServerModule:.*All listeners started", line, re.IGNORECASE)
-            for line in cycle_lines
-        )
-    )
-
-    hints: list[str] = []
-    for group in (
-        target_bind_lines,
-        cycle_http_lines,
-        cycle_falcon_lines,
-        remote_lines,
-        http_restart_lines,
-        falcon_lines,
-    ):
-        for line in group[-limit:]:
-            if line not in hints:
-                hints.append(line)
-            if len(hints) >= limit:
-                break
-        if len(hints) >= limit:
-            break
-
-    if not hints:
-        return {}
-
-    result = {"log_hints": hints}
-    if latest_stop is not None:
-        if target_bind_lines:
-            result["http_server_restart_status"] = "bind_failed"
-        elif restart_completed:
-            result["http_server_restart_status"] = "completed"
-        else:
-            result["http_server_restart_status"] = "incomplete"
-
-    if target_bind_lines:
-        result["likely_cause"] = "remote_control_port_bind_failed"
-        port_label = str(target_port) if target_port is not None else "the requested Remote Control port"
-        result["cause_hint"] = (
-            f"Unreal's HttpListener failed to bind {port_label}."
-        )
-    elif latest_stop is not None and not restart_completed:
-        if cycle_falcon_lines:
-            result["likely_cause"] = "http_server_restart_incomplete_by_project_plugin"
-            result["cause_hint"] = (
-                "A project plugin restarted Unreal's HttpServer, but the latest log cycle did not record listener startup completion."
-            )
-        else:
-            result["likely_cause"] = "http_server_restart_incomplete"
-            result["cause_hint"] = (
-                "Unreal's latest HttpServer restart did not record listener startup completion."
-            )
-    elif restart_completed:
-        result["cause_hint"] = (
-            "The HttpServer listener restart completed without a logged bind failure. "
-            "This log sequence alone does not show that Remote Control routes were lost."
-        )
-    elif remote_lines:
-        result["likely_cause"] = "remote_control_started_but_not_reachable"
-        result["cause_hint"] = "Remote Control logged startup lines, but its HTTP route did not answer."
-    return result
-
-
-def _extract_remote_control_health_hints(
-    text: str,
-    *,
-    limit: int = 8,
-    target_port: int | None = None,
-) -> dict:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return {}
-    return _remote_control_health_from_lines(lines, limit=limit, target_port=target_port)
-
-
-def _extract_remote_control_health_hints_from_log(
-    log_file: Path,
-    *,
-    since_offset: int | None = None,
-    limit: int = 8,
-    target_port: int | None = None,
-) -> dict:
-    if not log_file.exists():
-        return {}
-    matched: list[str] = []
-    try:
-        size = log_file.stat().st_size
-        offset = int(since_offset or 0)
-        if offset < 0 or offset > size:
-            offset = 0
-        with log_file.open("r", encoding="utf-8", errors="replace") as handle:
-            handle.seek(offset)
-            for raw_line in handle:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                if re.search(
-                    r"FalconTunnel|connect failed|RemoteControl|WebRemoteControl|WebSocket|"
-                    r"LogHttpServerModule:.*(Stopping all listeners|All listeners stopped|Starting all listeners|All listeners started)|"
-                    r"Start(Http|Gateway|Websocket)Server on port|"
-                    r"HttpListener.*(unable to bind|Created new HttpListener)",
-                    line,
-                    re.IGNORECASE,
-                ):
-                    matched.append(line)
-    except OSError:
-        return {}
-
-    if not matched:
-        return {}
-    return _remote_control_health_from_lines(matched, limit=limit, target_port=target_port)
-
-
-def _diagnose_api_unreachable(log_file: Path, port: int, *, since_offset: int | None = None) -> dict:
-    port_listening = _tcp_port_accepts_connection(port)
-    result = {
-        "port_listening": port_listening,
-        "api_route_healthy": False,
-        "failure_kind": "api_route_unhealthy" if port_listening else "api_not_listening",
-    }
-    hints = _extract_remote_control_health_hints_from_log(
-        log_file,
-        since_offset=since_offset,
-        target_port=port,
-    )
-    if not hints:
-        hints = _extract_remote_control_health_hints(
-            _read_log_tail(log_file),
-            target_port=port,
-        )
-    result.update(hints)
-    if port_listening and result.get("http_server_restart_status") == "completed" and not result.get("likely_cause"):
-        result["suggestion"] = (
-            f"Remote Control port is listening on {port}, but the HTTP route did not answer. "
-            "The HttpServer listener restart completed without bind errors, so do not restart the editor from this signal alone; "
-            "poll the active launch task or retry editor status."
-        )
-    elif port_listening and result.get("likely_cause") == "remote_control_port_bind_failed":
-        result["suggestion"] = (
-            f"Remote Control port is listening on {port}, but the HTTP route did not answer and the log shows a bind failure "
-            "for that port. Inspect port ownership and the reported HttpListener log hints, then retry editor status."
-        )
-    elif port_listening and result.get("likely_cause") == "http_server_restart_incomplete_by_project_plugin":
-        result["suggestion"] = (
-            f"Remote Control port is listening on {port}, but the HTTP route did not answer and the log shows an incomplete "
-            "listener restart or bind failure. Inspect the reported project-plugin log hints, then retry editor status."
-        )
-    elif port_listening:
-        result["suggestion"] = (
-            f"Remote Control port is listening on {port}, but the HTTP route did not answer. "
-            "The editor may still be initializing or temporarily busy; retry editor status."
-        )
-    else:
-        result["suggestion"] = (
-            f"Port {port} is not accepting TCP connections yet. The editor may still be starting, blocked by a dialog, "
-            "or Remote Control may not have bound the configured port."
-        )
-    return result
-
-
-def _restore_packages_blocker(proc) -> dict | None:
-    if sys.platform != "win32":
-        return None
-    try:
-        process_id = int(proc.pid)
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if process_id <= 0:
-        return None
-
-    from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs
-
-    try:
-        dialogs = detect_ue_dialogs(process_id=process_id)
-    except Exception:
-        return None
-
-    for dialog in dialogs:
-        title = str(dialog.get("title") or "")
-        title_lower = title.casefold()
-        if "restore" not in title_lower or "package" not in title_lower:
-            continue
-        return {
-            "title": title,
-            "hwnd": dialog.get("hwnd"),
-            "process_id": process_id,
-        }
-    return None
-
-
-def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -> dict:
-    from cli_anything.unreal.utils.ue_backend import _emit_heartbeat
-    from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
-
-    if not state.json_output:
-        try:
-            if timeout is not None:
-                sys.stderr.write(f"[editor] waiting for Remote Control API on port {poll_port} (timeout {timeout}s), log {log_file}\n")
-            else:
-                sys.stderr.write(f"[editor] waiting for Remote Control API on port {poll_port} (no timeout), log {log_file}\n")
-            sys.stderr.flush()
-        except Exception:
-            pass
-
-    api = UEEditorAPI(port=poll_port)
-    start_time = time.time()
-    progress_start = time.monotonic()
-    deadline = start_time + timeout if timeout is not None else float("inf")
-    poll_interval = 5.0
-    heartbeat_interval = 60.0
-    next_beat = start_time + heartbeat_interval
-    result = {}
-    startup_log_offset = log_file.stat().st_size if log_file.exists() else 0
-    log_offset = startup_log_offset
-
-    while time.time() < deadline:
-        returncode = proc.poll()
-        elapsed_seconds = int(time.monotonic() - progress_start)
-        progress = {
-            "startup_phase": "waiting_for_remote_control",
-            "elapsed_seconds": elapsed_seconds,
-            "port": poll_port,
-            "process_alive": returncode is None,
-            "log_file": str(log_file),
-        }
-        if on_progress is not None:
-            try:
-                on_progress(progress)
-            except Exception:
-                pass
-
-        if returncode is not None:
-            crash_result = {
-                "status": "crashed",
-                "failure_kind": "editor_process_exited",
-                "startup_phase": "waiting_for_remote_control",
-                "returncode": returncode,
-                "port": poll_port,
-                "process_alive": False,
-                "elapsed_seconds": elapsed_seconds,
-                "log_file": str(log_file),
-                "error": f"Editor process exited with code {returncode} before API came online.",
-                "suggestion": "Inspect log_tail and log_file for the startup failure, then retry editor launch after resolving it.",
-            }
-            log_tail = _bounded_log_tail_lines(
-                log_file,
-                since_offset=startup_log_offset,
-            )
-            if log_tail:
-                crash_result["log_tail"] = log_tail
-            project_path = getattr(state.session, "project_path", None)
-            if project_path:
-                crash_result["next_command"] = (
-                    f'ue-cli --project "{project_path}" editor launch'
-                )
-            return crash_result
-
-        if api.is_alive():
-            return {
-                "status": "online",
-                "startup_phase": "ready",
-                "port": poll_port,
-                "process_alive": True,
-                "startup_time_seconds": int(time.time() - start_time),
-            }
-
-        restore_blocker = _restore_packages_blocker(proc)
-        if restore_blocker is not None:
-            blocked_result = {
-                "status": "blocked_by_restore_packages",
-                "failure_kind": "blocked_by_restore_packages",
-                "startup_phase": "blocked_by_restore_packages",
-                "port": poll_port,
-                "process_alive": True,
-                "elapsed_seconds": elapsed_seconds,
-                "log_file": str(log_file),
-                "blocking_dialog": restore_blocker,
-                "error": "Editor startup is blocked by the Restore Packages dialog.",
-                "suggestion": (
-                    "Choose Restore Selected or Skip Restore in the Unreal Editor dialog, "
-                    "then run editor status. Do not start a second editor for this project."
-                ),
-            }
-            if on_progress is not None:
-                try:
-                    on_progress(blocked_result)
-                except Exception:
-                    pass
-            return blocked_result
-
-        elapsed = time.time() - start_time
-        if elapsed > 2:
-            log_error, log_offset = _check_log_errors_incremental(log_file, log_offset)
-            if log_error:
-                return {
-                    "status": "error_dialog",
-                    "log_file": str(log_file),
-                    "error": f"Editor appears stuck on an error dialog: {log_error}",
-                }
-
-        now = time.time()
-        if now >= next_beat:
-            if not state.json_output:
-                _emit_heartbeat("editor", now - start_time, Path(log_file))
-            next_beat += heartbeat_interval
-        time.sleep(poll_interval)
-
-    result["startup_phase"] = "waiting_for_remote_control"
-    result["port"] = poll_port
-    result["process_alive"] = proc.poll() is None
-    result["status"] = "timeout"
-    result["log_file"] = str(log_file)
-    if timeout is not None:
-        result["error"] = f"Editor API did not respond within {timeout}s on port {poll_port}."
-    else:
-        result["error"] = f"Editor API did not respond on port {poll_port}."
-    log_error, _ = _check_log_errors_incremental(log_file, log_offset)
-    if not log_error:
-        log_error = _check_log_errors(log_file)
-    if log_error:
-        result["error"] += f" Log hint: {log_error}"
-    diagnostics = _diagnose_api_unreachable(log_file, poll_port, since_offset=startup_log_offset)
-    result.update(diagnostics)
-    return result
+# Canonical launch lifecycle implementation lives below ``commands`` so task
+# workers never import the Click layer. Keep these names as compatibility
+# re-exports for existing callers and patch paths.
+from cli_anything.unreal.core.editor_lifecycle import (  # noqa: E402
+    _active_launch_task_for_project,
+    _build_launch_cmd,
+    _check_already_running,
+    _check_log_errors,
+    _remote_control_launch_error,
+    _same_project_path,
+)
 
 
 @editor_group.command("launch")
@@ -2358,14 +1883,24 @@ def editor_launch(
     foreground_timeout, worker_timeout = _launch_wait_timeouts(timeout)
     duplicate = _check_already_running(state.session, state)
     if duplicate is not None:
-        if duplicate.get("status") == "already_running":
-            raise AppError("ALREADY_RUNNING", duplicate["message"], exit_code=3, details=duplicate)
-        if duplicate.get("status") == "starting":
-            raise AppError("EDITOR_STARTING", duplicate["message"], exit_code=3, details=duplicate)
-        # zombie: auto-kill the stale process and proceed
-        from cli_anything.unreal.utils.ue_backend import _kill_process_tree
-        _kill_process_tree(int(duplicate["pid"]))
-        time.sleep(2)
+        duplicate_status = duplicate.get("status")
+        code = {
+            "already_running": "ALREADY_RUNNING",
+            "starting": "EDITOR_STARTING",
+            "zombie": "EDITOR_ALREADY_RUNNING_OFFLINE",
+        }.get(duplicate_status, "EDITOR_ALREADY_RUNNING")
+        details = dict(duplicate)
+        details.update({
+            "decision": "preserve_existing_editor",
+            "requires_user_input": False,
+        })
+        raise AppError(
+            code,
+            duplicate.get("message", "An editor process already exists for this project."),
+            exit_code=3,
+            suggestion="The existing editor was preserved. Restore its Remote Control endpoint or close it through the verified close workflow before retrying launch.",
+            details=details,
+        )
 
     payload = {
         "project_path": state.session.project_path,
@@ -2395,28 +1930,32 @@ def editor_launch(
             current = load_task(task["task_id"]) or task
         except PermissionError:
             current = task
+        if current.get("status") in FINAL_TASK_STATUSES:
+            output(
+                _editor_launch_terminal_result(
+                    state,
+                    task["task_id"],
+                    current,
+                ),
+                state,
+            )
+            return
         progress = task_progress(current)
-        if current.get("status") not in {"completed", "failed", "timeout", "cancelled"}:
-            progress["status"] = "launching"
-            progress["foreground_wait_timeout_seconds"] = foreground_timeout
-            progress["message"] = "Editor launch is still in progress; poll this task or editor status."
-            progress["next_command"] = f'ue-cli --project "{state.session.project_path}" editor status {task["task_id"]}'
-        output(
-            progress,
-            state,
-        )
+        progress["status"] = "launching"
+        progress["foreground_wait_timeout_seconds"] = foreground_timeout
+        progress["message"] = "Editor launch is still in progress; poll this task or editor status."
+        progress["next_command"] = f'ue-cli --project "{state.session.project_path}" editor status {task["task_id"]}'
+        output(progress, state)
         return
 
-    progress = task_progress(final_task)
-    if final_task.get("status") == "timeout":
-        online_result = _recover_online_launch_result(state, task["task_id"], final_task)
-        if online_result is not None:
-            output(online_result, state)
-            return
-    if final_task.get("status") == "failed":
-        error = final_task.get("error", {})
-        raise AppError(error.get("code", "TASK_EXECUTION_FAILED"), error.get("message", "Editor launch failed"), exit_code=3, details=progress)
-    output(progress, state)
+    output(
+        _editor_launch_terminal_result(
+            state,
+            task["task_id"],
+            final_task,
+        ),
+        state,
+    )
 
 
 @editor_group.command("cancel")
@@ -2427,33 +1966,98 @@ def editor_cancel(state: AppState, task_id):
     task = cancel_task(task_id)
     if task is None:
         raise AppError("TASK_NOT_FOUND", f"Task not found: {task_id}", exit_code=3)
-    output(task_progress(task), state)
+    progress = task_progress(task)
+    error = progress.get("error") or {}
+    if error.get("code") == "TASK_CANCEL_FAILED":
+        raise AppError(
+            "TASK_CANCEL_FAILED",
+            error.get("message", "Editor launch cancellation failed."),
+            exit_code=4,
+            suggestion="Retry cancellation after inspecting the recorded editor process diagnostics.",
+            details=progress,
+        )
+    output(progress, state)
 
 
 @editor_group.command("close")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Allow discarding unsaved packages and terminating offline/stale project editors.",
+)
 @handle_error
 @click.pass_obj
-def editor_close(state: AppState):
+def editor_close(state: AppState, force: bool):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
-    api = UEEditorAPI(port=state.session.port)
-    api_alive = api.is_alive()
-    if not api_alive:
-        live_port = _discover_online_editor_port(state, fail_if_ambiguous=True)
-        if live_port is not None:
-            live_api = UEEditorAPI(port=live_port)
-            if live_api.is_alive():
-                state.session.port = live_port
-                api = live_api
-                api_alive = True
-    output(_close_editor_for_project(api, state, api_alive=api_alive), state)
+    ensure_inferred_project(state)
+    try:
+        api = require_editor(state)
+        api_alive = True
+    except AppError as exc:
+        offline_codes = {"EDITOR_UNREACHABLE"}
+        if force:
+            offline_codes.update({
+                "EDITOR_PROJECT_NOT_RUNNING",
+                "EDITOR_PROJECT_VERIFICATION_FAILED",
+            })
+        if exc.code not in offline_codes:
+            raise
+        api = UEEditorAPI(port=state.session.port)
+        api_alive = False
+    output(
+        _close_editor_for_project(
+            api,
+            state,
+            api_alive=api_alive,
+            force=force,
+        ),
+        state,
+    )
 
 
-def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = None) -> dict:
+def _close_editor_for_project(
+    api,
+    state: AppState,
+    *,
+    api_alive: bool | None = None,
+    force: bool = False,
+) -> dict:
     """Close the targeted editor using the same robust path for all callers."""
     if api_alive is None:
         api_alive = api.is_alive()
     if not api_alive:
+        if state.session.project_path and sys.platform == "win32":
+            try:
+                _running, matches = _find_matching_project_editors(
+                    state.session.project_path
+                )
+            except Exception as exc:
+                raise AppError(
+                    "EDITOR_PROJECT_VERIFICATION_FAILED",
+                    "Could not verify the offline project editor process; nothing was terminated.",
+                    exit_code=3,
+                    details={
+                        "project": state.session.project_path,
+                        "port": state.session.port,
+                        "error": str(exc),
+                    },
+                ) from exc
+            if matches and not force:
+                raise AppError(
+                    "EDITOR_DIRTY_STATE_UNKNOWN",
+                    "The project editor process is running but Remote Control is offline, so unsaved packages cannot be verified. Nothing was terminated.",
+                    exit_code=3,
+                    suggestion="The editor was preserved automatically. Restore Remote Control and retry; use --force only when the request already authorizes data loss.",
+                    details={
+                        "project": state.session.project_path,
+                        "port": state.session.port,
+                        "matching_pids": sorted(int(item["pid"]) for item in matches),
+                        "decision": "preserve_and_leave_running",
+                        "requires_user_input": False,
+                    },
+                )
         kill_result = _kill_matching_project_editors(
             state.session.project_path,
             state.session.port,
@@ -2473,6 +2077,9 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
     target_pids = []
     if sys.platform == "win32":
         if state.session.project_path:
+            from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+            verified_owner = _guard_editor_project(state, UEEditorAPI)
             running, matches = _find_matching_project_editors(state.session.project_path)
             if not matches:
                 raise AppError(
@@ -2491,8 +2098,22 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
             targets = _capture_project_editor_targets(matches)
             graceful_targets, stale_targets = _partition_editor_close_targets(
                 targets,
-                state.session.port,
+                int(verified_owner["pid"]),
             )
+            if stale_targets and not force:
+                raise AppError(
+                    "EDITOR_STALE_PEERS_UNSAFE",
+                    "Multiple editors are running for this project, and unsaved state cannot be checked for non-listening peers. Nothing was closed.",
+                    exit_code=3,
+                    suggestion="All editors were preserved automatically. Resolve each verified instance separately; use --force only when the request already authorizes data loss.",
+                    details={
+                        "project": state.session.project_path,
+                        "listener_pid": int(verified_owner["pid"]),
+                        "stale_pids": sorted(int(item["pid"]) for item in stale_targets),
+                        "decision": "preserve_and_leave_running",
+                        "requires_user_input": False,
+                    },
+                )
         else:
             from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
@@ -2516,15 +2137,16 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
             graceful_targets = targets
         target_pids = sorted({int(target["pid"]) for target in targets})
 
-    try:
-        api.call_function(
-            "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils",
-            "SaveDirtyPackages",
-            {"bSaveMapPackages": True, "bSaveContentPackages": True},
-        )
-        time.sleep(1)
-    except Exception:
-        pass
+    save_evidence = (
+        {"saved_count": None, "policy": "force"}
+        if force
+        else {**_save_dirty_editor_packages_if_needed(api), "policy": "save_then_close"}
+    )
+
+    def close_result(result: dict) -> dict:
+        result = dict(result)
+        result["save_evidence"] = save_evidence
+        return result
 
     # QUIT_EDITOR can tear down Remote Control before its HTTP response is
     # delivered.  Bound that expected response race so process verification
@@ -2543,13 +2165,13 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
             if drain_result is None:
                 drain_result = {"status": "closed", "port": state.session.port}
             if drain_result.get("status") == "closed":
-                return _finish_partitioned_editor_close(
+                return close_result(_finish_partitioned_editor_close(
                     state.session.project_path,
                     state.session.port,
                     target_pids,
                     drain_result,
                     stale_targets,
-                )
+                ))
             raise AppError(
                 "EDITOR_CLOSE_FAILED",
                 drain_result.get("message", "Editor API closed but UnrealEditor process did not exit."),
@@ -2570,13 +2192,13 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
                     "target_pids": sorted(int(target["pid"]) for target in graceful_targets),
                     "pid_evidence": process_evidence["pids"],
                 }
-                return _finish_partitioned_editor_close(
+                return close_result(_finish_partitioned_editor_close(
                     state.session.project_path,
                     state.session.port,
                     target_pids,
                     graceful_result,
                     stale_targets,
-                )
+                ))
         time.sleep(2)
 
     kill_result = _kill_matching_project_editors(
@@ -2587,7 +2209,7 @@ def _close_editor_for_project(api, state: AppState, *, api_alive: bool | None = 
         expected_targets=targets,
     )
     if kill_result and kill_result.get("status") == "closed":
-        return kill_result
+        return close_result(kill_result)
 
     details = kill_result or {"status": "timeout", "port": state.session.port}
     details.setdefault("stage", "wait_for_project_process_exit")
@@ -3080,6 +2702,15 @@ def editor_exec(state: AppState, timeout, log_wait, command):
             details=result,
         )
 
+    if automation_run and not result.get("automation_completed"):
+        raise AppError(
+            "AUTOMATION_RESULT_TIMEOUT",
+            "Automation completion was not observed before --log-wait expired.",
+            exit_code=4,
+            suggestion=result.get("suggestion"),
+            details=result,
+        )
+
     output(result, state)
 
 
@@ -3380,6 +3011,11 @@ def editor_api_discover(state: AppState, target, query, detail, timeout):
     from cli_anything.unreal.core.script_runner import api_discover
     api = require_editor(state)
     result = api_discover(api, target, query=query, detail=detail, timeout=timeout)
+    raise_for_legacy_error(
+        result,
+        default_code="API_DISCOVER_FAILED",
+        default_message="Editor API discovery failed.",
+    )
     output(result, state)
 
 
@@ -3401,6 +3037,19 @@ def editor_enable_remote(state: AppState):
         engine_root=state.session.engine_root,
         editor_binary_prefix=get_editor_binary_prefix(state.session.engine_root),
     )
+    raise_for_legacy_error(
+        result,
+        default_code="REMOTE_CONTROL_ENABLE_FAILED",
+        default_message="Remote Control configuration could not be enabled.",
+    )
+    if isinstance(result, dict) and result.get("status") in {"failed", "unavailable"}:
+        raise AppError(
+            "REMOTE_CONTROL_ENABLE_FAILED",
+            "Remote Control configuration could not be enabled.",
+            exit_code=3,
+            suggestion=result.get("suggestion"),
+            details=result,
+        )
     output(result, state)
 
 
@@ -3418,6 +3067,7 @@ def editor_plugin_version(state: AppState):
     bundled = get_bundled_version()
     loaded = None
 
+    ensure_inferred_project(state)
     if state.session.project_dir:
         api = require_editor(state)
         loaded = get_loaded_plugin_version(api)
@@ -3453,20 +3103,49 @@ def editor_plugin_upgrade(state: AppState):
 
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
     api = UEEditorAPI(port=state.session.port)
-    editor_was_running = api.is_alive()
+    if sys.platform == "win32":
+        try:
+            _running_editors, matching_editors = _find_matching_project_editors(
+                state.session.project_path
+            )
+        except Exception as exc:
+            raise AppError(
+                "EDITOR_PROJECT_VERIFICATION_FAILED",
+                "Could not enumerate project editor processes before plugin upgrade.",
+                exit_code=3,
+                suggestion="Retry after process discovery is available; no editor request was sent.",
+                details={
+                    "project": state.session.project_path,
+                    "port": state.session.port,
+                    "error": str(exc),
+                },
+            ) from exc
+        editor_was_running = bool(matching_editors)
+    else:
+        editor_was_running = api.is_alive()
     loaded = None
 
     if editor_was_running:
-        loaded = get_loaded_plugin_version(api)
-        if loaded == bundled:
-            output({"status": "up_to_date", "version": bundled}, state)
-            return
+        try:
+            api = require_editor(state)
+        except AppError as exc:
+            if sys.platform != "win32" or exc.code not in {
+                "EDITOR_UNREACHABLE",
+                "EDITOR_PROJECT_NOT_RUNNING",
+                "EDITOR_PROJECT_VERIFICATION_FAILED",
+            }:
+                raise
+            # The target process is independently verified by its .uproject
+            # command line. Close that process tree without sending anything to
+            # an unverified Remote Control port.
+            _close_editor_for_project(api, state, api_alive=False)
+        else:
+            loaded = get_loaded_plugin_version(api)
+            if loaded == bundled:
+                output({"status": "up_to_date", "version": bundled}, state)
+                return
+            _close_editor_for_project(api, state)
 
-        _close_editor_for_project(api, state)
-        for _ in range(30):
-            if not api.is_alive():
-                break
-            time.sleep(1)
         drain_result = _wait_for_project_editor_exit(state.session.project_path, state.session.port, timeout=60)
         if drain_result and drain_result.get("status") not in {"closed", "offline"}:
             raise AppError(
@@ -3535,12 +3214,27 @@ def editor_plugin_upgrade(state: AppState):
                 unattended=True,
             )
             sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+            restarted_api = None
             for _ in range(60):
                 time.sleep(2)
-                if api.is_alive():
+                try:
+                    restarted_api = require_editor(state, timeout=1)
                     break
+                except AppError:
+                    continue
 
-            new_loaded = get_loaded_plugin_version(api)
+            if restarted_api is None:
+                raise AppError(
+                    "EDITOR_RESTART_UNREACHABLE",
+                    "The project editor did not return on a verified Remote Control port after plugin upgrade.",
+                    exit_code=4,
+                    suggestion="Run editor status and inspect the project log before retrying.",
+                    details={
+                        "project": state.session.project_path,
+                        "port": state.session.port,
+                    },
+                )
+            new_loaded = get_loaded_plugin_version(restarted_api)
             if new_loaded == bundled:
                 output({
                     "status": "upgraded",
@@ -3694,6 +3388,13 @@ def cvar_set(state: AppState, name, value):
             suggestion="Run: ue-cli editor enable-remote, then restart editor.",
             details={"name": name, "value": value},
         )
+    if _is_transport_disconnect_result(result):
+        _raise_editor_connection_lost(result, "editor cvar set")
+    raise_for_legacy_error(
+        result,
+        default_code="CVAR_SET_FAILED",
+        default_message=f"CVar set failed: {name}",
+    )
     output({"name": name, "value": value, "status": "ok", **result}, state)
 
 
@@ -3741,4 +3442,6 @@ def editor_save_level(state: AppState):
     result = save_level(api)
     if _is_transport_disconnect_result(result):
         _raise_editor_connection_lost(result, "editor save-level")
+    if isinstance(result, dict) and (result.get("error") or result.get("status") == "failed"):
+        _raise_level_command_failed(result, "editor save-level", "EDITOR_SAVE_LEVEL_FAILED")
     output(result, state)

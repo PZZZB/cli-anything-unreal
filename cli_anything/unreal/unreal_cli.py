@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 
@@ -16,16 +15,21 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 import click
 
 from cli_anything.unreal._version import __version__
-from cli_anything.unreal.commands import AppError, AppState, emit_json, error_payload, register_commands
+from cli_anything.unreal.commands import (
+    AppError,
+    AppState,
+    emit_json,
+    error_payload,
+    register_commands,
+)
 from cli_anything.unreal.core.plugin_bridge import get_bundled_version
 from cli_anything.unreal.core.tasks import (
     FINAL_TASK_STATUSES,
     cancel_task,
-    load_task,
     reconcile_task_state,
     run_task_worker,
-    submit_task,
     task_progress,
+    transition_task,
     wait_for_task,
 )
 
@@ -426,6 +430,7 @@ def cli(ctx, output_mode, project_path, port, list_commands):
     state = AppState()
     state.output_mode = output_mode or _default_output_mode()
     state.json_output = state.output_mode == "json"
+    state.port_is_explicit = port is not None
     ctx.obj = state
 
     if project_path:
@@ -434,9 +439,9 @@ def cli(ctx, output_mode, project_path, port, list_commands):
         except FileNotFoundError:
             emit_json(error_payload("PROJECT_NOT_FOUND", f"Project not found: {project_path}"))
             raise SystemExit(3)
+    state.project_is_explicit = project_path is not None
 
     if port is not None:
-        state.port_is_explicit = True
         state.session.port = port
     elif state.session.project_dir:
         from cli_anything.unreal.utils.ue_backend import read_rc_port
@@ -472,14 +477,13 @@ def task_worker_run(task_id):
         emit_json(error_payload("TASK_NOT_FOUND", f"Task not found: {task_id}"))
         raise SystemExit(3)
     except Exception as e:
-        task = load_task(task_id)
-        if task:
-            task["status"] = "failed"
-            task["error"] = {"code": "TASK_EXECUTION_FAILED", "message": str(e)}
-            task["result"] = {"exception_type": type(e).__name__}
-            from cli_anything.unreal.core.tasks import save_task
-
-            save_task(task)
+        transition_task(
+            task_id,
+            status="failed",
+            phase="exited",
+            error={"code": "TASK_EXECUTION_FAILED", "message": str(e)},
+            result_patch={"exception_type": type(e).__name__},
+        )
         emit_json(error_payload("TASK_EXECUTION_FAILED", str(e)))
         raise SystemExit(1)
 

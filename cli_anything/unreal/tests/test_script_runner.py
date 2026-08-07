@@ -2,11 +2,7 @@
 
 import io
 import json
-import os
-import subprocess
-import tempfile
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,7 +21,7 @@ class TestScriptRunner:
     """
 
     @staticmethod
-    def _make_exec_python_ex_mock(mock_api):
+    def _make_exec_python_ex_mock(mock_api, configure_unreal=None):
         """Wire up ``mock_api.exec_python_ex`` to locally execute the wrapper
         code (with a fake ``unreal`` module) and return a realistic response.
 
@@ -40,6 +36,8 @@ class TestScriptRunner:
             fake_unreal.log = lambda msg: log_entries.append(
                 {"Type": "Info", "Output": msg}
             )
+            if configure_unreal is not None:
+                configure_unreal(fake_unreal)
 
             import sys
             old_unreal = sys.modules.get("unreal")
@@ -136,6 +134,146 @@ class TestScriptRunner:
         result = run_python_code(mock_api, "x = 1 + 1",
                                  timeout=5, save=False)
         assert result["status"] == "ok"
+
+    def test_save_policy_never_has_no_persistence_code(self):
+        from cli_anything.unreal.core.script_runner import SavePolicy, run_python_code
+
+        mock_api = MagicMock()
+        mock_api.exec_python_ex.return_value = {
+            "ReturnValue": True,
+            "CommandResult": "None",
+            "LogOutput": [],
+        }
+
+        run_python_code(
+            mock_api,
+            "result = {'status': 'ok'}",
+            timeout=5,
+            save_policy=SavePolicy.NEVER,
+        )
+
+        wrapper = mock_api.exec_python_ex.call_args.args[0]
+        assert "get_dirty_content_packages" not in wrapper
+        assert "save_asset(" not in wrapper
+
+    def test_save_policy_target_packages_never_scans_unrelated_dirty_packages(self):
+        from cli_anything.unreal.core.script_runner import SavePolicy, run_python_code
+
+        mock_api = MagicMock()
+        mock_api.exec_python_ex.return_value = {
+            "ReturnValue": True,
+            "CommandResult": "None",
+            "LogOutput": [],
+        }
+
+        run_python_code(
+            mock_api,
+            "result = {'status': 'ok'}",
+            timeout=5,
+            save_policy=SavePolicy.TARGET_PACKAGES,
+            target_packages=["/Game/M_Test.M_Test", "/Game/M_Test"],
+        )
+
+        wrapper = mock_api.exec_python_ex.call_args.args[0]
+        assert "get_dirty_content_packages" not in wrapper
+        assert 'for _cli_path in ["/Game/M_Test"]' in wrapper
+        assert "save_asset(_cli_path, only_if_is_dirty=False)" in wrapper
+        assert "PACKAGE_SAVE_FAILED" in wrapper
+        compile(wrapper, "<target-save-wrapper>", "exec")
+
+    def test_save_policy_all_dirty_is_explicit(self):
+        from cli_anything.unreal.core.script_runner import SavePolicy, run_python_code
+
+        mock_api = MagicMock()
+        mock_api.exec_python_ex.return_value = {
+            "ReturnValue": True,
+            "CommandResult": "None",
+            "LogOutput": [],
+        }
+
+        run_python_code(
+            mock_api,
+            "result = {'status': 'ok'}",
+            timeout=5,
+            save_policy=SavePolicy.ALL_DIRTY_EXPLICIT,
+        )
+
+        wrapper = mock_api.exec_python_ex.call_args.args[0]
+        assert "get_dirty_content_packages" in wrapper
+        assert "get_dirty_map_packages" in wrapper
+
+    @pytest.mark.parametrize("save_ok", [True, False])
+    def test_save_policy_all_dirty_reports_save_result(self, save_ok):
+        from cli_anything.unreal.core.script_runner import SavePolicy, run_python_code
+
+        class DirtyPackage:
+            @staticmethod
+            def get_path_name():
+                return "/Game/M_Dirty.M_Dirty"
+
+        class EditorAssetLibrary:
+            @staticmethod
+            def save_asset(_path):
+                return save_ok
+
+        class EditorLoadingAndSavingUtils:
+            @staticmethod
+            def get_dirty_content_packages():
+                return [DirtyPackage()]
+
+            @staticmethod
+            def get_dirty_map_packages():
+                return []
+
+        def configure_unreal(fake_unreal):
+            fake_unreal.EditorAssetLibrary = EditorAssetLibrary
+            fake_unreal.EditorLoadingAndSavingUtils = EditorLoadingAndSavingUtils
+
+        mock_api = MagicMock()
+        self._make_exec_python_ex_mock(mock_api, configure_unreal)
+
+        result = run_python_code(
+            mock_api,
+            "x = 1",
+            timeout=5,
+            save_policy=SavePolicy.ALL_DIRTY_EXPLICIT,
+        )
+
+        if save_ok:
+            assert result["saved"] is True
+            assert result["saved_packages"] == ["/Game/M_Dirty"]
+        else:
+            assert result["code"] == "PACKAGE_SAVE_FAILED"
+            assert "save_asset returned false" in result["error"]
+
+    def test_legacy_save_boolean_maps_to_policy(self):
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        mock_api = MagicMock()
+        mock_api.exec_python_ex.return_value = {
+            "ReturnValue": True,
+            "CommandResult": "None",
+            "LogOutput": [],
+        }
+
+        run_python_code(mock_api, "result = {}", timeout=5, save=False)
+        never_wrapper = mock_api.exec_python_ex.call_args.args[0]
+        run_python_code(mock_api, "result = {}", timeout=5, save=True)
+        all_dirty_wrapper = mock_api.exec_python_ex.call_args.args[0]
+
+        assert "get_dirty_content_packages" not in never_wrapper
+        assert "get_dirty_content_packages" in all_dirty_wrapper
+
+    def test_target_save_policy_requires_target_packages(self):
+        from cli_anything.unreal.core.script_runner import SavePolicy, run_python_code
+
+        with pytest.raises(ValueError, match="requires at least one target package"):
+            run_python_code(
+                MagicMock(),
+                "result = {}",
+                timeout=5,
+                save_policy=SavePolicy.TARGET_PACKAGES,
+            )
 
     # -- stdout hijack tests ---------------------------------------------
 
@@ -288,7 +426,8 @@ class TestScriptRunner:
 
         mock_api = MagicMock()
 
-        import types, sys
+        import types
+        import sys
 
         bridge_data = {
             "EditorLevelLibrary": {
@@ -339,7 +478,8 @@ class TestScriptRunner:
 
         mock_api = MagicMock()
 
-        import types, sys
+        import types
+        import sys
 
         bridge_data = {
             "Actor": {
@@ -420,7 +560,8 @@ class TestScriptRunner:
 
         mock_api = MagicMock()
 
-        import types, sys
+        import types
+        import sys
 
         bridge_data = {
             "FakeLib": {
@@ -465,7 +606,8 @@ class TestScriptRunner:
         from cli_anything.unreal.core.script_runner import api_discover
 
         mock_api = MagicMock()
-        import types, sys
+        import types
+        import sys
 
         bridge_data = {
             "FakeLib": {
@@ -510,7 +652,8 @@ class TestScriptRunner:
         from cli_anything.unreal.core.script_runner import api_discover
 
         mock_api = MagicMock()
-        import types, sys
+        import types
+        import sys
 
         bridge_data = {
             "FakeLib": {
@@ -554,7 +697,8 @@ class TestScriptRunner:
         from cli_anything.unreal.core.script_runner import api_discover
 
         mock_api = MagicMock()
-        import types, sys
+        import types
+        import sys
 
         bridge_data = {
             "FakeLib": {
@@ -595,7 +739,8 @@ class TestScriptRunner:
 
         mock_api = MagicMock()
 
-        import types, sys
+        import types
+        import sys
 
         bridge_data = {
             "SomeClass": {
@@ -647,7 +792,8 @@ class TestScriptRunner:
 
         mock_api = MagicMock()
 
-        import types, sys
+        import types
+        import sys
 
         bridge_data = {
             "SomeClass": {
@@ -903,7 +1049,8 @@ class TestScriptRunner:
 
         mock_api = MagicMock()
 
-        import types, sys
+        import types
+        import sys
 
         class FakeProp:
             def __init__(self, name, cpp_type):
@@ -979,7 +1126,8 @@ class TestScriptRunner:
 
         mock_api = MagicMock()
 
-        import types, sys
+        import types
+        import sys
 
         # Empty bridge — get_class_info returns "{}" for everything
         fake_unreal = types.ModuleType("unreal")
@@ -1059,7 +1207,8 @@ class TestScriptRunner:
 
         Returns (mock_api, fake_unreal, cleanup) where cleanup restores sys.modules.
         """
-        import types, sys
+        import types
+        import sys
 
         mock_api = MagicMock()
         fake_unreal = types.ModuleType("unreal")
@@ -2138,7 +2287,6 @@ result = {'status': 'live_editor_ok'}
     def test_editor_exec_log_wait_captures_async_automation_completion(self, tmp_path):
         import re
         import threading
-        import time
 
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -2244,8 +2392,10 @@ result = {'status': 'live_editor_ok'}
                 "--log-wait", "0", "Automation RunTests SDOC.Unit",
             ])
 
-        assert result.exit_code == 0
-        data = json.loads(result.output)["result"]
+        assert result.exit_code == 4
+        response = json.loads(result.output)
+        assert response["code"] == "AUTOMATION_RESULT_TIMEOUT"
+        data = response["details"]
         assert data["automation_completed"] is False
         assert data["log_capture_status"] == "timeout"
         assert data["log_file"] == str(log_file)

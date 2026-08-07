@@ -5,6 +5,7 @@ from __future__ import annotations
 import click
 
 from cli_anything.unreal.commands import AppState, handle_error, output, require_editor
+from cli_anything.unreal.errors import raise_for_legacy_error
 
 
 @click.group("umg")
@@ -37,6 +38,7 @@ def umg_create(state: AppState, widget_path, root_class, root_name, force, varia
         variable=variable,
         project_dir=state.session.project_dir,
     )
+    raise_for_legacy_error(result, default_code="UMG_CREATE_FAILED")
     output(result, state)
 
 
@@ -90,6 +92,7 @@ def umg_add_widget(
         variable=variable,
         project_dir=state.session.project_dir,
     )
+    raise_for_legacy_error(result, default_code="UMG_ADD_WIDGET_FAILED")
     output(result, state)
 
 
@@ -126,6 +129,7 @@ def umg_set_image(state: AppState, widget_path, widget_name, texture_path, image
         z_order=z_order,
         project_dir=state.session.project_dir,
     )
+    raise_for_legacy_error(result, default_code="UMG_SET_IMAGE_FAILED")
     output(result, state)
 
 
@@ -142,6 +146,7 @@ def umg_tree(state: AppState, widget_path):
 
     api = require_editor(state)
     result = get_widget_tree(api, widget_path, project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="UMG_TREE_FAILED")
     output(result, state)
 
 
@@ -164,4 +169,5 @@ def umg_live_tree(state: AppState, target, limit):
         limit=limit,
         project_dir=state.session.project_dir,
     )
+    raise_for_legacy_error(result, default_code="UMG_LIVE_TREE_FAILED")
     output(result, state)

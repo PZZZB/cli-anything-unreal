@@ -4,6 +4,7 @@ import click
 
 from cli_anything.unreal.commands import AppError, AppState, handle_error, output, require_editor
 from cli_anything.unreal.commands._parse_value import parse_property_value
+from cli_anything.unreal.errors import raise_for_legacy_error
 
 
 @click.group("scene")
@@ -46,6 +47,7 @@ def scene_list_actors(state: AppState, actor_class, query, query_field, exact):
         query_field=query_field,
         exact=exact,
     )
+    raise_for_legacy_error(result, default_code="SCENE_LIST_FAILED")
     output(result, state)
 
 
@@ -128,6 +130,7 @@ def scene_get_material(state: AppState, actor_path, index):
 
     api = require_editor(state)
     result = get_actor_material(api, actor_path, index)
+    raise_for_legacy_error(result, default_code="SCENE_MATERIAL_FAILED")
     output(result, state)
 
 

@@ -3,6 +3,7 @@
 import click
 
 from cli_anything.unreal.commands import AppState, handle_error, output, require_editor
+from cli_anything.unreal.errors import raise_for_legacy_error
 
 
 @click.group("blueprint")
@@ -21,6 +22,7 @@ def blueprint_list(state: AppState, content_path):
 
     api = require_editor(state)
     result = list_blueprints(api, content_path, state.session.project_dir)
+    raise_for_legacy_error(result, default_code="BLUEPRINT_LIST_FAILED")
     output(result, state)
 
 
@@ -34,6 +36,7 @@ def blueprint_info(state: AppState, blueprint_path):
 
     api = require_editor(state)
     result = get_blueprint_info(api, blueprint_path, state.session.project_dir)
+    raise_for_legacy_error(result, default_code="BLUEPRINT_INFO_FAILED")
     output(result, state)
 
 
@@ -52,6 +55,7 @@ def blueprint_add_function(state: AppState, blueprint_path, func_name):
     api = require_editor(state)
     result = add_function(api, blueprint_path, func_name,
                           project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="BLUEPRINT_ADD_FUNCTION_FAILED")
     output(result, state)
 
 
@@ -70,6 +74,7 @@ def blueprint_delete_function(state: AppState, blueprint_path, func_name):
     api = require_editor(state)
     result = remove_function(api, blueprint_path, func_name,
                              project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="BLUEPRINT_REMOVE_FUNCTION_FAILED")
     output(result, state)
 
 
@@ -90,6 +95,7 @@ def blueprint_add_variable(state: AppState, blueprint_path, var_name, var_type):
     api = require_editor(state)
     result = add_variable(api, blueprint_path, var_name, var_type,
                           project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="BLUEPRINT_ADD_VARIABLE_FAILED")
     output(result, state)
 
 
@@ -107,6 +113,7 @@ def blueprint_delete_variable(state: AppState, blueprint_path, var_name):
 
     api = require_editor(state)
     result = remove_variable(api, blueprint_path, var_name, project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="BLUEPRINT_REMOVE_VARIABLE_FAILED")
     output(result, state)
 
 
@@ -124,6 +131,7 @@ def blueprint_delete_unused_variables(state: AppState, blueprint_path):
     api = require_editor(state)
     result = remove_unused_variables(api, blueprint_path,
                                      project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="BLUEPRINT_REMOVE_UNUSED_VARIABLES_FAILED")
     output(result, state)
 
 
@@ -141,6 +149,7 @@ def blueprint_compile(state: AppState, blueprint_path):
     api = require_editor(state)
     result = compile_blueprint(api, blueprint_path,
                                project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="BLUEPRINT_COMPILE_FAILED")
     output(result, state)
 
 
@@ -160,4 +169,5 @@ def blueprint_rename_graph(state: AppState, blueprint_path, old_name, new_name):
     api = require_editor(state)
     result = rename_graph(api, blueprint_path, old_name, new_name,
                           project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="BLUEPRINT_RENAME_GRAPH_FAILED")
     output(result, state)

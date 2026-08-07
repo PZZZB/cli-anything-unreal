@@ -84,6 +84,7 @@ ue-cli --output json task wait <task_id> --timeout 300
 ```
 
 `task wait` exits 0 for a completed task, 3 for a failed/task-timeout result, and 4 for cancellation or caller wait timeout. A caller timeout never cancels the task; output keeps the current task status and adds `wait.status=timeout` plus a follow-up command.
+Task records keep lifecycle `status` separate from the current `phase` (for example, `running` plus `waiting_remote_control`). Terminal states are monotonic: a late worker result cannot replace cancellation or another final outcome. A timed-out editor launch can become completed only after `editor status` verifies the recorded process identity and port owner.
 
 If crash recovery blocks startup, the launch task returns `EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES` with the matching UnrealEditor PID and window title. Choose **Restore Selected** or **Skip Restore** in that existing editor, then run `editor status`; do not launch a second editor for the project.
 
@@ -95,7 +96,7 @@ After status becomes `online`, run a read-only editor query:
 ue-cli --output json --project "$Project" material list
 ```
 
-Each shell invocation is a new process. Repeat `--project` on every project-scoped command. Project selection remains sticky only inside the interactive `ue-cli` REPL.
+Each shell invocation is a new process. Repeat `--project` on project-scoped commands when running outside the project tree. Commands that talk to an editor infer the nearest unique `.uproject` from the current directory or its parents, so they cannot silently fall through to another project's editor. An explicit `--project` wins; `--port` selects the port but keeps the inferred project identity check. Use `editor status --all` to inspect every project. Project selection remains sticky inside the interactive `ue-cli` REPL.
 
 If an already-running editor was started without Remote Control preparation, run this command, close that editor, then launch it again:
 
@@ -172,6 +173,8 @@ ue-cli --output json --project "$Project" editor cvar get r.VSync --timeout 10
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
 `material get-param` returns the effective scalar, vector, texture, or static-switch value, including values inherited from parent material instances or materials.
 `material info` supports Material and MaterialInstanceConstant assets. Other material asset classes, including MaterialFunction, return `MATERIAL_INFO_UNSUPPORTED_CLASS` instead of an empty successful result.
+Material inspection commands never save packages. Unsupported MaterialFunction requests from both `material info` and `material get-graph` return a top-level error with a nonzero exit code; material mutations save only their explicitly targeted package, leaving unrelated dirty work untouched.
+On Unreal Engine 5.7, `material disconnect` returns `MATERIAL_DISCONNECT_UNSAFE_ENGINE` before mutation because both output-pin and expression-input disconnects can corrupt later MaterialEditor/Python work and crash the editor.
 `material info`, `material analyze`, and `material get-graph` recognize Material Attributes connections as material outputs and trace their upstream graph.
 `material shader-source` refreshes changed engine `.usf`/`.ush` files before synchronous extraction. Success reports `shader_cache_refresh=changed`; an empty extraction returns `MATERIAL_SHADER_SOURCE_FAILED` instead of stale success.
 `material dump-hlsl` rejects an inactive requested shader platform before recompiling, preserves the material package's original dirty flag, and returns a nonzero structured error when no dump or matching shader stage is available.
@@ -196,11 +199,11 @@ ue-cli --output json --project "F:/ProjectA/ProjectA.uproject" editor status
 ue-cli --output json --port 30011 material list
 ```
 
-When `--port` is omitted, ue-cli uses the selected project's `DefaultRemoteControl.ini` or one unambiguous live editor. Multiple matching editors produce a structured ambiguity error instead of choosing silently.
+When `--port` is omitted, ue-cli uses the selected project's `DefaultRemoteControl.ini` or one unambiguous live editor. Multiple matching editors produce a structured ambiguity error instead of choosing silently. A directory containing multiple `.uproject` files also requires explicit `--project`. For every project-bound editor request on Windows, the listening-port PID must be known and its process command line must match that project; unknown or mismatched ownership fails before sending the request.
 
 `editor status` applies a 15-second discovery deadline by default. Use `editor status --timeout <seconds>` when a slow machine needs more time. An exhausted deadline returns `EDITOR_STATUS_TIMEOUT` with the `blocking_phase`; a blocked task read also includes its `task_id`.
 
-`editor close` targets every running editor for the selected project. Without `--project`, it captures the process owning the selected Remote Control port. The active process receives a graceful close and up to 10 seconds to exit; additional same-project processes are treated as stale peers and terminated with PID-identity checks. The final payload reports both paths and fails if any original process cannot be verified closed.
+`editor close` targets the verified editor for the selected project. Without `--project`, it captures the process owning the selected Remote Control port. By default it reads dirty map/content packages, saves all of them when needed, requires Unreal to confirm the save, then closes. It never asks the caller to classify who changed a package. Unknown/offline state and same-project stale peers are preserved as machine-readable failures because they cannot be saved safely. The single escape hatch, `--force`, allows data loss and offline/stale process termination and should be used only when the request already authorizes that outcome.
 
 ## Output Contract
 

@@ -8,9 +8,9 @@ from cli_anything.unreal.commands import (
     handle_error,
     output,
     require_editor,
-    require_project,
 )
 from cli_anything.unreal.commands._parse_value import parse_property_value
+from cli_anything.unreal.errors import raise_for_legacy_error
 
 
 @click.group("asset")
@@ -49,6 +49,7 @@ def asset_list(state: AppState, query, class_name, package_path, limit):
     api = require_editor(state)
     result = search_assets(api, query=query, class_name=class_name,
                            package_path=package_path, limit=limit)
+    raise_for_legacy_error(result, default_code="ASSET_LIST_FAILED")
     output(result, state)
 
 
@@ -81,6 +82,7 @@ def asset_texture_source_cmd(state: AppState, asset_path):
 
     api = require_editor(state)
     result = texture_source_info(api, asset_path, project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="ASSET_TEXTURE_SOURCE_FAILED")
     output(result, state)
 
 
@@ -104,6 +106,7 @@ def asset_delete_cmd(state: AppState, asset_path, force):
 
     api = require_editor(state)
     result = asset_delete(api, asset_path, force=force, project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="ASSET_DELETE_FAILED")
     output(result, state)
 
 
@@ -152,6 +155,7 @@ def asset_duplicate_cmd(state: AppState, source_path, dest_path, force):
     api = require_editor(state)
     result = asset_duplicate(api, source_path, dest_path, force=force,
                              project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="ASSET_DUPLICATE_FAILED")
     output(result, state)
 
 
@@ -172,6 +176,7 @@ def asset_rename_cmd(state: AppState, source_path, dest_path):
     api = require_editor(state)
     result = asset_rename(api, source_path, dest_path,
                           project_dir=state.session.project_dir)
+    raise_for_legacy_error(result, default_code="ASSET_RENAME_FAILED")
     output(result, state)
 
 

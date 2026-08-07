@@ -173,6 +173,10 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput(UMaterial* 
 		return JsonError(TEXT("Input pointer is null"));
 	}
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7
+	return TEXT("{\"error\":\"Material disconnect is disabled on Unreal Engine 5.7 because it can corrupt Python/MaterialEditor state and crash on a later material edit.\",\"code\":\"MATERIAL_DISCONNECT_UNSAFE_ENGINE\",\"engine_version\":\"5.7\",\"operation\":\"expression_input\",\"suggestion\":\"Disconnect in the Material Editor UI or use an engine version where this workflow has been validated.\"}");
+#else
+
 	const FString InputName = ToExpression->GetInputName(TargetIndex).ToString();
 	const bool bHadConnection = Input->Expression != nullptr;
 	const FString FromExpressionName = Input->Expression ? Input->Expression->GetName() : FString();
@@ -190,8 +194,8 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput(UMaterial* 
 	Input->MaskB = 0;
 	Input->MaskA = 0;
 
-	ToExpression->PostEditChange();
-	Material->PostEditChange();
+	// The command layer owns the single RecompileMaterial call after this
+	// mutation, so do not duplicate its edit notifications here.
 	Material->MarkPackageDirty();
 
 	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"disconnect\",\"to_node\":\"") + JsonEscape(ToExpression->GetName()) + TEXT("\"");
@@ -200,6 +204,7 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput(UMaterial* 
 	Json += TEXT(",\"disconnected_from\":\"") + JsonEscape(FromExpressionName) + TEXT("\"");
 	Json += TEXT(",\"disconnected_from_path\":\"") + JsonEscape(FromExpressionPath) + TEXT("\"}");
 	return Json;
+#endif
 }
 
 FString UCliAnythingBridgeLibrary::GetTextureSourceInfo(UTexture2D* Texture)
@@ -455,7 +460,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.25");
+	return TEXT("1.27");
 }
 
 static bool ResolveMaterialProperty(const FString& PropertyName, EMaterialProperty& OutProperty)
@@ -512,6 +517,10 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialOutput(UMaterial* Material,
 		return JsonError(TEXT("Unknown material property: ") + PropertyName);
 	}
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7
+	return TEXT("{\"error\":\"Material disconnect is disabled on Unreal Engine 5.7 because it can corrupt Python/MaterialEditor state and crash on a later material edit.\",\"code\":\"MATERIAL_DISCONNECT_UNSAFE_ENGINE\",\"engine_version\":\"5.7\",\"operation\":\"material_output\",\"suggestion\":\"Disconnect in the Material Editor UI or use an engine version where this workflow has been validated.\"}");
+#else
+
 	FExpressionInput* Input = Material->GetExpressionInputForProperty(Property);
 	if (!Input)
 	{
@@ -521,12 +530,13 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialOutput(UMaterial* Material,
 	Material->Modify();
 	Input->Expression = nullptr;
 	Input->OutputIndex = 0;
-	Material->PostEditChange();
+	// Defer the single PreEditChange/PostEditChange pair to RecompileMaterial.
 	Material->MarkPackageDirty();
 
 	return TEXT("{\"status\":\"ok\",\"action\":\"disconnect\",\"to\":\"MaterialOutput.")
 		+ JsonEscape(PropertyName)
 		+ TEXT("\"}");
+#endif
 }
 
 FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)

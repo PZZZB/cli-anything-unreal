@@ -6,12 +6,45 @@ and provides undo/redo functionality.
 
 import copy
 import json
-import os
 import time
 from pathlib import Path
-from typing import Optional
 
 MAX_UNDO = 50
+
+
+class AmbiguousProjectError(RuntimeError):
+    """Raised when cwd project inference finds multiple sibling projects."""
+
+    def __init__(self, directory: Path, candidates: list[Path]):
+        self.directory = directory
+        self.candidates = candidates
+        super().__init__(f"Multiple .uproject files found in {directory}")
+
+
+def find_nearest_uproject(start_dir: str | Path | None = None) -> str | None:
+    """Find the nearest unambiguous Unreal project at or above *start_dir*.
+
+    Only files directly inside each ancestor are considered.  A directory with
+    multiple ``.uproject`` files is ambiguous and stops discovery rather than
+    silently selecting a project from a higher ancestor.
+    """
+
+    current = Path(start_dir) if start_dir is not None else Path.cwd()
+    if current.is_file():
+        current = current.parent
+
+    for directory in (current, *current.parents):
+        try:
+            candidates = sorted(
+                path for path in directory.glob("*.uproject") if path.is_file()
+            )
+        except OSError:
+            continue
+        if len(candidates) == 1:
+            return str(candidates[0].resolve())
+        if len(candidates) > 1:
+            raise AmbiguousProjectError(directory.resolve(), candidates)
+    return None
 
 
 class Session:

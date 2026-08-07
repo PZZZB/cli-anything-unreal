@@ -1,14 +1,8 @@
 """Tests for test_blueprint.py — Uses synthetic data only, no UE editor required."""
 
 import json
-import os
-import subprocess
-import tempfile
-import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 class TestBlueprint:
@@ -46,6 +40,12 @@ class TestBlueprint:
         assert 'asset_path = "/Game/UI/BP_Test.BP_Test_C"' in script
         assert 'asset_candidates = ["/Game/UI/BP_Test.BP_Test", "/Game/UI/BP_Test"]' in script
         assert "_cli_load_blueprint" in script
+        from cli_anything.unreal.core.script_runner import SavePolicy
+
+        assert mock_run.call_args.kwargs["save_policy"] is SavePolicy.TARGET_PACKAGES
+        assert mock_run.call_args.kwargs["target_packages"] == [
+            "/Game/UI/BP_Test.BP_Test_C"
+        ]
 
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_compile_blueprint_resolver_searches_registry_parent_path(self, mock_run):
@@ -70,6 +70,10 @@ class TestBlueprint:
         script = mock_run.call_args.args[1]
         assert "unreal.load_asset(candidate)" in script
         assert 'asset_candidates = ["/Game/Drone/BP_Drone", "/Game/Drone/BP_Drone.BP_Drone"]' in script
+        from cli_anything.unreal.core.script_runner import SavePolicy
+
+        assert mock_run.call_args.kwargs["save_policy"] is SavePolicy.NEVER
+        assert mock_run.call_args.kwargs["target_packages"] is None
 
     @patch("cli_anything.unreal.core.blueprint._exec_blueprint_script")
     def test_list_blueprints(self, mock_exec):

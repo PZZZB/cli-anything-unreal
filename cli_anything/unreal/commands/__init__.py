@@ -6,23 +6,19 @@ import functools
 import json
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 import click
 
 from cli_anything.unreal._version import __version__
 from cli_anything.unreal.core.session import Session
+from cli_anything.unreal.errors import UeCliError
 from cli_anything.unreal.utils.repl_skin import ReplSkin
 
 
-@dataclass
-class AppError(Exception):
-    code: str
-    message: str
-    exit_code: int = 1
-    suggestion: str | None = None
-    details: dict | list | None = None
+# Compatibility export for command modules and third-party callers.  Domain
+# layers can now raise the same typed error without importing ``commands``.
+AppError = UeCliError
 
 
 class AppState:
@@ -32,9 +28,48 @@ class AppState:
         self.json_output: bool = True
         self.session: Session = Session()
         self.port_is_explicit: bool = False
+        self.project_is_explicit: bool = False
+        self.project_is_inferred: bool = False
         self.skin: ReplSkin = ReplSkin("unreal", version=__version__)
         self.in_repl: bool = False
         self.output_mode: str = "json"
+
+
+def ensure_inferred_project(state: AppState) -> str | None:
+    """Bind the nearest cwd project before resolving an editor target."""
+
+    if state.session.project_path:
+        return state.session.project_path
+
+    from cli_anything.unreal.core.session import (
+        AmbiguousProjectError,
+        find_nearest_uproject,
+    )
+
+    try:
+        project_path = find_nearest_uproject()
+    except AmbiguousProjectError as exc:
+        candidates = [str(path.resolve()) for path in exc.candidates]
+        raise AppError(
+            "PROJECT_AMBIGUOUS",
+            f"Multiple .uproject files found in {exc.directory}.",
+            exit_code=2,
+            suggestion="Pass --project <path-to.uproject> explicitly.",
+            details={
+                "directory": str(exc.directory),
+                "candidates": candidates,
+            },
+        ) from exc
+    if project_path is None:
+        return None
+
+    state.session.load_project(project_path)
+    state.project_is_inferred = True
+    if not state.port_is_explicit:
+        from cli_anything.unreal.utils.ue_backend import read_rc_port
+
+        state.session.port = read_rc_port(state.session.project_dir) or 30010
+    return state.session.project_path
 
 
 def emit_json(payload: dict | list) -> None:
@@ -167,6 +202,7 @@ def _get_state() -> AppState:
 
 
 def require_project(state: AppState):
+    ensure_inferred_project(state)
     if not state.session.is_loaded:
         raise AppError(
             "PROJECT_REQUIRED",
@@ -207,46 +243,78 @@ def _project_mismatch_details(state: AppState, running: list[dict]) -> dict:
     }
 
 
-def _guard_editor_project(state: AppState, api_cls) -> None:
+def _guard_editor_project(state: AppState, api_cls) -> dict | None:
     if not state.session.project_path or sys.platform != "win32":
-        return
+        return None
 
     try:
         from cli_anything.unreal.utils.ue_backend import find_running_editors
 
         running = find_running_editors()
-    except Exception:
-        return
-
-    if not running:
-        return
+    except Exception as exc:
+        raise AppError(
+            "EDITOR_PROJECT_VERIFICATION_FAILED",
+            "Could not enumerate running Unreal Editor processes to verify the selected project.",
+            exit_code=3,
+            suggestion="Retry after process discovery is available; no editor request was sent.",
+            details={
+                "port": state.session.port,
+                "project": state.session.project_path,
+                "error": str(exc),
+            },
+        ) from exc
 
     try:
         listening_pid = api_cls._get_pid_listening_on_port(state.session.port)
-    except Exception:
-        listening_pid = None
-
-    if listening_pid:
-        owner = next(
-            (editor for editor in running if int(editor.get("pid", 0)) == int(listening_pid)),
-            None,
-        )
-        if owner and not _same_project_path(owner.get("project", ""), state.session.project_path):
-            raise AppError(
-                "EDITOR_PROJECT_NOT_RUNNING",
-                f"Editor HTTP API on port {state.session.port} belongs to another project.",
-                exit_code=3,
-                details=_project_mismatch_details(state, running),
-            )
-        return
-
-    if not any(_same_project_path(editor.get("project", ""), state.session.project_path) for editor in running):
+        listening_pid = int(listening_pid) if listening_pid is not None else None
+    except (OSError, TypeError, ValueError) as exc:
         raise AppError(
-            "EDITOR_PROJECT_NOT_RUNNING",
-            f"Editor HTTP API is alive on port {state.session.port}, but no running UnrealEditor process matches this project.",
+            "EDITOR_PROJECT_VERIFICATION_FAILED",
+            f"Could not identify the process owning editor port {state.session.port}.",
             exit_code=3,
+            suggestion="Retry after port ownership can be verified; no editor request was sent.",
+            details={
+                **_project_mismatch_details(state, running),
+                "error": str(exc),
+            },
+        ) from exc
+
+    if listening_pid is None:
+        raise AppError(
+            "EDITOR_PROJECT_VERIFICATION_FAILED",
+            f"Editor port {state.session.port} is reachable, but its owning process is unknown.",
+            exit_code=3,
+            suggestion="Retry after port ownership can be verified; no editor request was sent.",
             details=_project_mismatch_details(state, running),
         )
+
+    owner = next(
+        (editor for editor in running if int(editor.get("pid", 0)) == listening_pid),
+        None,
+    )
+    if owner is None:
+        raise AppError(
+            "EDITOR_PROJECT_VERIFICATION_FAILED",
+            f"Port {state.session.port} belongs to PID {listening_pid}, but that process could not be verified as Unreal Editor.",
+            exit_code=3,
+            suggestion="Retry after process discovery is available; no editor request was sent.",
+            details={
+                **_project_mismatch_details(state, running),
+                "listener_pid": listening_pid,
+            },
+        )
+    if not _same_project_path(owner.get("project", ""), state.session.project_path):
+        raise AppError(
+            "EDITOR_PROJECT_NOT_RUNNING",
+            f"Editor HTTP API on port {state.session.port} belongs to another project.",
+            exit_code=3,
+            details={
+                **_project_mismatch_details(state, running),
+                "listener_pid": listening_pid,
+                "listener_project": owner.get("project", ""),
+            },
+        )
+    return owner
 
 
 def _discover_online_editor_port(
@@ -319,6 +387,7 @@ def require_editor(
 ):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
+    ensure_inferred_project(state)
     deadline = time.monotonic() + timeout if timeout is not None else None
 
     def remaining_timeout() -> float | None:
@@ -354,7 +423,21 @@ def require_editor(
             exit_code=4,
             suggestion="Launch the editor with: editor launch --project <path-to-.uproject>",
         )
-    _guard_editor_project(state, UEEditorAPI)
+    try:
+        _guard_editor_project(state, UEEditorAPI)
+    except AppError as initial_guard_error:
+        if state.port_is_explicit or not state.session.project_path:
+            raise
+        live_port = _discover_online_editor_port(state, fail_if_ambiguous=True)
+        if live_port is None or int(live_port) == int(state.session.port):
+            raise initial_guard_error
+        live_api = UEEditorAPI(port=live_port)
+        live_api.project_path = state.session.project_path
+        if not editor_available(live_api):
+            raise initial_guard_error
+        state.session.port = live_port
+        api = live_api
+        _guard_editor_project(state, UEEditorAPI)
     return api
 
 

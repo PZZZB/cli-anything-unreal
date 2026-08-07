@@ -34,8 +34,9 @@ Script convention
 from __future__ import annotations
 
 import json
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
@@ -48,6 +49,14 @@ _RESULT_MARKER = "__cli_result__:"
 # not persist across separate Remote Control Python calls and accidentally keep
 # UObjects alive in the editor process.
 _USER_NS_NAME = "_cli_user_ns"
+
+
+class SavePolicy(str, Enum):
+    """Package persistence policy for editor-Python execution."""
+
+    NEVER = "never"
+    TARGET_PACKAGES = "target_packages"
+    ALL_DIRTY_EXPLICIT = "all_dirty_explicit"
 
 # ── Wrapper template ────────────────────────────────────────────────
 # The user code is inserted at {user_code}.  The wrapper:
@@ -125,6 +134,13 @@ for _cli_name in (
     "_cli_captured_stdout",
     "_cli_string_io",
     "_cli_old_stdout",
+    "_cli_operation_result",
+    "_cli_saved_packages",
+    "_cli_eal",
+    "_cli_utils",
+    "_cli_saved",
+    "_cli_pkg",
+    "_cli_path",
 ):
     try:
         del globals()[_cli_name]
@@ -132,20 +148,57 @@ for _cli_name in (
         pass
 '''
 
-_SAVE_BLOCK = """\
-    # ── Auto-save dirty packages without interactive dialog ──
-    import unreal as _cli_unreal
-    _cli_eal = _cli_unreal.EditorAssetLibrary
-    _cli_utils = _cli_unreal.EditorLoadingAndSavingUtils
-    _cli_saved = 0
-    for _cli_pkg in list(_cli_utils.get_dirty_content_packages()) + list(_cli_utils.get_dirty_map_packages()):
-        try:
+_ALL_DIRTY_SAVE_BLOCK = """\
+    # Auto-save dirty project packages and make every failure observable.
+    _cli_operation_result = {user_ns_name}.get("result")
+    if not (isinstance(_cli_operation_result, dict) and "error" in _cli_operation_result):
+        import unreal as _cli_unreal
+        _cli_eal = _cli_unreal.EditorAssetLibrary
+        _cli_utils = _cli_unreal.EditorLoadingAndSavingUtils
+        _cli_saved_packages = []
+        for _cli_pkg in list(_cli_utils.get_dirty_content_packages()) + list(_cli_utils.get_dirty_map_packages()):
             _cli_path = _cli_pkg.get_path_name().split('.')[0]
-            if _cli_path.startswith('/Game/'):
-                _cli_eal.save_asset(_cli_path)
-                _cli_saved += 1
-        except Exception:
-            pass"""
+            if _cli_path.startswith('/Game/') and _cli_path not in _cli_saved_packages:
+                try:
+                    if not _cli_eal.save_asset(_cli_path):
+                        raise RuntimeError("save_asset returned false")
+                    _cli_saved_packages.append(_cli_path)
+                except Exception as _cli_save_exc:
+                    raise RuntimeError(
+                        "PACKAGE_SAVE_FAILED: " + _cli_path + ": " + str(_cli_save_exc)
+                    )
+        if isinstance(_cli_operation_result, dict):
+            _cli_operation_result.setdefault("saved", True)
+            _cli_operation_result.setdefault("saved_packages", _cli_saved_packages)
+        else:
+            {user_ns_name}["result"] = {{
+                "status": "ok",
+                "saved": True,
+                "saved_packages": _cli_saved_packages,
+            }}"""
+
+# Backwards-compatible private name for callers that inspected the old wrapper.
+_SAVE_BLOCK = _ALL_DIRTY_SAVE_BLOCK.format(user_ns_name=_USER_NS_NAME)
+
+_TARGET_PACKAGES_SAVE_BLOCK = """\
+    # Save only the packages explicitly owned by this operation.
+    _cli_operation_result = {user_ns_name}.get("result")
+    if not (isinstance(_cli_operation_result, dict) and "error" in _cli_operation_result):
+        import unreal as _cli_unreal
+        _cli_eal = _cli_unreal.EditorAssetLibrary
+        _cli_saved_packages = []
+        for _cli_path in {target_packages_literal}:
+            try:
+                if not _cli_eal.save_asset(_cli_path, only_if_is_dirty=False):
+                    raise RuntimeError("save_asset returned false")
+                _cli_saved_packages.append(_cli_path)
+            except Exception as _cli_save_exc:
+                raise RuntimeError(
+                    "PACKAGE_SAVE_FAILED: " + _cli_path + ": " + str(_cli_save_exc)
+                )
+        if isinstance(_cli_operation_result, dict):
+            _cli_operation_result.setdefault("saved", True)
+            _cli_operation_result.setdefault("saved_packages", _cli_saved_packages)"""
 
 
 # ── Public API ──────────────────────────────────────────────────────
@@ -155,7 +208,10 @@ def run_python_script(
     script_path: str,
     project_dir: str | None = None,
     timeout: float = 30.0,
-    save: bool = True,
+    save: bool | None = None,
+    *,
+    save_policy: SavePolicy | str | None = None,
+    target_packages: Iterable[str] | None = None,
 ) -> dict:
     """Execute a Python script file in the editor with automatic result capture.
 
@@ -170,8 +226,15 @@ def run_python_script(
     timeout:
         Maximum seconds to wait for the HTTP response.
     save:
-        If *True* (default), automatically save all dirty packages after
-        the script finishes.
+        Backwards-compatible boolean. ``True`` maps to
+        :attr:`SavePolicy.ALL_DIRTY_EXPLICIT`; ``False`` maps to
+        :attr:`SavePolicy.NEVER`. If neither persistence argument is supplied,
+        the historical all-dirty behavior is preserved.
+    save_policy:
+        Explicit persistence policy for this operation.
+    target_packages:
+        Asset package paths saved by ``TARGET_PACKAGES``. Other dirty packages
+        are never scanned or saved.
 
     Returns
     -------
@@ -185,6 +248,8 @@ def run_python_script(
         code,
         timeout=timeout,
         save=save,
+        save_policy=save_policy,
+        target_packages=target_packages,
         source_path=str(resolved_path),
     )
 
@@ -194,7 +259,10 @@ def run_python_code(
     code: str,
     project_dir: str | None = None,
     timeout: float = 30.0,
-    save: bool = True,
+    save: bool | None = None,
+    *,
+    save_policy: SavePolicy | str | None = None,
+    target_packages: Iterable[str] | None = None,
 ) -> dict:
     """Execute a Python code string in the editor with automatic result capture.
 
@@ -209,15 +277,25 @@ def run_python_code(
     timeout:
         Maximum seconds to wait for the HTTP response.
     save:
-        If *True* (default), automatically save all dirty packages after
-        the script finishes.
+        Backwards-compatible boolean; see :func:`run_python_script`.
+    save_policy:
+        Explicit persistence policy for this operation.
+    target_packages:
+        Asset package paths saved by ``TARGET_PACKAGES``.
 
     Returns
     -------
     dict
         Parsed JSON produced by the script, or an error dict on failure.
     """
-    return _execute(api, code, timeout=timeout, save=save)
+    return _execute(
+        api,
+        code,
+        timeout=timeout,
+        save=save,
+        save_policy=save_policy,
+        target_packages=target_packages,
+    )
 
 
 # ── Internal helpers ────────────────────────────────────────────────
@@ -227,7 +305,9 @@ def _execute(
     code: str,
     *,
     timeout: float,
-    save: bool = True,
+    save: bool | None = None,
+    save_policy: SavePolicy | str | None = None,
+    target_packages: Iterable[str] | None = None,
     source_path: str | None = None,
 ) -> dict:
     """Core execution logic shared by *run_python_script* and *run_python_code*.
@@ -246,12 +326,16 @@ def _execute(
         }
         source_name = source_path
 
+    resolved_save_policy = _resolve_save_policy(save=save, save_policy=save_policy)
+    normalized_targets = _normalize_target_packages(target_packages)
+    save_block = _build_save_block(resolved_save_policy, normalized_targets)
+
     wrapper = _WRAPPER_TEMPLATE.format(
         user_code_literal=json.dumps(code),
         user_ns_name=_USER_NS_NAME,
         execution_context_literal=json.dumps(execution_context),
         source_name_literal=json.dumps(source_name),
-        save_block=_SAVE_BLOCK if save else "",
+        save_block=save_block,
         marker=_RESULT_MARKER,
     )
 
@@ -281,6 +365,8 @@ def _execute(
             try:
                 res = json.loads(output[len(_RESULT_MARKER):])
                 if isinstance(res, dict):
+                    if str(res.get("error", "")).startswith("PACKAGE_SAVE_FAILED:"):
+                        res.setdefault("code", "PACKAGE_SAVE_FAILED")
                     if ue_errors:
                         res["ue_errors"] = ue_errors
                     if ue_warnings:
@@ -295,6 +381,63 @@ def _execute(
     if ue_warnings:
         res["ue_warnings"] = ue_warnings
     return res
+
+
+def _resolve_save_policy(
+    *,
+    save: bool | None,
+    save_policy: SavePolicy | str | None,
+) -> SavePolicy:
+    """Resolve explicit policy while preserving the public boolean contract."""
+
+    if save_policy is None:
+        if save is False:
+            return SavePolicy.NEVER
+        return SavePolicy.ALL_DIRTY_EXPLICIT
+
+    try:
+        policy = SavePolicy(save_policy)
+    except ValueError as exc:
+        choices = ", ".join(item.value for item in SavePolicy)
+        raise ValueError(f"Unknown save policy {save_policy!r}; expected one of: {choices}") from exc
+
+    if save is not None:
+        legacy_policy = SavePolicy.ALL_DIRTY_EXPLICIT if save else SavePolicy.NEVER
+        if legacy_policy is not policy:
+            raise ValueError(
+                f"Conflicting save={save!r} and save_policy={policy.value!r}."
+            )
+    return policy
+
+
+def _normalize_target_packages(target_packages: Iterable[str] | None) -> list[str]:
+    if isinstance(target_packages, str):
+        target_packages = (target_packages,)
+    normalized: list[str] = []
+    for raw_path in target_packages or ():
+        path = str(raw_path).strip()
+        if not path:
+            continue
+        path = path.split(":", 1)[0]
+        leaf = path.rsplit("/", 1)[-1]
+        if "." in leaf:
+            path = path.rsplit(".", 1)[0]
+        if path not in normalized:
+            normalized.append(path)
+    return normalized
+
+
+def _build_save_block(policy: SavePolicy, target_packages: list[str]) -> str:
+    if policy is SavePolicy.NEVER:
+        return ""
+    if policy is SavePolicy.ALL_DIRTY_EXPLICIT:
+        return _ALL_DIRTY_SAVE_BLOCK.format(user_ns_name=_USER_NS_NAME)
+    if not target_packages:
+        raise ValueError("SavePolicy.TARGET_PACKAGES requires at least one target package.")
+    return _TARGET_PACKAGES_SAVE_BLOCK.format(
+        user_ns_name=_USER_NS_NAME,
+        target_packages_literal=json.dumps(target_packages, ensure_ascii=False),
+    )
 
 
 # ── API Discovery ────────────────────────────────────────────────────

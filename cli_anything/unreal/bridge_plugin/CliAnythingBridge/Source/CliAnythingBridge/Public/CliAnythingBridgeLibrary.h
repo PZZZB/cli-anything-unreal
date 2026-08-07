@@ -31,6 +31,7 @@ public:
 	 * Disconnects a material expression input pin.
 	 * UE Python exposes ConnectMaterialExpressions but no reliable disconnect API,
 	 * and FExpressionInput properties are protected from Python.
+	 * Returns MATERIAL_DISCONNECT_UNSAFE_ENGINE without mutation on UE 5.7.
 	 * Returns a JSON result string.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
@@ -43,6 +44,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString ConnectMaterialOutput(UMaterialExpression* FromExpression, const FString& FromOutputName, const FString& PropertyName);
 
+	/** Returns MATERIAL_DISCONNECT_UNSAFE_ENGINE without mutation on UE 5.7. */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString DisconnectMaterialOutput(UMaterial* Material, const FString& PropertyName);
 

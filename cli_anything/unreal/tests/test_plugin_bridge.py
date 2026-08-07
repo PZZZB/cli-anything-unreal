@@ -3,13 +3,10 @@
 import json
 import os
 import re
-import subprocess
-import tempfile
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 class TestPluginBridge:
@@ -381,10 +378,10 @@ class TestPluginBridge:
             plugin_bin.mkdir(parents=True)
             (plugin_bin / "UnrealEditor-CliAnythingBridge.dll").write_bytes(b"MZ")
             return {
-                "status": "error",
-                "code": "INVALID_BUILD_OUTPUT",
-                "failure_kind": "missing_editor_module_manifests",
+                "status": "ok",
                 "returncode": 0,
+                "editor_target": "UnrealEditor",
+                "editor_target_source": "engine",
             }
 
         with patch(
@@ -393,7 +390,7 @@ class TestPluginBridge:
         ) as mock_compile, patch(
             "cli_anything.unreal.core.build._validate_win64_editor_build_products",
             return_value={},
-        ):
+        ) as mock_validate:
             result = compile_bridge_plugin(
                 str(uproject),
                 engine_root=str(engine_root),
@@ -407,6 +404,8 @@ class TestPluginBridge:
         _, kwargs = mock_compile.call_args
         assert kwargs["modules"] == ["CliAnythingBridge"]
         assert kwargs["platform"] == "Win64"
+        assert kwargs["use_engine_editor_target_if_missing"] is True
+        mock_validate.assert_not_called()
 
     def test_compile_bridge_plugin_stops_before_full_build_when_target_invalid(
         self,
@@ -421,6 +420,12 @@ class TestPluginBridge:
         project_dir.mkdir()
         uproject = project_dir / "Project.uproject"
         uproject.write_text('{"FileVersion": 3}', encoding="utf-8")
+        source_dir = project_dir / "Source"
+        source_dir.mkdir()
+        (source_dir / "ProjectEditor.Target.cs").write_text(
+            "Type = TargetType.Editor;",
+            encoding="utf-8",
+        )
         ensure_plugin_deployed(str(project_dir))
         engine_root = tmp_path / "EngineRoot"
         engine_bin = engine_root / "Engine" / "Binaries" / "Win64"
@@ -500,7 +505,70 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.25"
+        assert version == "1.27"
+
+    def test_disconnect_helpers_defer_post_edit_to_single_recompile(self):
+        """Bridge mutation must not duplicate RecompileMaterial notifications."""
+        from cli_anything.unreal.core.plugin_bridge import _BUNDLED_PLUGIN_DIR
+
+        cpp = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+        expression_body = cpp.split(
+            "FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput",
+            1,
+        )[1].split(
+            "FString UCliAnythingBridgeLibrary::GetTextureSourceInfo",
+            1,
+        )[0]
+        output_body = cpp.split(
+            "FString UCliAnythingBridgeLibrary::DisconnectMaterialOutput",
+            1,
+        )[1].split(
+            "FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo",
+            1,
+        )[0]
+
+        for body in (expression_body, output_body):
+            assert "PostEditChange(" not in body
+            assert "MarkPackageDirty()" in body
+
+    def test_disconnect_helpers_guard_ue57_before_mutation(self):
+        """UE 5.7 must fail truthfully before touching material state."""
+        from cli_anything.unreal.core.plugin_bridge import _BUNDLED_PLUGIN_DIR
+
+        cpp = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+        expression_body = cpp.split(
+            "FString UCliAnythingBridgeLibrary::DisconnectMaterialExpressionInput",
+            1,
+        )[1].split(
+            "FString UCliAnythingBridgeLibrary::GetTextureSourceInfo",
+            1,
+        )[0]
+        output_body = cpp.split(
+            "FString UCliAnythingBridgeLibrary::DisconnectMaterialOutput",
+            1,
+        )[1].split(
+            "FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo",
+            1,
+        )[0]
+
+        for body in (expression_body, output_body):
+            assert "ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7" in body
+            assert "MATERIAL_DISCONNECT_UNSAFE_ENGINE" in body
+            assert body.index("MATERIAL_DISCONNECT_UNSAFE_ENGINE") < body.index(
+                "Material->Modify()"
+            )
 
     def test_bridge_shader_dump_recompile_restores_package_dirty_state(self):
         """Diagnostic shader dumps must not leave a clean material package dirty."""
