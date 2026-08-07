@@ -2074,6 +2074,108 @@ result = {'status': 'live_editor_ok'}
             mock_api.exec_python_ex.assert_called_once()
             mock_api.exec_console.assert_not_called()
 
+    def test_editor_exec_prepares_automation_without_persisting_config(self):
+        from cli_anything.unreal.commands.editor import _exec_console_with_log_capture
+
+        api = MagicMock()
+        api.exec_python_ex.return_value = {
+            "ReturnValue": True,
+            "LogOutput": [],
+        }
+
+        result = _exec_console_with_log_capture(
+            api,
+            "Automation RunTests System.Core.HAL.Platform Verification",
+        )
+
+        script = api.exec_python_ex.call_args.args[0]
+        assert '/Script/Engine.AutomationTestSettings' in script
+        assert 'set_editor_property("DefaultInteractiveFramerate", 1.0)' in script
+        assert "save_config" not in script
+        assert script.index("set_editor_property") < script.index(
+            "execute_console_command"
+        )
+        assert result["status"] == "executed"
+
+    def test_editor_exec_bounds_unmarked_remote_log_output(self):
+        """Historical Remote Control output cannot flood one CLI response."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.commands.editor import (
+            EDITOR_EXEC_INLINE_LOG_LIMIT_BYTES,
+        )
+        from cli_anything.unreal.unreal_cli import cli
+
+        entries = [
+            {"Type": "Info", "Output": f"historical-{index:04d}-" + "x" * 200}
+            for index in range(200)
+        ]
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.return_value = {
+                "ReturnValue": True,
+                "LogOutput": entries,
+            }
+            mock_editor.return_value = mock_api
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "stat fps",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)["result"]
+        assert data["omitted_line_count"] > 0
+        assert len(data["log_text"].encode("utf-8")) <= EDITOR_EXEC_INLINE_LOG_LIMIT_BYTES
+        assert data["log_output"][-1]["Output"] == entries[-1]["Output"]
+
+    def test_editor_exec_automation_keeps_only_lifecycle_output(self, tmp_path):
+        """Automation inline output stays focused while full log remains on disk."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        log_file = tmp_path / "RXGame.log"
+        noise = [f"LogBlueprint: discovery warning {index}" for index in range(100)]
+        lifecycle = [
+            "LogAutomationController: Test Started. Path={SDOC.Unit}",
+            "LogAutomationController: Test Completed. Result={Success} Path={SDOC.Unit}",
+            "LogAutomationCommandLine: Automation Test Queue Empty 1 tests performed.",
+        ]
+        log_file.write_text("before\n", encoding="utf-8")
+
+        def fake_exec_python_ex(script, *, timeout=None):
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write("\n".join(noise + lifecycle) + "\n")
+            return {
+                "ReturnValue": True,
+                "LogOutput": [
+                    {"Type": "Warning", "Output": line}
+                    for line in noise + lifecycle
+                ],
+            }
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch(
+                 "cli_anything.unreal.commands.editor._resolve_editor_log_file",
+                 return_value=log_file,
+             ):
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.side_effect = fake_exec_python_ex
+            mock_editor.return_value = mock_api
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "--log-wait", "0",
+                "Automation RunTests SDOC.Unit",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)["result"]
+        assert data["automation_completed"] is True
+        assert data["omitted_line_count"] >= len(noise)
+        assert data["log_file"] == str(log_file)
+        assert "discovery warning" not in data["log_text"]
+        assert "Result={Success}" in data["log_text"]
+        assert "Queue Empty" in data["log_text"]
+
     def test_editor_exec_reports_synchronous_python_exception(self):
         """A failing ``py`` statement must not be reported as executed."""
         from click.testing import CliRunner

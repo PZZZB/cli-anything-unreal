@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -116,6 +117,42 @@ def validate_cook_ini_override(value: str) -> str:
     if value.lower().startswith("-ini:"):
         raise ValueError("ini override must omit the '-ini:' prefix")
     return value
+
+
+def _is_dangling_link(path: Path) -> bool:
+    """Return whether a symlink or Windows junction exists but its target does not."""
+    return os.path.lexists(path) and not os.path.exists(path)
+
+
+def _find_dangling_package_paths(
+    uproject_path: str,
+    platform: str,
+    output_dir: str,
+) -> list[str]:
+    project_dir = Path(uproject_path).parent
+    writable_paths = (
+        project_dir / "Saved",
+        project_dir / "Saved" / "Shaders",
+        project_dir / "Saved" / "Cooked" / platform,
+        project_dir / "Saved" / "StagedBuilds" / platform,
+        project_dir / "DerivedDataCache",
+        project_dir / "Intermediate" / platform,
+        Path(output_dir),
+    )
+
+    dangling: list[str] = []
+    checked: set[str] = set()
+    for path in writable_paths:
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        for candidate in (path, *path.parents):
+            key = os.path.normcase(os.path.abspath(candidate))
+            if key in checked:
+                continue
+            checked.add(key)
+            if _is_dangling_link(candidate):
+                dangling.append(str(candidate))
+    return dangling
 
 
 def _sanitize_target_source(source: str) -> str:
@@ -1303,12 +1340,30 @@ def package_project(
     if already:
         return already
 
+    path = Path(uproject_path)
+    output_dir = output_dir or str(path.parent / "Packaged")
+    dangling_paths = _find_dangling_package_paths(
+        uproject_path,
+        platform,
+        output_dir,
+    )
+    if dangling_paths:
+        return {
+            "status": "error",
+            "code": "PACKAGE_DANGLING_LINK",
+            "error": "Package preflight found a dangling symlink or Windows junction.",
+            "failure_kind": "dangling_link",
+            "dangling_paths": dangling_paths,
+            "suggestion": (
+                "Restore each link target or replace the link with a real directory, "
+                "then retry the package command."
+            ),
+        }
+
     engine_root = engine_root or find_engine_root(uproject_path)
     if not engine_root:
         return {"status": "error", "error": "Could not find engine root"}
 
-    path = Path(uproject_path)
-    output_dir = output_dir or str(path.parent / "Packaged")
     args = [
         f"-project={uproject_path}",
         f"-platform={platform}",

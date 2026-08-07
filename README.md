@@ -182,7 +182,7 @@ On Windows PowerShell, `editor run-script -c` preserves double-quoted Python str
 A `.py` file passed to `editor run-script` executes with `__name__ == "__main__"` and an absolute `__file__`, so guarded script entrypoints run normally.
 Each `editor run-script` invocation receives fresh globals. Deferred Unreal callbacks retain that invocation's globals after the command returns; store their handles and unregister them when finished because later callback failures appear only in the editor log.
 `editor cvar get` confirms the selected editor's TCP listener, then uses the remaining timeout for the requested CVar. It does not spend the budget on a duplicate functional readiness call. Query timeouts report the actual request stage; verified missing CVars return `CVAR_NOT_FOUND`.
-`editor exec --timeout` never redispatches a command after an ambiguous transport failure. A timeout returns nonzero `EDITOR_EXEC_DELIVERY_UNKNOWN`; inspect editor state and logs before retrying because a non-idempotent command may already have run.
+`editor exec --timeout` never redispatches a command after an ambiguous transport failure. A timeout returns nonzero `EDITOR_EXEC_DELIVERY_UNKNOWN`; inspect editor state and logs before retrying because a non-idempotent command may already have run. Inline command logs are bounded; `omitted_line_count` reports omitted lines and `log_file` retains complete diagnostics. Automation commands lower Unreal's runtime-only interactive-FPS gate to 1 FPS without saving project configuration, so background agent runs do not require human window focus.
 
 ## Multiple Editors
 

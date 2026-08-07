@@ -130,7 +130,7 @@ ue-cli editor exec "stat unit"
 ue-cli editor exec "r.DumpRenderTargetPoolMemory"
 ```
 
-`editor exec` returns captured log text in `log_text` when Remote Control/Python can observe it. Some diagnostics, including render-target pool dumps, write to the project Output Log instead of the immediate Remote Control response; `ue-cli` reads the current editor log delta and returns it as `log_file_text`/`log_text`.
+`editor exec` returns bounded captured output in `log_output`/`log_text`. `omitted_line_count` reports lines excluded by filtering or the fixed inline limit; `log_file` keeps complete diagnostics. Automation runs retain lifecycle/result lines instead of unrelated discovery noise.
 
 `LiveCoding.Compile` is different: Unreal completes it asynchronously in the separate `LiveCodingConsole`, whose final result is not available through Remote Control or the project Output Log. `editor exec LiveCoding.Compile` therefore submits the request but exits non-zero with `LIVECODING_RESULT_UNOBSERVABLE`; never use it as a compile-success check. For a deterministic result, close the editor and run `build compile`, or inspect `LiveCodingConsole` manually when the editor must remain open.
 

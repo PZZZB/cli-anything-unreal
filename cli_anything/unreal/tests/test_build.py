@@ -1421,6 +1421,40 @@ class TestBuildSuccessPaths:
             assert result["log_file"].endswith("cli_package.log")
             assert "-utf8output" not in mock_run.call_args.args[2]
 
+    def test_package_rejects_dangling_writable_path_before_uat(self, temp_project):
+        from cli_anything.unreal.core.build import package_project
+
+        dangling = str(Path(temp_project["uproject"]).parent / "Saved" / "Shaders")
+        with patch(
+            "cli_anything.unreal.core.build.find_running_build_processes",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.core.build._find_dangling_package_paths",
+            return_value=[dangling],
+        ), patch(
+            "cli_anything.unreal.core.build.find_engine_root",
+        ) as mock_engine, patch(
+            "cli_anything.unreal.core.build.run_uat",
+        ) as mock_run:
+            result = package_project(
+                temp_project["uproject"],
+                platform="Android",
+            )
+
+        assert result == {
+            "status": "error",
+            "code": "PACKAGE_DANGLING_LINK",
+            "error": "Package preflight found a dangling symlink or Windows junction.",
+            "failure_kind": "dangling_link",
+            "dangling_paths": [dangling],
+            "suggestion": (
+                "Restore each link target or replace the link with a real directory, "
+                "then retry the package command."
+            ),
+        }
+        mock_engine.assert_not_called()
+        mock_run.assert_not_called()
+
     def test_package_targeted_android_uat_args(self, temp_project):
         """Targeted package options must reach BuildCookRun as argv."""
         from cli_anything.unreal.core.build import package_project

@@ -45,7 +45,14 @@ REMOTE_UNREACHABLE_GRACE_SECONDS = 60
 REMOTE_UNREACHABLE_CACHE_TTL_SECONDS = 7200
 EDITOR_LOG_CAPTURE_LIMIT_BYTES = 2 * 1024 * 1024
 EDITOR_LOG_READ_CHUNK_BYTES = 64 * 1024
+EDITOR_EXEC_INLINE_LOG_LIMIT_BYTES = 16 * 1024
 EDITOR_CLOSE_PROCESS_GRACE_SECONDS = 10
+
+_AUTOMATION_INLINE_LOG_PATTERN = re.compile(
+    r"Automation\s+RunTests|Test\s+Started|Test\s+Completed|"
+    r"Result=\{|Automation\s+Test\s+Queue\s+Empty",
+    re.IGNORECASE,
+)
 
 
 def _editor_status_timeout_error(
@@ -2224,6 +2231,15 @@ def _exec_console_with_log_capture(api, command: str, timeout: int = 15) -> dict
     marker = f"{time.time_ns()}"
     begin = f"__ue_cli_exec_begin__:{marker}"
     end = f"__ue_cli_exec_end__:{marker}"
+    automation_setup = ""
+    if re.match(r"^\s*Automation(?:\s|$)", command, re.IGNORECASE):
+        automation_setup = """
+    _settings_class = unreal.load_class(None, "/Script/Engine.AutomationTestSettings")
+    if _settings_class is None:
+        raise RuntimeError("AutomationTestSettings class is unavailable")
+    _settings = unreal.get_default_object(_settings_class)
+    _settings.set_editor_property("DefaultInteractiveFramerate", 1.0)
+"""
     script = f"""
 import unreal
 _cmd = {json.dumps(command)}
@@ -2239,6 +2255,7 @@ except Exception:
         _world = None
 unreal.log(_begin)
 try:
+{automation_setup}
     unreal.SystemLibrary.execute_console_command(_world, _cmd)
 finally:
     unreal.log(_end)
@@ -2277,6 +2294,45 @@ finally:
         "_log_begin_marker": begin,
         "_log_end_marker": end,
     }
+
+
+def _automation_inline_log_entry(item: dict) -> bool:
+    return bool(
+        _AUTOMATION_INLINE_LOG_PATTERN.search(str(item.get("Output", "")))
+    )
+
+
+def _bound_editor_exec_logs(
+    result: dict,
+    log_file: Path | None,
+    omitted_line_count: int,
+) -> None:
+    """Keep one bounded inline log suffix; full diagnostics stay in ``log_file``."""
+    raw_entries = list(result.get("log_output") or [])
+    entries = [item for item in raw_entries if isinstance(item, dict)]
+    omitted_line_count += len(raw_entries) - len(entries)
+
+    kept_reversed: list[dict] = []
+    used_bytes = 0
+    for index in range(len(entries) - 1, -1, -1):
+        item = entries[index]
+        line_bytes = len(
+            str(item.get("Output", "")).encode("utf-8", errors="replace")
+        ) + 1
+        if used_bytes + line_bytes > EDITOR_EXEC_INLINE_LOG_LIMIT_BYTES:
+            omitted_line_count += index + 1
+            break
+        kept_reversed.append(item)
+        used_bytes += line_bytes
+
+    kept = list(reversed(kept_reversed))
+    result["log_output"] = kept
+    result["log_text"] = "\n".join(
+        str(item.get("Output", "")) for item in kept
+    )
+    result["omitted_line_count"] = omitted_line_count
+    if log_file:
+        result["log_file"] = str(log_file)
 
 
 def _editor_exec_request_failure(result: dict) -> dict | None:
@@ -2604,6 +2660,17 @@ def editor_exec(state: AppState, timeout, log_wait, command):
     automation_run = bool(
         re.match(r"^\s*Automation\s+RunTests(?:\s|$)", command, re.IGNORECASE)
     )
+    omitted_line_count = 0
+    if automation_run:
+        immediate_output = list(result.get("log_output") or [])
+        focused_output = [
+            item
+            for item in immediate_output
+            if isinstance(item, dict) and _automation_inline_log_entry(item)
+        ]
+        omitted_line_count += len(immediate_output) - len(focused_output)
+        result["log_output"] = focused_output
+
     file_log_text = ""
     if automation_run:
         file_log_text = _read_log_delta(
@@ -2622,21 +2689,29 @@ def editor_exec(state: AppState, timeout, log_wait, command):
         )
     if file_log_text:
         result["log_file"] = str(log_file)
-        result["log_file_text"] = file_log_text
         existing_output = list(result.get("log_output") or [])
         seen_output = {
             str(item.get("Output", ""))
             for item in existing_output
             if isinstance(item, dict)
         }
+        file_lines = [line for line in file_log_text.splitlines() if line]
+        if automation_run:
+            focused_file_lines = [
+                line
+                for line in file_lines
+                if _AUTOMATION_INLINE_LOG_PATTERN.search(line)
+            ]
+            omitted_line_count += len(file_lines) - len(focused_file_lines)
+            file_lines = focused_file_lines
         result["log_output"] = existing_output + [
             {
                 "Type": "Info",
                 "Output": line,
                 "Source": "editor_log_file",
             }
-            for line in file_log_text.splitlines()
-            if line and line not in seen_output
+            for line in file_lines
+            if line not in seen_output
         ]
         if not result.get("log_text"):
             result["log_text"] = file_log_text
@@ -2668,6 +2743,7 @@ def editor_exec(state: AppState, timeout, log_wait, command):
     if python_errors:
         result["status"] = "failed"
         result["python_error"] = "\n".join(python_errors)
+        _bound_editor_exec_logs(result, log_file, omitted_line_count)
         raise AppError(
             "PYTHON_EXEC_FAILED",
             "Unreal Python command raised a synchronous exception.",
@@ -2689,6 +2765,7 @@ def editor_exec(state: AppState, timeout, log_wait, command):
             "log_wait_seconds": log_wait,
             "next_commands": next_commands,
         })
+        _bound_editor_exec_logs(result, log_file, omitted_line_count)
         raise AppError(
             "LIVECODING_RESULT_UNOBSERVABLE",
             "LiveCoding.Compile was submitted, but editor exec cannot observe the "
@@ -2703,6 +2780,7 @@ def editor_exec(state: AppState, timeout, log_wait, command):
         )
 
     if automation_run and not result.get("automation_completed"):
+        _bound_editor_exec_logs(result, log_file, omitted_line_count)
         raise AppError(
             "AUTOMATION_RESULT_TIMEOUT",
             "Automation completion was not observed before --log-wait expired.",
@@ -2711,6 +2789,7 @@ def editor_exec(state: AppState, timeout, log_wait, command):
             details=result,
         )
 
+    _bound_editor_exec_logs(result, log_file, omitted_line_count)
     output(result, state)
 
 
