@@ -1418,6 +1418,51 @@ def _save_all_dirty_editor_packages(api) -> None:
     )
 
 
+def _resolve_transient_dirty_map_world(api, package_path: str) -> str:
+    """Resolve the active World object without guessing from its package name."""
+
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    current = run_python_code(
+        api,
+        r'''
+import unreal
+try:
+    world = unreal.EditorLevelLibrary.get_editor_world()
+except Exception:
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+if world is None:
+    result = {"error": "No editor world is active."}
+else:
+    outermost = world.get_outermost()
+    result = {
+        "status": "ok",
+        "world": world.get_path_name(),
+        "package": outermost.get_name() if outermost else "",
+        "name": world.get_name(),
+    }
+''',
+        save=False,
+    )
+    if (
+        not isinstance(current, dict)
+        or current.get("status") != "ok"
+        or not current.get("world")
+        or current.get("package") != package_path
+    ):
+        raise AppError(
+            "EDITOR_SAVE_BEFORE_CLOSE_FAILED",
+            "Could not resolve the dirty transient map's live World object; the editor was not asked to quit.",
+            exit_code=3,
+            details={
+                "function": "ResolveEditorWorld",
+                "map_package": package_path,
+                "response": current,
+            },
+        )
+    return str(current["world"])
+
+
 def _save_transient_dirty_maps(api, map_packages: list[str]) -> list[dict]:
     """Move dirty transient maps to deterministic project asset paths."""
 
@@ -1426,7 +1471,7 @@ def _save_transient_dirty_maps(api, map_packages: list[str]) -> list[dict]:
         if not package_path.startswith("/Temp/"):
             continue
         map_name = package_path.rsplit("/", 1)[-1]
-        world_path = f"{package_path}.{map_name}"
+        world_path = _resolve_transient_dirty_map_world(api, package_path)
         asset_path = f"/Game/__UeCliAutoSave_{map_name}"
         _call_close_save_function(
             api,
@@ -1434,7 +1479,11 @@ def _save_transient_dirty_maps(api, map_packages: list[str]) -> list[dict]:
             {"World": world_path, "AssetPath": asset_path},
         )
         _call_close_save_function(api, "LoadMap", {"Filename": asset_path})
-        saved.append({"map_package": package_path, "asset_path": asset_path})
+        saved.append({
+            "map_package": package_path,
+            "world": world_path,
+            "asset_path": asset_path,
+        })
     return saved
 
 

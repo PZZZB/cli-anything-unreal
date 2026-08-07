@@ -1792,17 +1792,27 @@ def test_editor_close_dirty_transient_map_autosaves_to_game_path():
         {"OutDirtyPackages": []},
     ]
 
-    evidence = _save_dirty_editor_packages_if_needed(api)
+    with patch(
+        "cli_anything.unreal.core.script_runner.run_python_code",
+        return_value={
+            "status": "ok",
+            "world": "/Temp/Untitled_2.Untitled",
+            "package": "/Temp/Untitled_2",
+            "name": "Untitled",
+        },
+    ):
+        evidence = _save_dirty_editor_packages_if_needed(api)
 
     assert evidence["saved_count"] == 1
     assert evidence["transient_map_saves"] == [{
         "map_package": "/Temp/Untitled_2",
+        "world": "/Temp/Untitled_2.Untitled",
         "asset_path": "/Game/__UeCliAutoSave_Untitled_2",
     }]
     save_map_call = api.call_function.call_args_list[2]
     assert save_map_call.args[1] == "SaveMap"
     assert save_map_call.args[2] == {
-        "World": "/Temp/Untitled_2.Untitled_2",
+        "World": "/Temp/Untitled_2.Untitled",
         "AssetPath": "/Game/__UeCliAutoSave_Untitled_2",
     }
     load_map_call = api.call_function.call_args_list[3]
@@ -1825,7 +1835,15 @@ def test_editor_close_dirty_transient_map_reload_failure_preserves_editor():
         {"ReturnValue": ""},
     ]
 
-    with pytest.raises(AppError) as exc_info:
+    with patch(
+        "cli_anything.unreal.core.script_runner.run_python_code",
+        return_value={
+            "status": "ok",
+            "world": "/Temp/Untitled_2.Untitled",
+            "package": "/Temp/Untitled_2",
+            "name": "Untitled",
+        },
+    ), pytest.raises(AppError) as exc_info:
         _save_dirty_editor_packages_if_needed(api)
 
     assert exc_info.value.code == "EDITOR_SAVE_BEFORE_CLOSE_FAILED"
@@ -1833,6 +1851,41 @@ def test_editor_close_dirty_transient_map_reload_failure_preserves_editor():
     assert exc_info.value.details["parameters"] == {
         "Filename": "/Game/__UeCliAutoSave_Untitled_2",
     }
+
+
+def test_editor_close_dirty_transient_map_requires_matching_live_world():
+    from cli_anything.unreal.commands import AppError
+    from cli_anything.unreal.commands.editor import _save_dirty_editor_packages_if_needed
+
+    api = MagicMock()
+    api.call_function.side_effect = [
+        {"OutDirtyPackages": ["/Temp/Untitled_2"]},
+        {"OutDirtyPackages": []},
+    ]
+
+    with patch(
+        "cli_anything.unreal.core.script_runner.run_python_code",
+        return_value={
+            "status": "ok",
+            "world": "/Temp/Untitled_3.Untitled",
+            "package": "/Temp/Untitled_3",
+            "name": "Untitled",
+        },
+    ), pytest.raises(AppError) as exc_info:
+        _save_dirty_editor_packages_if_needed(api)
+
+    assert exc_info.value.code == "EDITOR_SAVE_BEFORE_CLOSE_FAILED"
+    assert exc_info.value.details == {
+        "function": "ResolveEditorWorld",
+        "map_package": "/Temp/Untitled_2",
+        "response": {
+            "status": "ok",
+            "world": "/Temp/Untitled_3.Untitled",
+            "package": "/Temp/Untitled_3",
+            "name": "Untitled",
+        },
+    }
+    assert len(api.call_function.call_args_list) == 2
 
 
 def test_editor_close_force_is_explicit_and_skips_dirty_query(mini_project):
