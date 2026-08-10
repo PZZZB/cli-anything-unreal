@@ -1,8 +1,12 @@
 #include "CliAnythingBridgeLibrary.h"
 
 #include "Materials/Material.h"
+#if ENGINE_MAJOR_VERSION >= 5
+#include "Materials/MaterialAttributeDefinitionMap.h"
+#endif
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionCustom.h"
+#include "Materials/MaterialExpressionSetMaterialAttributes.h"
 #include "Materials/MaterialExpressionTextureBase.h"
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
@@ -80,6 +84,12 @@ static bool ResolveMaterialProperty(const FString& PropertyName, EMaterialProper
 {
 	FString Name = PropertyName;
 	Name.TrimStartAndEndInline();
+	Name.ReplaceInline(TEXT("_"), TEXT(""));
+	Name.ReplaceInline(TEXT(" "), TEXT(""));
+	if (Name.StartsWith(TEXT("MP"), ESearchCase::IgnoreCase))
+	{
+		Name.RightChopInline(2);
+	}
 	for (const FNamedMaterialProperty& NamedProperty : GNamedMaterialProperties)
 	{
 		if (Name.Equals(NamedProperty.Name, ESearchCase::IgnoreCase))
@@ -89,6 +99,49 @@ static bool ResolveMaterialProperty(const FString& PropertyName, EMaterialProper
 		}
 	}
 	return false;
+}
+
+static bool IsUnsafeSetMaterialAttributesProperty(const FString& PropertyName)
+{
+	FString Name = PropertyName;
+	Name.TrimStartAndEndInline();
+	Name.ReplaceInline(TEXT("_"), TEXT(""));
+	Name.ReplaceInline(TEXT(" "), TEXT(""));
+	return Name.Equals(TEXT("AttributeSetTypes"), ESearchCase::IgnoreCase)
+		|| Name.Equals(TEXT("Inputs"), ESearchCase::IgnoreCase);
+}
+
+static int32 CreateOrGetSetMaterialAttributeInput(
+	UMaterialExpressionSetMaterialAttributes* SetAttributes,
+	EMaterialProperty Property)
+{
+	if (!SetAttributes) return INDEX_NONE;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5)
+	return SetAttributes->CreateOrGetInputAttribute(Property);
+#else
+	if (Property == MP_MaterialAttributes) return 0;
+
+	const FGuid AttributeId = FMaterialAttributeDefinitionMap::GetID(Property);
+	int32 AttributeIndex = INDEX_NONE;
+	if (SetAttributes->AttributeSetTypes.Find(AttributeId, AttributeIndex))
+	{
+		return AttributeIndex + 1;
+	}
+
+	const int32 SetTypesIndex = SetAttributes->AttributeSetTypes.Add(AttributeId);
+	if (SetTypesIndex == INDEX_NONE) return INDEX_NONE;
+
+	// UE 4.26 has no CreateOrGetInputAttribute helper. Mirror UE5's native
+	// implementation so AttributeSetTypes and Inputs always change together.
+	SetAttributes->PreEditChange(nullptr);
+	const int32 InputIndex = SetAttributes->Inputs.Add(FExpressionInput());
+	if (SetAttributes->Inputs.IsValidIndex(InputIndex))
+	{
+		SetAttributes->Inputs[InputIndex].InputName = FName(
+			*FMaterialAttributeDefinitionMap::GetDisplayNameForMaterial(AttributeId, SetAttributes->Material).ToString());
+	}
+	return InputIndex;
+#endif
 }
 
 class FMaterialResourceExtractSource : public FMaterialResource
@@ -272,7 +325,9 @@ static FString BuildMaterialGraphJson(
 	for (UMaterialExpression* ToExpression : Expressions)
 	{
 		if (!ToExpression) continue;
-		for (int32 InputIndex = 0;; ++InputIndex)
+		const UMaterialExpressionSetMaterialAttributes* SetAttributes = Cast<UMaterialExpressionSetMaterialAttributes>(ToExpression);
+		const int32 BoundedInputCount = SetAttributes ? SetAttributes->Inputs.Num() : INDEX_NONE;
+		for (int32 InputIndex = 0; BoundedInputCount == INDEX_NONE || InputIndex < BoundedInputCount; ++InputIndex)
 		{
 			const FExpressionInput* Input = ToExpression->GetInput(InputIndex);
 			if (!Input) break;
@@ -556,6 +611,20 @@ FString UCliAnythingBridgeLibrary::AddMaterialExpression(
 	{
 		return JsonError(TEXT("Material expression class not found: ") + ExpressionClass);
 	}
+	if (FoundClass->IsChildOf(UMaterialExpressionSetMaterialAttributes::StaticClass()))
+	{
+		for (const TPair<FString, FString>& Pair : Properties)
+		{
+			if (IsUnsafeSetMaterialAttributesProperty(Pair.Key))
+			{
+				return TEXT("{\"error\":\"") + JsonEscape(Pair.Key)
+					+ TEXT(" cannot be written independently on MaterialExpressionSetMaterialAttributes; use material connect --to-input <attribute>\"")
+					+ TEXT(",\"code\":\"MATERIAL_SET_ATTRIBUTES_UNSAFE_PROPERTY\",\"unsafe_property\":\"")
+					+ JsonEscape(Pair.Key)
+					+ TEXT("\",\"safe_command\":\"material connect <material> --from <node> --to <set-attributes-node> --to-input <attribute>\"}");
+			}
+		}
+	}
 
 	Material->Modify();
 	UMaterialExpression* Expression = UMaterialEditingLibrary::CreateMaterialExpression(Material, FoundClass, PosX, PosY);
@@ -722,13 +791,45 @@ FString UCliAnythingBridgeLibrary::ConnectMaterialExpressions(
 		return TEXT("{\"error\":\"Node not found: ") + JsonEscape(Missing) + TEXT("\",\"available_nodes\":") + JsonStringArray(AvailableNodes) + TEXT("}");
 	}
 	Material->Modify();
-	if (!UMaterialEditingLibrary::ConnectMaterialExpressions(FromExpression, FromOutputName, ToExpression, ToInputName))
+	FString ResolvedToInputName = ToInputName;
+	int32 SetAttributeInputIndex = INDEX_NONE;
+	bool bSetAttributeInputCreated = false;
+	if (UMaterialExpressionSetMaterialAttributes* SetAttributes = Cast<UMaterialExpressionSetMaterialAttributes>(ToExpression))
+	{
+		FString Wanted = ToInputName;
+		Wanted.TrimStartAndEndInline();
+		if (!Wanted.IsEmpty())
+		{
+			EMaterialProperty Property = MP_MAX;
+			if (!ResolveMaterialProperty(Wanted, Property))
+			{
+				return TEXT("{\"error\":\"Unsupported SetMaterialAttributes input: ") + JsonEscape(Wanted)
+					+ TEXT("\",\"code\":\"MATERIAL_ATTRIBUTE_NOT_FOUND\"}");
+			}
+			SetAttributes->Modify();
+			const int32 InputCountBefore = SetAttributes->Inputs.Num();
+			SetAttributeInputIndex = CreateOrGetSetMaterialAttributeInput(SetAttributes, Property);
+			if (!SetAttributes->Inputs.IsValidIndex(SetAttributeInputIndex))
+			{
+				return JsonError(TEXT("Failed to create SetMaterialAttributes input: ") + Wanted);
+			}
+			bSetAttributeInputCreated = SetAttributes->Inputs.Num() > InputCountBefore;
+			ResolvedToInputName = SetAttributes->GetInputName(SetAttributeInputIndex).ToString();
+		}
+	}
+	if (!UMaterialEditingLibrary::ConnectMaterialExpressions(FromExpression, FromOutputName, ToExpression, ResolvedToInputName))
 	{
 		return JsonError(TEXT("ConnectMaterialExpressions returned false"));
 	}
 	RecompileEditedMaterial(Material);
 	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"connect\",\"from\":\"") + JsonEscape(FromNode) + TEXT("\"");
 	Json += TEXT(",\"from_output\":\"") + JsonEscape(FromOutputName) + TEXT("\",\"to\":\"") + JsonEscape(ToNode) + TEXT("\",\"to_input\":\"") + JsonEscape(ToInputName) + TEXT("\"}");
+	if (SetAttributeInputIndex != INDEX_NONE)
+	{
+		Json.RemoveFromEnd(TEXT("}"));
+		Json += FString::Printf(TEXT(",\"set_material_attribute_input\":true,\"input_index\":%d"), SetAttributeInputIndex);
+		Json += bSetAttributeInputCreated ? TEXT(",\"input_created\":true}") : TEXT(",\"input_created\":false}");
+	}
 	return Json;
 }
 
@@ -748,22 +849,56 @@ FString UCliAnythingBridgeLibrary::DisconnectMaterialExpression(UMaterial* Mater
 	TArray<FString> AvailableInputs;
 	int32 TargetIndex = INDEX_NONE;
 	FExpressionInput* TargetInput = nullptr;
-	for (int32 Index = 0;; ++Index)
+	if (UMaterialExpressionSetMaterialAttributes* SetAttributes = Cast<UMaterialExpressionSetMaterialAttributes>(ToExpression))
 	{
-		FExpressionInput* CurrentInput = ToExpression->GetInput(Index);
-		if (!CurrentInput)
+		for (int32 Index = 0; Index < SetAttributes->Inputs.Num(); ++Index)
 		{
-			break;
+			AvailableInputs.Add(SetAttributes->GetInputName(Index).ToString());
 		}
-		const FString InputName = ToExpression->GetInputName(Index).ToString();
-		AvailableInputs.Add(InputName);
-		if (TargetIndex == INDEX_NONE && (Wanted.IsEmpty() || InputName.Equals(Wanted, ESearchCase::IgnoreCase)))
+		if (Wanted.IsEmpty())
 		{
-			TargetIndex = Index;
-			TargetInput = CurrentInput;
-			if (!Wanted.IsEmpty())
+			TargetIndex = 0;
+		}
+		else
+		{
+			EMaterialProperty Property = MP_MAX;
+			if (ResolveMaterialProperty(Wanted, Property))
+			{
+				if (Property == MP_MaterialAttributes)
+				{
+					TargetIndex = 0;
+				}
+				else
+				{
+					int32 AttributeIndex = INDEX_NONE;
+					if (SetAttributes->AttributeSetTypes.Find(FMaterialAttributeDefinitionMap::GetID(Property), AttributeIndex))
+					{
+						TargetIndex = AttributeIndex + 1;
+					}
+				}
+			}
+		}
+		if (SetAttributes->Inputs.IsValidIndex(TargetIndex)) TargetInput = &SetAttributes->Inputs[TargetIndex];
+	}
+	else
+	{
+		for (int32 Index = 0;; ++Index)
+		{
+			FExpressionInput* CurrentInput = ToExpression->GetInput(Index);
+			if (!CurrentInput)
 			{
 				break;
+			}
+			const FString InputName = ToExpression->GetInputName(Index).ToString();
+			AvailableInputs.Add(InputName);
+			if (TargetIndex == INDEX_NONE && (Wanted.IsEmpty() || InputName.Equals(Wanted, ESearchCase::IgnoreCase)))
+			{
+				TargetIndex = Index;
+				TargetInput = CurrentInput;
+				if (!Wanted.IsEmpty())
+				{
+					break;
+				}
 			}
 		}
 	}
@@ -1064,7 +1199,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.30");
+	return TEXT("1.32");
 }
 
 FString UCliAnythingBridgeLibrary::ConnectMaterialOutput(UMaterial* Material, const FString& FromNode, const FString& FromOutputName, const FString& PropertyName)

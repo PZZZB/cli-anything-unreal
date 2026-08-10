@@ -27,7 +27,7 @@ Key points:
 - `editor enable-remote` is the explicit editor-automation mutation command. It enables RemoteControl, PythonScriptPlugin, and EditorScriptingUtilities, then configures Remote Control. `editor launch` may perform the same preparation and deploy/enable CliAnythingBridge because launching the controlled editor requires them.
 - `editor launch` starts an interactive editor by default. Pass `--unattended` only when UE dialogs must be suppressed; `--no-unattended` explicitly preserves interactivity. It waits up to 30 seconds for the API, then returns `launching` with a task id if startup is still in progress. `--timeout` controls the background startup deadline and does not extend the foreground shell wait. Do not use `sleep`.
 - Async: `--no-wait`, then `editor status <task_id>` or `task status <task_id>`.
-- DLL locked build fail -> `editor close`, then compile. If `editor plugin-upgrade` reports `LNK1104` with `locked_file`, close/kill all UnrealEditor processes for that project and retry the reported command. `plugin-upgrade` waits for matching editor processes to exit before compiling, but another stale process can still hold third-party plugin DLLs.
+- DLL locked build fail -> `editor close`, then compile. If `editor plugin-upgrade` reports `LNK1104` with `locked_file`, close/kill all UnrealEditor processes for that project and retry the reported command. `plugin-upgrade` waits for matching editor processes to exit before compiling, then relaunches with the normal interactive/windowed default. Another stale process can still hold third-party plugin DLLs.
 - `build compile --platform Win64` fails fast with `EDITOR_RUNNING_LOCKS_DLLS` when the same project editor is running. This avoids wasting minutes before UBT reaches a locked `UnrealEditor-*.dll` link step.
 - CliAnythingBridge missing/stale module -> keep plugin enabled; `editor launch` deploys/enables it and precompiles before starting UE. Do not disable it to bypass startup.
 - Do not create or load maps at module top level inside `editor run-script` with `EditorLoadingAndSavingUtils.new_blank_map` or `load_map`; ue-cli blocks these known-crashy world teardown paths. Reusable helper functions may contain offline/commandlet map-load branches as long as they are not called at top level. Use `editor new-level /Game/Path/Level` or `editor open-level /Game/Path/Level`, then run a separate actor/content setup script, then `editor save-level`. `editor launch --map` and `editor open-level` inputs must include their Unreal mount root (`/Game/...`); bare names are ambiguous and rejected. Level commands verify the active editor world after transition and try to recover if the HTTP bridge resets.
@@ -90,6 +90,35 @@ ue-cli editor close
 ```
 
 `editor close` does not report `closed` only because the Remote Control API stopped responding. On Windows it also waits for matching same-project `UnrealEditor.exe` processes to exit, and terminates a stale lock holder when needed so immediate `build compile` does not hit locked editor/plugin DLLs.
+
+## Active Confirmation Polling
+
+Use this only for an agent-owned interactive editor. It does not create a background listener. The Agent queries the local mailbox when needed.
+
+```powershell
+# Arm before a risky or potentially prompting operation. Re-run to refresh TTL.
+ue-cli --project "F:/MyGame/MyGame.uproject" confirmation enable --ttl 900
+
+# Query without Remote Control; this still works while UE's GameThread is blocked.
+ue-cli --project "F:/MyGame/MyGame.uproject" confirmation list
+
+# Use only an exact choice returned for a source=bridge, answerable=true item.
+ue-cli --project "F:/MyGame/MyGame.uproject" confirmation answer <id> --choice no
+
+# Return unresolved standard dialogs to normal editor UI before human handoff.
+ue-cli --project "F:/MyGame/MyGame.uproject" confirmation disable
+```
+
+Call `confirmation list` in these cases:
+
+- Any editor-dependent command returns `EDITOR_BLOCKED_BY_CONFIRMATION` or `EDITOR_BLOCKED_BY_DIALOG`; follow its `next_command`.
+- A Remote Control command times out or reports unreachable while the matching UnrealEditor process remains alive.
+- A destructive, overwrite, import, save, plugin, map-transition, or long-running operation has not produced expected progress.
+- Before retrying a command with unknown delivery, closing the editor, or declaring the editor hung.
+
+The lease must be enabled before the dialog occurs. Bridge interception covers standard `FMessageDialog` calls after the bridge installs its post-engine-init hook. Startup recovery, custom Slate windows, platform file pickers, and third-party dialogs may appear as `source=window`, `answerable=false`; inspect those in editor UI. Never auto-click **Restore Packages**. A lease expiry or `confirmation disable` removes hidden interception and sends the unresolved standard dialog to normal editor UI.
+
+The command that triggered a brokered dialog may already have executed side effects before asking. After answering, verify editor/project state before retrying it.
 
 ## Python Scripting Patterns
 
@@ -309,6 +338,8 @@ ue-cli editor api-discover "/Game/Maps/L.L:PersistentLevel.MyActor_0"
 |-------|-------|-----|
 | Connection refused | Editor not running | Follow lifecycle above |
 | Timeout | Editor busy: shaders/loading | Run `editor status`; if reachable, wait 10-15s and retry |
+| `EDITOR_BLOCKED_BY_CONFIRMATION` | Standard UE dialog is waiting in Bridge mailbox | Run returned `confirmation list`, inspect, then `confirmation answer` with an allowed choice |
+| `EDITOR_BLOCKED_BY_DIALOG` | Startup/custom/non-brokered window blocks UE | Run returned `confirmation list`, then resolve the reported window in editor UI |
 | "modules built with different engine version" | Binary/engine mismatch | `editor preflight` -> `build compile` -> `editor launch` |
 | Screenshot fails | Editor window not visible/minimized | Foreground editor, retry |
 

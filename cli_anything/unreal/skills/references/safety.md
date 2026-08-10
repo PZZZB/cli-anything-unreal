@@ -20,7 +20,7 @@ Benchmark failures: locks, corruption, modal dialogs, wasted turns.
 
 ## Modal Dialogs Block CLI Execution
 
-Any modal dialog blocks headless CLI forever.
+Any modal dialog can block Remote Control. For agent-owned interactive work, arm the bounded confirmation broker before risky operations; see `workflows-editor.md` "Active Confirmation Polling". It handles standard `FMessageDialog` only. Do not rely on it for startup recovery, custom Slate, platform, or third-party windows.
 
 | Trigger | Prevention |
 |---------|------------|
@@ -29,6 +29,8 @@ Any modal dialog blocks headless CLI forever.
 | `import_asset()` name conflict | Delete existing + `collect_garbage()` first |
 | `create_asset()` / `duplicate_asset()` target exists | Use overwrite workflow below |
 | Any `unreal.EditorDialog` call | Never use in headless scripts |
+
+When an editor command returns `EDITOR_BLOCKED_BY_CONFIRMATION`, run its `next_command`, inspect title/message/choices, and answer only an authorized `source=bridge`, `answerable=true` item. Do not blindly choose `yes` or repeat the triggering operation: side effects may have happened before the dialog. `EDITOR_BLOCKED_BY_DIALOG` means CLI answering is unavailable; inspect the existing editor window. Never auto-click **Restore Packages**.
 
 ## Asset Overwrite Avoidance
 

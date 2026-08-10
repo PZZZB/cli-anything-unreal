@@ -505,7 +505,69 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.30"
+        assert version == "1.32"
+
+    def test_set_material_attributes_uses_safe_parallel_array_path(self):
+        """SetMaterialAttributes IDs and inputs must never be edited independently."""
+        from cli_anything.unreal.core.plugin_bridge import _BUNDLED_PLUGIN_DIR
+
+        cpp = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+        add_body = cpp.split(
+            "FString UCliAnythingBridgeLibrary::AddMaterialExpression",
+            1,
+        )[1].split(
+            "FString UCliAnythingBridgeLibrary::DeleteMaterialExpression",
+            1,
+        )[0]
+        connect_body = cpp.split(
+            "FString UCliAnythingBridgeLibrary::ConnectMaterialExpressions",
+            1,
+        )[1].split(
+            "FString UCliAnythingBridgeLibrary::DisconnectMaterialExpression",
+            1,
+        )[0]
+
+        assert 'MaterialExpressionSetMaterialAttributes.h' in cpp
+        assert "CreateOrGetInputAttribute(Property)" in cpp
+        assert "AttributeSetTypes.Add(AttributeId)" in cpp
+        assert "MATERIAL_SET_ATTRIBUTES_UNSAFE_PROPERTY" in add_body
+        assert add_body.index("MATERIAL_SET_ATTRIBUTES_UNSAFE_PROPERTY") < add_body.index("CreateMaterialExpression")
+        assert "CreateOrGetSetMaterialAttributeInput" in connect_body
+        assert "set_material_attribute_input" in connect_body
+
+    def test_confirmation_broker_hooks_ue4_and_ue5_modal_delegates(self):
+        """The out-of-band mailbox must work while Remote Control is blocked."""
+        from cli_anything.unreal.core.plugin_bridge import _BUNDLED_PLUGIN_DIR
+
+        module_cpp = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeModule.cpp"
+        ).read_text(encoding="utf-8")
+        build_cs = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "CliAnythingBridge.Build.cs"
+        ).read_text(encoding="utf-8")
+
+        assert "FCoreDelegates::ModalErrorMessage" in module_cpp
+        assert "FCoreDelegates::ModalMessageDialog" in module_cpp
+        assert "ENGINE_MINOR_VERSION >= 3" in module_cpp
+        assert "FCoreDelegates::OnPostEngineInit" in module_cpp
+        assert 'TEXT("lease.json")' in module_cpp
+        assert 'TEXT("pending-")' in module_cpp
+        assert 'TEXT("response-")' in module_cpp
+        assert "FPlatformProcess::Sleep(0.05f)" in module_cpp
+        assert '"Json"' in build_cs
 
     def test_disconnect_helpers_defer_post_edit_to_single_recompile(self):
         """Bridge mutation must not duplicate RecompileMaterial notifications."""

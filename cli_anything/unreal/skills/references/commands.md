@@ -25,7 +25,7 @@ Workflow examples live in sibling workflow docs.
 | `editor api-discover TARGET [-q QUERY] [-d NAMES] [--timeout N]` | Discover UE class/struct/API. TARGET: class, struct, asset path, loaded UObject/subobject path, actor path | Yes |
 | `editor cancel TASK_ID` | Cancel async editor launch | - |
 | `editor plugin-version` | Compare bundled vs loaded plugin | Yes (loaded) |
-| `editor plugin-upgrade` | Deploy -> compile -> restart plugin upgrade | No |
+| `editor plugin-upgrade` | Deploy -> compile -> restart plugin upgrade; relaunch uses the normal interactive/windowed editor default | No |
 
 ### api-discover Usage
 
@@ -75,6 +75,19 @@ ue-cli api-discover DirectionalLight   # not top-level, needs 'editor' prefix
 
 **Data sources**: C++ reflection via `CliAnythingBridgeLibrary.get_class_info()` is primary. Targeted `-q`/`-d` queries also merge matching live Python wrapper symbols omitted by reflection; these results are marked `python_only` with `source: python_binding`.
 
+## confirmation - Active Dialog Polling
+
+These commands use a project-local mailbox, not Remote Control, so `list`, `answer`, and `disable` remain usable while a brokered dialog blocks UE. Enable the bounded lease before an operation can prompt. `enable` requires loaded Bridge 1.32 or newer.
+
+| Command | Description |
+|---------|-------------|
+| `confirmation enable [--pid PID] [--ttl SEC]` | Arm standard `FMessageDialog` interception for one live project editor; default TTL is 900 seconds |
+| `confirmation list [--pid PID]` | List brokered confirmations and detectable UE windows. Only `source=bridge`, `answerable=true` entries support CLI answers |
+| `confirmation answer CONFIRMATION_ID --choice CHOICE [--wait SEC]` | Submit one exact reported choice through the out-of-band mailbox |
+| `confirmation disable [--pid PID]` | End the lease; any unresolved brokered dialog falls back to normal editor UI |
+
+Editor-dependent commands detect an active brokered dialog before dispatch and return `EDITOR_BLOCKED_BY_CONFIRMATION` with `next_command`. If a request itself triggers the dialog, the same code replaces its transport timeout. A detected non-brokered window returns `EDITOR_BLOCKED_BY_DIALOG`; `confirmation list` reports it but does not auto-click it.
+
 ## project - Project Management
 
 | Command | Description |
@@ -106,16 +119,17 @@ Build commands do not require editor.
 
 Synchronous `build compile` / `build cook` / `build package` stream the live UAT/UBT log to stderr while waiting, similar to UE `Build.bat`. Repeated MSVC command-line warnings show once plus a folded count; the `log_file` retains the complete unmodified output. JSON stdout stays one final payload with `log_file`.
 For non-Win64 platforms, `build compile` calls UE `Build.bat` directly for the project's detected Game target, falling back to the `.uproject` name when no Game `Target.cs` is present.
+For project repair, normal validation, and final completion on Win64, run `build compile` without `--module`. This builds the detected `<Project>Editor` target and its required dependencies. A large compile is expected and correct; do not replace it with a Game, plugin, or other isolated module merely to reduce work.
 After a successful Win64 compile, ue-cli validates the PE files declared by UE's generated Editor target receipt. A missing or malformed DLL/EXE returns `INVALID_BUILD_OUTPUT` with the receipt and affected paths instead of reporting a false success.
 After cancelling a Win64 Editor compile, ue-cli checks every `RuntimeDependencies` path declared by the current Editor target receipt. Missing files return nonzero `BUILD_CANCELLED_OUTPUTS_INCOMPLETE` with counts, examples, and a full `build compile` recovery command.
-For focused Win64 Editor validation, repeat `--module NAME`; ue-cli calls `Build.bat` for the detected Editor target with one constrained `-Module=NAME` per value instead of running the full BuildCookRun target set.
+Use repeated `--module NAME` only when the user explicitly requests a focused diagnostic. ue-cli still calls `Build.bat` for the detected Editor target, constrained by `-Module=NAME`; this is not final Editor-target validation. Follow it with full `build compile` before launching the editor or reporting build success.
 
 
 On Windows, `build compile --platform Win64` refuses to start while an UnrealEditor process for the same project is running, because editor/plugin DLLs are commonly locked and link fails with `LNK1104`. Run `editor close` first, then compile.
 
 | Command | Description |
 |---------|-------------|
-| `build compile [--project PATH] [--config C] [--platform P] [--module NAME]... [--no-wait] [--timeout N]` | Compile C++; repeated modules select a focused Win64 Editor-module build |
+| `build compile [--project PATH] [--config C] [--platform P] [--module NAME]... [--no-wait] [--timeout N]` | Compile C++; Win64 defaults to the full Editor target. Repeated modules are explicit focused diagnostics only |
 | `build cook [--project PATH] [--platform P] [--package PACKAGE]... [--output-dir DIR] [--ini OVERRIDE]... [--no-wait] [--timeout N]` | Cook content through UAT; package seeds, cook output, and ini overrides map to native UE options |
 | `build package [--project PATH] [--platform P] [--config C] [--output-dir DIR] [--map MAP]... [--cook-flavor F] [--uat-arg=-ARG]... [--no-wait] [--timeout N]` | Reproducible BuildCookRun package pipeline; final result includes `uat_command` |
 | `build stop [--project PATH]` | Cancel project-owned async build tasks, then kill any remaining MSBuild/UBT tree |

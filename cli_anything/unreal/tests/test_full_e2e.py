@@ -25,6 +25,7 @@ Skip with:
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -126,6 +127,110 @@ class TestEditorConnection:
 # ═══════════════════════════════════════════════════════════════════════
 #  E2E: Project Info
 # ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.e2e
+class TestConfirmationBrokerE2E:
+    """Exercise the out-of-band dialog round trip against a real editor."""
+
+    def test_active_confirmation_round_trip(self, api, project_path, api_port):
+        title = f"ue-cli confirmation E2E {os.getpid()}"
+        base = [
+            sys.executable,
+            "-m", "cli_anything.unreal",
+            "--output", "json",
+            "--project", project_path,
+            "--port", str(api_port),
+        ]
+        enabled = False
+        pending_id = None
+
+        def run_cli(*args, timeout=45):
+            completed = subprocess.run(
+                [*base, *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return completed, json.loads(completed.stdout)
+
+        def completed_output(completed):
+            return completed.stdout or completed.stderr
+
+        def find_test_confirmation():
+            nonlocal pending_id
+            listed, payload = run_cli("confirmation", "list")
+            assert listed.returncode == 0, completed_output(listed)
+            matches = [
+                item for item in payload["result"]["confirmations"]
+                if item.get("title") == title
+            ]
+            if matches:
+                pending_id = matches[0]["id"]
+            return matches
+
+        try:
+            armed, armed_payload = run_cli(
+                "confirmation", "enable", "--ttl", "120",
+            )
+            assert armed.returncode == 0, completed_output(armed)
+            assert armed_payload["result"]["status"] == "enabled"
+            enabled = True
+
+            code = (
+                "import unreal; "
+                f"result = unreal.EditorDialog.show_message({title!r}, "
+                "'Choose No for the ue-cli E2E.', unreal.AppMsgType.YES_NO)"
+            )
+            blocked, blocked_payload = run_cli(
+                "editor", "run-script", "-c", code,
+                "--timeout", "30", "--no-save",
+            )
+            assert blocked.returncode == 4, completed_output(blocked)
+            assert blocked_payload["code"] == "EDITOR_BLOCKED_BY_CONFIRMATION"
+            assert blocked_payload["details"]["delivery_state"] == "waiting_confirmation"
+
+            matches = find_test_confirmation()
+            assert len(matches) == 1
+            item = matches[0]
+            assert item["source"] == "bridge"
+            assert item["answerable"] is True
+            assert item["choices"] == ["yes", "no"]
+
+            answered, answered_payload = run_cli(
+                "confirmation", "answer", pending_id,
+                "--choice", "no", "--wait", "5",
+            )
+            assert answered.returncode == 0, completed_output(answered)
+            assert answered_payload["result"]["resolved"] is True
+            pending_id = None
+
+            responsive, responsive_payload = run_cli(
+                "editor", "cvar", "get", "t.MaxFPS",
+            )
+            assert responsive.returncode == 0, completed_output(responsive)
+            assert responsive_payload["status"] == "success"
+            assert find_test_confirmation() == []
+        finally:
+            if enabled and pending_id is None:
+                try:
+                    find_test_confirmation()
+                except Exception:
+                    pass
+            if pending_id:
+                # Keep a failed E2E from parking the editor behind its own dialog.
+                try:
+                    run_cli(
+                        "confirmation", "answer", pending_id,
+                        "--choice", "no", "--wait", "5",
+                    )
+                except Exception:
+                    pass
+            if enabled:
+                try:
+                    run_cli("confirmation", "disable")
+                except Exception:
+                    pass
+
 
 @pytest.mark.e2e
 class TestProjectE2E:
@@ -728,6 +833,98 @@ else:
         # Verify via material info — should have at least 1 node
         info = get_material_info(api, self.TEST_MATERIAL, project_dir)
         assert info.get("node_count", 0) >= 1
+
+    def test_connect_set_material_attributes_creates_safe_input(self, api, project_path):
+        """Connecting an attribute creates its matching native input without raw array writes."""
+        from cli_anything.unreal.core.materials import (
+            add_material_node,
+            connect_material_nodes,
+            delete_material_node,
+            disconnect_material_nodes,
+            get_material_info,
+        )
+
+        project_dir = str(Path(project_path).parent)
+        created_nodes = []
+        try:
+            source = add_material_node(
+                api,
+                self.TEST_MATERIAL,
+                "MaterialExpressionConstant3Vector",
+                pos_x=-300,
+                pos_y=200,
+                project_dir=project_dir,
+            )
+            assert source.get("status") == "ok", f"source add failed: {source}"
+            source_name = source["node"]["name"]
+            created_nodes.append(source_name)
+
+            target = add_material_node(
+                api,
+                self.TEST_MATERIAL,
+                "MaterialExpressionSetMaterialAttributes",
+                pos_x=0,
+                pos_y=200,
+                project_dir=project_dir,
+            )
+            assert target.get("status") == "ok", f"target add failed: {target}"
+            target_name = target["node"]["name"]
+            created_nodes.append(target_name)
+
+            connected = connect_material_nodes(
+                api,
+                self.TEST_MATERIAL,
+                source_name,
+                "",
+                target_name,
+                "WorldPositionOffset",
+                project_dir=project_dir,
+            )
+            assert connected.get("status") == "ok", f"connect failed: {connected}"
+            assert connected.get("set_material_attribute_input") is True
+            assert connected.get("input_created") is True
+
+            info = get_material_info(api, self.TEST_MATERIAL, project_dir)
+            edge = next(
+                edge
+                for edge in info.get("edges", [])
+                if edge["from_node"] == source_name and edge["to_node"] == target_name
+            )
+            assert edge["to_input_index"] == connected["input_index"]
+            assert edge["to_input"]
+
+            disconnected = disconnect_material_nodes(
+                api,
+                self.TEST_MATERIAL,
+                source_name,
+                "",
+                target_name,
+                "WorldPositionOffset",
+                project_dir=project_dir,
+            )
+            assert disconnected.get("status") == "ok", f"disconnect failed: {disconnected}"
+            assert disconnected.get("had_connection") is True
+        finally:
+            for node_name in reversed(created_nodes):
+                delete_material_node(api, self.TEST_MATERIAL, node_name, project_dir=project_dir)
+
+    def test_add_set_material_attributes_rejects_raw_parallel_array_props(self, api, project_path):
+        """Raw AttributeSetTypes writes are rejected before creating a node."""
+        from cli_anything.unreal.core.materials import add_material_node, get_material_info
+
+        project_dir = str(Path(project_path).parent)
+        before = get_material_info(api, self.TEST_MATERIAL, project_dir)
+        result = add_material_node(
+            api,
+            self.TEST_MATERIAL,
+            "MaterialExpressionSetMaterialAttributes",
+            set_props=[("AttributeSetTypes", "(A=0,B=0,C=0,D=0)")],
+            project_dir=project_dir,
+        )
+
+        assert result.get("code") == "MATERIAL_SET_ATTRIBUTES_UNSAFE_PROPERTY", result
+        after = get_material_info(api, self.TEST_MATERIAL, project_dir)
+        assert after.get("node_count") == before.get("node_count")
 
     def test_add_and_delete_node(self, api, project_path):
         """Test adding then deleting a node."""

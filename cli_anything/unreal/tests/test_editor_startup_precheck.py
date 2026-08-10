@@ -3002,8 +3002,8 @@ def test_editor_launch_recovery_requires_task_pid(mini_project):
     assert result is None
 
 
-def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
-    """Verify plugin-upgrade relaunch passes -nosplash -unattended (regression test)."""
+def test_plugin_upgrade_relaunch_uses_interactive_launch_default(mini_project):
+    """plugin-upgrade relaunches windowed without an unattended override."""
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
@@ -3042,12 +3042,12 @@ def test_plugin_upgrade_relaunch_includes_nosplash_unattended(mini_project):
         ])
 
     assert result.exit_code == 0, result.output
-    # The relaunch Popen call must include -nosplash and -unattended
+    # The relaunch uses the normal windowed launch command.
     relaunch_calls = [cmd for cmd in popen_calls if cmd and str(cmd[0]).endswith("UnrealEditor.exe")]
     assert len(relaunch_calls) == 1
     relaunch_cmd = relaunch_calls[0]
     assert "-nosplash" in relaunch_cmd
-    assert "-unattended" in relaunch_cmd
+    assert "-unattended" not in relaunch_cmd
 
 
 def test_plugin_upgrade_uses_editor_close_helper(mini_project):

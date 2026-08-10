@@ -1043,6 +1043,10 @@ def editor_status(state: AppState, scan_range, show_all, timeout, project_path, 
 
     if not show_all:
         ensure_inferred_project(state)
+        if state.session.project_path:
+            from cli_anything.unreal.core.confirmations import raise_if_editor_blocked
+
+            raise_if_editor_blocked(state.session.project_path)
     instances = _scan_editor_status_instances(
         state,
         scan_range,
@@ -1050,6 +1054,15 @@ def editor_status(state: AppState, scan_range, show_all, timeout, project_path, 
     )
     if not show_all:
         instances = _filter_editor_status_instances(instances, state.session.project_path)
+        if state.session.project_path and any(
+            item.get("status") != "online" for item in instances
+        ):
+            from cli_anything.unreal.core.confirmations import raise_if_editor_blocked
+
+            raise_if_editor_blocked(
+                state.session.project_path,
+                include_windows=True,
+            )
     output(instances, state)
 
 
@@ -3395,7 +3408,6 @@ def editor_plugin_upgrade(state: AppState):
                 editor_exe,
                 state.session.project_path,
                 None,
-                unattended=True,
             )
             sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
             restarted_api = None

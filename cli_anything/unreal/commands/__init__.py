@@ -391,6 +391,12 @@ def require_editor(
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     ensure_inferred_project(state)
+    if state.session.project_path:
+        from cli_anything.unreal.core.confirmations import raise_if_editor_blocked
+
+        # Mailbox-only fast path. Do this before any health probe so every
+        # editor-dependent command reports the actionable confirmation code.
+        raise_if_editor_blocked(state.session.project_path)
     deadline = time.monotonic() + timeout if timeout is not None else None
 
     def remaining_timeout() -> float | None:
@@ -420,6 +426,10 @@ def require_editor(
                 api = live_api
                 api_alive = True
     if not api_alive:
+        if state.session.project_path:
+            from cli_anything.unreal.core.confirmations import raise_if_editor_blocked
+
+            raise_if_editor_blocked(state.session.project_path, include_windows=True)
         raise AppError(
             "EDITOR_UNREACHABLE",
             f"Editor HTTP API not responding on port {state.session.port}.",
@@ -454,6 +464,7 @@ def register_commands(cli_group: click.Group):
     from cli_anything.unreal.commands.umg import umg_group
     from cli_anything.unreal.commands.screenshot import screenshot_group
     from cli_anything.unreal.commands.editor import editor_group
+    from cli_anything.unreal.commands.confirmation import confirmation_group
     from cli_anything.unreal.commands.session import session_group
     from cli_anything.unreal.commands.skills import register as register_skills
     from cli_anything.unreal.commands.repl import register as register_repl
@@ -467,6 +478,7 @@ def register_commands(cli_group: click.Group):
     cli_group.add_command(umg_group)
     cli_group.add_command(screenshot_group)
     cli_group.add_command(editor_group)
+    cli_group.add_command(confirmation_group)
     cli_group.add_command(preflight_cmd)
     cli_group.add_command(session_group)
     register_skills(cli_group)

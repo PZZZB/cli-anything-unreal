@@ -88,6 +88,17 @@ Task records keep lifecycle `status` separate from the current `phase` (for exam
 
 If crash recovery blocks startup, the launch task returns `EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES` with the matching UnrealEditor PID and window title. Choose **Restore Selected** or **Skip Restore** in that existing editor, then run `editor status`; do not launch a second editor for the project.
 
+For agent-owned interactive sessions, ue-cli can broker standard UE confirmation dialogs through a local mailbox. Arm it before an operation that may prompt:
+
+```powershell
+ue-cli --output json --project "$Project" confirmation enable --ttl 900
+ue-cli --output json --project "$Project" confirmation list
+ue-cli --output json --project "$Project" confirmation answer <id> --choice no
+ue-cli --output json --project "$Project" confirmation disable
+```
+
+The Agent queries explicitly; no background listener is created. Editor-dependent commands return `EDITOR_BLOCKED_BY_CONFIRMATION` with a `next_command` when a standard brokered dialog is pending, including when the current request triggers it and otherwise would time out. `EDITOR_BLOCKED_BY_DIALOG` reports a detected startup/custom window that cannot be answered by CLI. Only `source=bridge`, `answerable=true` items accept `confirmation answer`. The bounded lease must exist before the dialog; expiry or `disable` returns unresolved standard dialogs to normal editor UI. Never auto-click **Restore Packages**.
+
 Controlled launch requires WebRemoteControl, which Unreal does not start under `-NullRHI`. `editor launch` rejects that extra argument before creating a task or starting UnrealEditor. When launch receives `--extra-arg=-abslog=PATH`, task status and startup diagnostics report and inspect that explicit log file.
 
 After status becomes `online`, run a read-only editor query:
@@ -174,7 +185,7 @@ Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem p
 `material get-param` returns the effective scalar, vector, texture, or static-switch value, including values inherited from parent material instances or materials.
 `material info` supports Material, MaterialFunction, and MaterialInstanceConstant assets. Bridge 1.29 reads these assets directly through Remote Control, including graph edges, outputs, textures, and instance parameters, without creating Python expression wrappers. A stale bridge returns `MATERIAL_INFO_BRIDGE_REQUIRED` with an upgrade command.
 `material get-stats` rejects MaterialInstanceConstant assets with `MATERIAL_STATS_UNSUPPORTED_CLASS`; parent-graph counts are not reported as effective compiled-instance statistics.
-Material inspection commands never save packages. Bridge 1.30 runs graph mutations in native C++ and saves only their explicitly targeted package, leaving unrelated dirty work untouched. Material expression UObjects never cross into Python.
+Material inspection commands never save packages. Bridge 1.32 runs graph mutations in native C++ and saves only their explicitly targeted package, leaving unrelated dirty work untouched. Material expression UObjects never cross into Python. When `material connect` targets a `MaterialExpressionSetMaterialAttributes` node, it safely creates the requested attribute input before connecting it; for example, use `--to-input WorldPositionOffset`. Do not write `AttributeSetTypes` or `Inputs` directly: Unreal keeps them as parallel arrays, and an independent `set_editor_property` write can crash the editor. `material add-node --set` rejects those raw properties with `MATERIAL_SET_ATTRIBUTES_UNSAFE_PROPERTY`.
 `material info`, `material analyze`, and `material get-graph` recognize Material Attributes connections as material outputs and trace their upstream graph.
 `material shader-source` refreshes changed engine `.usf`/`.ush` files before synchronous extraction. Success reports `shader_cache_refresh=changed`; an empty extraction returns `MATERIAL_SHADER_SOURCE_FAILED` instead of stale success.
 `material dump-hlsl` rejects an inactive requested shader platform before recompiling, preserves the material package's original dirty flag, and returns a nonzero structured error when no dump or matching shader stage is available.

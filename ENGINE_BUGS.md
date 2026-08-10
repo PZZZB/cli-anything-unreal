@@ -59,7 +59,25 @@ Known Unreal Engine bugs that affect `ue-cli` automation + Python APIs.
   through Remote Control and C++. No material expression crosses into Python;
   mutations then save only the target asset.
 
-### 4. `scene transform` (Remote Control API 400 Error)
+### 4. `SetMaterialAttributes.AttributeSetTypes` direct writes can assert
+
+- **Modules:** `Engine` / `PythonScriptPlugin`
+- **Issue:** `UMaterialExpressionSetMaterialAttributes` stores attribute IDs in
+  `AttributeSetTypes` and matching pins in `Inputs`. Writing only
+  `attribute_set_types` through Python property reflection can leave those
+  arrays out of sync. UE 5.5 and 5.7 then assert while updating cached material
+  expression data (`Array index out of bounds: 1 into an array of size 1`).
+- **CLI behavior:** bridge 1.32 makes `material connect --to-input <attribute>`
+  call the native `CreateOrGetInputAttribute` path on UE 5.5+ before
+  connecting. Earlier supported engines receive the equivalent paired-array
+  mutation because they lack that engine helper. `material add-node --set`
+  rejects direct `AttributeSetTypes` and `Inputs` writes with
+  `MATERIAL_SET_ATTRIBUTES_UNSAFE_PROPERTY`.
+- **Do not use:** `node.set_editor_property("attribute_set_types", [...])`.
+  `editor run-script --no-save` disables autosave; it does not sandbox unsafe
+  Unreal API calls.
+
+### 5. `scene transform` (Remote Control API 400 Error)
 
 - **Module:** `RemoteControl`
 - **Issue:** raw Remote Control reads of intrinsic transform props (`RelativeLocation`, `RelativeRotation`) can return `400 Client Error` from reflection parsing.

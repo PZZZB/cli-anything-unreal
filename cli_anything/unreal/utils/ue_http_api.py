@@ -16,9 +16,11 @@ Supports multi-instance scenarios via configurable port.
 
 import json
 import locale
+import queue
 import re
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -154,11 +156,49 @@ class UEEditorAPI:
         """Build full URL for an endpoint."""
         return f"{self.base_url}/{endpoint.lstrip('/')}"
 
+    def _raise_if_editor_blocked(self, *, include_windows: bool = False) -> None:
+        if not self.project_path:
+            return
+        from cli_anything.unreal.core.confirmations import raise_if_editor_blocked
+
+        raise_if_editor_blocked(self.project_path, include_windows=include_windows)
+
+    def _request_with_confirmation_monitor(self, request, *args, **kwargs):
+        """Return early when this in-flight request opens a brokered dialog."""
+
+        if not self.project_path:
+            return request(*args, **kwargs)
+
+        result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                result_queue.put((True, request(*args, **kwargs)))
+            except Exception as exc:
+                result_queue.put((False, exc))
+
+        threading.Thread(
+            target=invoke,
+            name="ue-cli-http-confirmation-monitor",
+            daemon=True,
+        ).start()
+        while True:
+            try:
+                succeeded, value = result_queue.get(timeout=0.05)
+            except queue.Empty:
+                self._raise_if_editor_blocked()
+                continue
+            if succeeded:
+                return value
+            raise value
+
     def _get(self, endpoint: str, params: dict | None = None, **kwargs) -> dict:
         """Send GET request."""
         timeout = kwargs.pop("timeout", self.timeout)
+        self._raise_if_editor_blocked()
         try:
-            resp = requests.get(
+            resp = self._request_with_confirmation_monitor(
+                requests.get,
                 self._url(endpoint),
                 params=params,
                 timeout=timeout,
@@ -169,13 +209,16 @@ class UEEditorAPI:
         except requests.exceptions.JSONDecodeError:
             return {"status": "ok", "raw": resp.text}
         except requests.exceptions.RequestException as e:
+            self._raise_if_editor_blocked(include_windows=True)
             return {"error": str(e)}
 
     def _put(self, endpoint: str, data: dict | None = None, **kwargs) -> dict:
         """Send PUT request."""
         timeout = kwargs.pop("timeout", self.timeout)
+        self._raise_if_editor_blocked()
         try:
-            resp = requests.put(
+            resp = self._request_with_confirmation_monitor(
+                requests.put,
                 self._url(endpoint),
                 json=data,
                 timeout=timeout,
@@ -186,6 +229,7 @@ class UEEditorAPI:
         except requests.exceptions.JSONDecodeError:
             return {"status": "ok", "raw": resp.text}
         except requests.exceptions.RequestException as e:
+            self._raise_if_editor_blocked(include_windows=True)
             return {"error": str(e)}
 
     # ── Connection ──────────────────────────────────────────────────────
