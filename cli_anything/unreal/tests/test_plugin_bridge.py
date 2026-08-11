@@ -581,7 +581,30 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.32"
+        assert version == "1.33"
+
+    def test_material_compile_errors_support_material_functions(self):
+        """Bridge routes MaterialFunction assets through transient preview materials."""
+        from cli_anything.unreal.core.plugin_bridge import _BUNDLED_PLUGIN_DIR
+
+        header = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Public"
+            / "CliAnythingBridgeLibrary.h"
+        ).read_text(encoding="utf-8")
+        cpp = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+
+        assert "GetMaterialCompileErrors(UObject* Asset)" in header
+        assert "Cast<UMaterialFunctionInterface>(Asset)" in cpp
+        assert "MaterialFunction->GetPreviewMaterial()" in cpp
 
     def test_set_material_attributes_uses_safe_parallel_array_path(self):
         """SetMaterialAttributes IDs and inputs must never be edited independently."""

@@ -510,15 +510,52 @@ mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, ma
 if mat is None:
     result = {{"error": "Material not found: " + material_path, "tried": tried_asset_paths}}
 else:
-    bridge = unreal.CliAnythingBridgeLibrary
-    errors = list(bridge.get_material_compile_errors(mat))
-    result = {{
-        "errors": errors,
-        "warnings": [],
-        "material": loaded_asset_path,
-        "has_errors": len(errors) > 0,
-        "source": "plugin",
-    }}
+    bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+    if bridge is None:
+        result = {{
+            "error": "CliAnythingBridgeLibrary is unavailable in this editor",
+            "bridge_missing": True,
+        }}
+    elif isinstance(mat, unreal.MaterialFunctionInterface):
+        try:
+            loaded_bridge_version = str(bridge.get_plugin_version())
+            loaded_bridge_version_tuple = tuple(int(part) for part in loaded_bridge_version.split("."))
+        except Exception:
+            loaded_bridge_version = None
+            loaded_bridge_version_tuple = ()
+        if loaded_bridge_version_tuple < (1, 33):
+            result = {{
+                "error": "Loaded Bridge does not support MaterialFunction compile errors. Run 'editor plugin-upgrade', then retry material get-errors.",
+                "code": "MATERIAL_FUNCTION_ERRORS_BRIDGE_UPGRADE_REQUIRED",
+                "loaded_version": loaded_bridge_version,
+                "required_version": "1.33",
+            }}
+        else:
+            errors = list(bridge.get_material_compile_errors(mat))
+            result = {{
+                "errors": errors,
+                "warnings": [],
+                "material": loaded_asset_path,
+                "asset_class": mat.get_class().get_name(),
+                "has_errors": len(errors) > 0,
+                "source": "plugin",
+            }}
+    elif isinstance(mat, unreal.MaterialInterface):
+        errors = list(bridge.get_material_compile_errors(mat))
+        result = {{
+            "errors": errors,
+            "warnings": [],
+            "material": loaded_asset_path,
+            "asset_class": mat.get_class().get_name(),
+            "has_errors": len(errors) > 0,
+            "source": "plugin",
+        }}
+    else:
+        result = {{
+            "error": "Unsupported asset class for material get-errors: " + mat.get_class().get_name(),
+            "code": "MATERIAL_ERRORS_UNSUPPORTED_ASSET",
+            "asset_class": mat.get_class().get_name(),
+        }}
 '''
 
 _PLUGIN_GET_HLSL_CODE_SCRIPT = r'''import unreal
@@ -623,7 +660,7 @@ def get_material_errors(
         material_path=material_path,
     )
 
-    if "error" in result and "CliAnythingBridgeLibrary" in result.get("error", ""):
+    if result.get("bridge_missing") is True:
         plugin_dir = f"{project_dir}/Plugins/CliAnythingBridge" if project_dir else "<project>/Plugins/CliAnythingBridge"
         return {
             "error": (

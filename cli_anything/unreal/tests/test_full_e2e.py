@@ -1317,6 +1317,22 @@ class TestMaterialErrorsPluginE2E:
         assert result.get("has_errors") is False
         assert result.get("errors") == []
 
+    def test_clean_material_function_no_errors(self, api, project_path):
+        """Engine MaterialFunction errors use the bridge preview-material path."""
+        from cli_anything.unreal.core.materials import get_material_errors
+
+        project_dir = str(Path(project_path).parent)
+        function_path = "/Engine/Functions/Engine_MaterialFunctions01/Shading/PowerToRoughness"
+        result = get_material_errors(api, function_path, project_dir=project_dir)
+
+        if "error" in result and "not loaded" in result.get("error", ""):
+            pytest.skip("Bridge plugin not loaded in editor")
+
+        assert result.get("source") == "plugin"
+        assert result.get("asset_class") == "MaterialFunction"
+        assert result.get("has_errors") is False
+        assert result.get("errors") == []
+
     def test_broken_material_has_errors(self, api, project_path):
         """Material with invalid Custom HLSL should report compile errors."""
         from cli_anything.unreal.core.materials import (

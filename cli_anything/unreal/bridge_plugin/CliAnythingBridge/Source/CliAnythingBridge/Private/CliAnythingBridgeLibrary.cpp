@@ -194,9 +194,17 @@ static int32 GetTextureSourceNumComponents426(ETextureSourceFormat Format)
 }
 #endif
 
-TArray<FString> UCliAnythingBridgeLibrary::GetMaterialCompileErrors(UMaterialInterface* Material)
+TArray<FString> UCliAnythingBridgeLibrary::GetMaterialCompileErrors(UObject* Asset)
 {
 	TArray<FString> Result;
+	UMaterialInterface* Material = Cast<UMaterialInterface>(Asset);
+	if (!Material)
+	{
+		if (UMaterialFunctionInterface* MaterialFunction = Cast<UMaterialFunctionInterface>(Asset))
+		{
+			Material = MaterialFunction->GetPreviewMaterial();
+		}
+	}
 	if (!Material) return Result;
 	UMaterial* BaseMat = Material->GetMaterial();
 	if (!BaseMat) return Result;
@@ -1199,7 +1207,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.32");
+	return TEXT("1.33");
 }
 
 FString UCliAnythingBridgeLibrary::ConnectMaterialOutput(UMaterial* Material, const FString& FromNode, const FString& FromOutputName, const FString& PropertyName)

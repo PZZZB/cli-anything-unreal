@@ -18,12 +18,12 @@ class CLIANYTHINGBRIDGE_API UCliAnythingBridgeLibrary : public UBlueprintFunctio
 
 public:
 	/**
-	 * Returns the current compile errors for a material, directly from
-	 * FMaterialResource::GetCompileErrors(). Unlike log-based approaches,
-	 * this reflects the exact current state regardless of shader cache.
+	 * Returns the current compile errors for a material or material function,
+	 * directly from FMaterialResource::GetCompileErrors(). Material functions
+	 * use their transient preview material and do not modify the asset.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
-	static TArray<FString> GetMaterialCompileErrors(UMaterialInterface* Material);
+	static TArray<FString> GetMaterialCompileErrors(UObject* Asset);
 
 	/** Returns Material, MaterialFunction, or MaterialInstance details as JSON. */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")

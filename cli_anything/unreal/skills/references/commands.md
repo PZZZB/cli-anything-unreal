@@ -185,7 +185,7 @@ All material commands require editor.
 | `material info MATERIAL_PATH` | Nodes, params, textures, connections, Custom node code |
 | `material get-graph MATERIAL_PATH` | Mermaid topology + orphan detection |
 | `material get-stats MATERIAL_PATH` | Compilation stats |
-| `material get-errors MATERIAL_PATH` | Compilation errors |
+| `material get-errors MATERIAL_PATH` | Compilation errors for Material, MaterialInstanceConstant, or MaterialFunction (Bridge 1.33+) |
 | `material list-textures MATERIAL_PATH` | Referenced textures |
 | `material analyze MATERIAL_PATH` | Common issue detector |
 | `material dump-hlsl MATERIAL_PATH --output PATH [--platform P] [--shader-type T] [--full]` | Compiled HLSL via `r.DumpShaderDebugInfo` |

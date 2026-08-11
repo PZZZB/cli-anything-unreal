@@ -1680,7 +1680,8 @@ class TestMaterialErrorsPlugin:
 
         mock_deploy.return_value = {"deployed": True, "action": "already_up_to_date"}
         mock_exec.return_value = {
-            "error": "AttributeError: module 'unreal' has no attribute 'CliAnythingBridgeLibrary'"
+            "error": "CliAnythingBridgeLibrary is unavailable in this editor",
+            "bridge_missing": True,
         }
 
         result = get_material_errors(MagicMock(), "/Game/M_Test", project_dir="/tmp/proj")
@@ -1688,6 +1689,22 @@ class TestMaterialErrorsPlugin:
         assert "not loaded" in result["error"]
         assert "plugin-upgrade" in result["error"]
         assert "recompile" in result["error"]
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_function_type_error_is_not_misreported_as_missing_plugin(self, mock_exec):
+        """A bridge call type error must retain its real failure classification."""
+        from cli_anything.unreal.core.materials import get_material_errors
+
+        bridge_error = (
+            "CliAnythingBridgeLibrary: Failed to convert parameter 'material' when calling "
+            "function 'CliAnythingBridgeLibrary.GetMaterialCompileErrors'"
+        )
+        mock_exec.return_value = {"error": bridge_error}
+
+        result = get_material_errors(MagicMock(), "/Game/MF_Test", project_dir="/tmp/proj")
+
+        assert result == {"error": bridge_error}
+        assert "not loaded" not in result["error"]
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     @patch("cli_anything.unreal.core.materials.ensure_plugin_deployed")
