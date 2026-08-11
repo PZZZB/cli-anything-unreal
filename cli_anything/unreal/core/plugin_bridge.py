@@ -607,6 +607,27 @@ def compile_bridge_plugin(
             "recovery_command": recovery_command,
         }
 
+    if compile_result.get("status") != "ok":
+        recovered_compile_result = {
+            key: compile_result[key]
+            for key in (
+                "returncode",
+                "duration_seconds",
+                "log_file",
+                "uat_command",
+                "editor_target",
+                "editor_target_source",
+            )
+            if key in compile_result
+        }
+        recovered_compile_result.update({
+            "status": "ok",
+            "output_recovered": True,
+            "recovered_by": "metadata_repair_and_output_validation",
+            "initial_output_validation": compile_result,
+        })
+        result["compile_result"] = recovered_compile_result
+
     return {
         **result,
         "status": "ok",

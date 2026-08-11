@@ -67,7 +67,7 @@ First launch may:
 - enable `RemoteControl`, `PythonScriptPlugin`, `EditorScriptingUtilities`, and `CliAnythingBridge` in the `.uproject`;
 - create or update Remote Control config (`Config/DefaultRemoteControl.ini` on UE5, plus UE4's `Config/DefaultWebRemoteControl.ini` when launching);
 - deploy `Plugins/CliAnythingBridge`;
-- compile only the `CliAnythingBridge` Editor module when its binary is missing or stale, then repair and validate its `UnrealEditor.modules` metadata. Bridge upgrades preserve the previous plugin until that validation passes and restore it with structured rollback details if deployment or compilation fails. If the remaining Editor target output is incomplete, launch stops with a structured full-build reason and recovery command instead of starting a full project build automatically.
+- compile only the `CliAnythingBridge` Editor module when its binary is missing or stale, then repair and validate its `UnrealEditor.modules` metadata. A recovered targeted build reports `compile_result.status: ok` with `output_recovered: true`; its transient failure remains diagnostic history under `initial_output_validation`. Bridge upgrades preserve the previous plugin until validation passes and restore it with structured rollback details if deployment or compilation fails. If the remaining Editor target output is incomplete, launch stops with a structured full-build reason and recovery command instead of starting a full project build automatically.
 
 Commit or back up the project before first launch if these project-file changes need review.
 

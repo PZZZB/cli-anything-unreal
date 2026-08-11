@@ -407,6 +407,82 @@ class TestPluginBridge:
         assert kwargs["use_engine_editor_target_if_missing"] is True
         mock_validate.assert_not_called()
 
+    def test_compile_bridge_plugin_marks_repaired_output_as_recovered(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.plugin_bridge import (
+            compile_bridge_plugin,
+            ensure_plugin_deployed,
+        )
+
+        project_dir = tmp_path / "Project"
+        project_dir.mkdir()
+        uproject = project_dir / "Project.uproject"
+        uproject.write_text('{"FileVersion": 3}', encoding="utf-8")
+        source_dir = project_dir / "Source"
+        source_dir.mkdir()
+        (source_dir / "ProjectEditor.Target.cs").write_text(
+            "Type = TargetType.Editor;",
+            encoding="utf-8",
+        )
+        ensure_plugin_deployed(str(project_dir))
+        engine_root = tmp_path / "EngineRoot"
+        engine_bin = engine_root / "Engine" / "Binaries" / "Win64"
+        engine_bin.mkdir(parents=True)
+        (engine_bin / "UnrealEditor.exe").write_text("fake", encoding="utf-8")
+        (engine_bin / "UnrealEditor.modules").write_text(
+            json.dumps({"BuildId": "engine-build", "Modules": {}}),
+            encoding="utf-8",
+        )
+
+        def targeted_compile(*args, **kwargs):
+            plugin_bin = (
+                project_dir
+                / "Plugins"
+                / "CliAnythingBridge"
+                / "Binaries"
+                / "Win64"
+            )
+            plugin_bin.mkdir(parents=True)
+            (plugin_bin / "UnrealEditor-CliAnythingBridge.dll").write_bytes(b"MZ")
+            return {
+                "status": "error",
+                "returncode": 0,
+                "code": "INVALID_BUILD_OUTPUT",
+                "failure_kind": "missing_editor_module_manifests",
+                "missing_module_manifests": [
+                    str(plugin_bin / "UnrealEditor.modules"),
+                ],
+            }
+
+        with patch(
+            "cli_anything.unreal.core.build.compile_project",
+            side_effect=targeted_compile,
+        ), patch(
+            "cli_anything.unreal.core.build._validate_win64_editor_build_products",
+            return_value={},
+        ) as mock_validate:
+            result = compile_bridge_plugin(
+                str(uproject),
+                engine_root=str(engine_root),
+            )
+
+        assert result["status"] == "ok"
+        assert result["metadata_repair"]["action"] == "created"
+        assert result["output_validation"] == {"status": "ok"}
+        assert result["bridge_binary_status"]["ready"] is True
+        assert result["compile_result"]["status"] == "ok"
+        assert result["compile_result"]["output_recovered"] is True
+        assert result["compile_result"]["recovered_by"] == (
+            "metadata_repair_and_output_validation"
+        )
+        initial_validation = result["compile_result"]["initial_output_validation"]
+        assert initial_validation["status"] == "error"
+        assert initial_validation["code"] == "INVALID_BUILD_OUTPUT"
+        assert initial_validation["failure_kind"] == "missing_editor_module_manifests"
+        mock_validate.assert_called_once()
+
     def test_compile_bridge_plugin_stops_before_full_build_when_target_invalid(
         self,
         tmp_path,
