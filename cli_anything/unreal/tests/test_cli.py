@@ -45,6 +45,7 @@ class TestCLI:
         assert result.exit_code == 0
         assert "-c, --code" in result.output
         assert "--timeout" in result.output
+        assert "default: 30" in result.output
 
     def test_task_wait_returns_completed_task(self):
         from click.testing import CliRunner

@@ -6,6 +6,7 @@ import ast
 import codecs
 import json
 import re
+import shlex
 import subprocess as sp
 import sys
 import time
@@ -2959,21 +2960,67 @@ def _raise_editor_connection_lost(result: dict, operation: str) -> None:
     )
 
 
-def _raise_editor_script_timeout(result: dict, operation: str, timeout: int) -> None:
+def _format_cli_command(parts: list[str]) -> str:
+    if sys.platform == "win32":
+        return sp.list2cmdline(parts)
+    return shlex.join(parts)
+
+
+def _editor_run_script_retry_command(
+    state: AppState,
+    script_path: str | None,
+    *,
+    timeout: int,
+    no_save: bool,
+) -> str | None:
+    if not script_path or script_path == "-":
+        return None
+
+    parts = ["ue-cli", "--output", state.output_mode]
+    if state.session.project_path:
+        parts.extend(["--project", str(Path(state.session.project_path).resolve())])
+    if state.port_is_explicit:
+        parts.extend(["--port", str(state.session.port)])
+    parts.extend(["editor", "run-script", "--timeout", str(timeout)])
+    if no_save:
+        parts.append("--no-save")
+    parts.append(str(Path(script_path).resolve()))
+    return _format_cli_command(parts)
+
+
+def _raise_editor_script_timeout(
+    result: dict,
+    operation: str,
+    timeout: int,
+    *,
+    retry_timeout: int,
+    retry_command: str | None,
+) -> None:
     details = dict(result)
     details["failure_kind"] = "transport_timeout"
     details["operation"] = operation
     details["timeout_seconds"] = timeout
     details["completion_state"] = "unknown"
+    details["retry_timeout_seconds"] = retry_timeout
+    if retry_command:
+        details["retry_command"] = retry_command
+
+    retry_guidance = (
+        f"After verifying it is safe to repeat, retry with: {retry_command}"
+        if retry_command
+        else (
+            "After verifying it is safe to repeat, rerun the original editor run-script "
+            f"command with --timeout {retry_timeout}."
+        )
+    )
     raise AppError(
         "EDITOR_SCRIPT_TIMEOUT",
         f"Editor script timed out after {timeout} seconds without returning a result.",
         exit_code=3,
         details=details,
         suggestion=(
-            f"Run editor status to verify the editor is still online. If the script is expected to run longer, "
-            f"rerun with editor run-script --timeout <seconds> greater than {timeout}. "
-            "Check the project Output Log because the script may still have completed in-editor after the HTTP timeout."
+            "Run editor status and inspect the project Output Log because the previous script may still "
+            f"complete in-editor after the HTTP timeout. {retry_guidance}"
         ),
     )
 
@@ -3098,7 +3145,7 @@ def _raise_unsafe_run_script_operation(unsafe: dict) -> None:
 @editor_group.command("run-script")
 @click.argument("script_path", type=click.Path(exists=False), required=False, default=None)
 @click.option("-c", "--code", default=None, help="Short inline Python code; use '-' or a script file for multiline code.")
-@click.option("--timeout", default=30, type=int, help="Max seconds to wait for results.")
+@click.option("--timeout", default=30, show_default=True, type=int, help="Max seconds to wait for results.")
 @click.option("--no-save", "no_save", is_flag=True, default=False, help="Skip auto-saving dirty packages after script execution.")
 @handle_error
 @click.pass_obj
@@ -3181,7 +3228,20 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
         if _is_transport_disconnect_result(result):
             _raise_editor_connection_lost(result, "editor run-script")
         if _is_transport_timeout_result(result):
-            _raise_editor_script_timeout(result, "editor run-script", timeout)
+            retry_timeout = max(60, timeout * 2)
+            retry_command = _editor_run_script_retry_command(
+                state,
+                script_path,
+                timeout=retry_timeout,
+                no_save=no_save,
+            )
+            _raise_editor_script_timeout(
+                result,
+                "editor run-script",
+                timeout,
+                retry_timeout=retry_timeout,
+                retry_command=retry_command,
+            )
         raise AppError(
             "SCRIPT_EXECUTION_FAILED",
             str(result.get("error")),

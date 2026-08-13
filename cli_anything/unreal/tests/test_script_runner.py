@@ -1768,6 +1768,50 @@ class TestScriptRunner:
         assert data["details"]["failure_kind"] == "transport_timeout"
         assert data["details"]["operation"] == "editor run-script"
         assert data["details"]["timeout_seconds"] == 30
+        assert data["details"]["retry_timeout_seconds"] == 60
+        assert "retry_command" not in data["details"]
+
+    def test_editor_run_script_file_timeout_includes_exact_retry_command(self, tmp_path):
+        """File-backed timeouts should return a safe, copyable retry command."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        project = tmp_path / "Retry Project.uproject"
+        project.write_text("{}\n", encoding="utf-8")
+        script = tmp_path / "slow scan.py"
+        script.write_text("result = {}\n", encoding="utf-8")
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.utils.ue_backend.find_engine_root",
+            return_value=str(tmp_path / "Engine"),
+        ), patch(
+            "cli_anything.unreal.commands.editor.require_editor",
+        ) as mock_editor, patch(
+            "cli_anything.unreal.core.script_runner.run_python_script",
+        ) as mock_run:
+            mock_editor.return_value = MagicMock()
+            mock_run.return_value = {
+                "error": "HTTPConnectionPool(host='localhost', port=30021): Read timed out. (read timeout=30)",
+            }
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "--project", str(project),
+                "--port", "30021",
+                "editor", "run-script", "--no-save", str(script),
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_SCRIPT_TIMEOUT"
+        assert data["details"]["retry_timeout_seconds"] == 60
+        retry_command = data["details"]["retry_command"]
+        assert retry_command.startswith("ue-cli --output json")
+        assert "--timeout 60 --no-save" in retry_command
+        assert "--port 30021" in retry_command
+        assert str(project.resolve()) in retry_command
+        assert str(script.resolve()) in retry_command
+        assert retry_command in data["suggestion"]
 
     def test_editor_new_level_connection_reset_is_top_level_error(self):
         """Level creation transport disconnects should not be wrapped as success."""
