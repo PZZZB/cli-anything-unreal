@@ -35,6 +35,22 @@ class AppState:
         self.output_mode: str = "json"
 
 
+def _global_project_option_suggestion() -> str:
+    """Show the active command with Click's required global-option ordering."""
+
+    context = click.get_current_context(silent=True)
+    command_parts: list[str] = []
+    while context is not None and context.parent is not None:
+        if context.info_name:
+            command_parts.append(context.info_name)
+        context = context.parent
+    command_path = " ".join(reversed(command_parts)) or "<command>"
+    return (
+        "Place the global option before the command: "
+        f"ue-cli --project <path-to.uproject> {command_path}."
+    )
+
+
 def ensure_inferred_project(state: AppState) -> str | None:
     """Bind the nearest cwd project before resolving an editor target."""
 
@@ -54,7 +70,7 @@ def ensure_inferred_project(state: AppState) -> str | None:
             "PROJECT_AMBIGUOUS",
             f"Multiple .uproject files found in {exc.directory}.",
             exit_code=2,
-            suggestion="Pass --project <path-to.uproject> explicitly.",
+            suggestion=_global_project_option_suggestion(),
             details={
                 "directory": str(exc.directory),
                 "candidates": candidates,

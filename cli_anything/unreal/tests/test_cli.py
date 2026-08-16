@@ -1269,8 +1269,38 @@ class TestCLI:
         assert result.exit_code == 2, result.output
         data = json.loads(result.output)
         assert data["code"] == "PROJECT_AMBIGUOUS"
+        assert data["suggestion"] == (
+            "Place the global option before the command: "
+            "ue-cli --project <path-to.uproject> editor open-level."
+        )
         assert len(data["details"]["candidates"]) == 2
         api_cls.assert_not_called()
+
+    def test_editor_preflight_ambiguous_project_suggests_valid_global_option_order(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        (tmp_path / "One.uproject").write_text("{}", encoding="utf-8")
+        (tmp_path / "Two.uproject").write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        with patch("cli_anything.unreal.utils.ue_backend.preflight_check") as preflight:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "editor", "preflight",
+            ])
+
+        assert result.exit_code == 2, result.output
+        data = json.loads(result.output)
+        assert data["code"] == "PROJECT_AMBIGUOUS"
+        assert data["suggestion"] == (
+            "Place the global option before the command: "
+            "ue-cli --project <path-to.uproject> editor preflight."
+        )
+        preflight.assert_not_called()
 
     def test_editor_status_all_allows_ambiguous_cwd_projects(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
