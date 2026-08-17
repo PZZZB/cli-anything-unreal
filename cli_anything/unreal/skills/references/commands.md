@@ -189,7 +189,7 @@ All material commands require editor.
 | `material list-textures MATERIAL_PATH` | Referenced textures |
 | `material analyze MATERIAL_PATH` | Common issue detector |
 | `material dump-hlsl MATERIAL_PATH --output PATH [--platform P] [--shader-type T] [--full]` | Compiled HLSL via `r.DumpShaderDebugInfo` |
-| `material hlsl-code MATERIAL_PATH` | Material HLSL expression source |
+| `material hlsl-code MATERIAL_PATH` | Material/MaterialInstance HLSL source; MaterialFunction returns `MATERIAL_HLSL_CODE_UNSUPPORTED_ASSET` |
 | `material shader-source MATERIAL_PATH` | Compiled `.usf` sources with cbuffers/structs |
 
 ### Editing

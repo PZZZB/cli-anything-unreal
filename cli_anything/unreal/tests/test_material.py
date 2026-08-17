@@ -193,7 +193,65 @@ class TestMaterials:
         assert "mat, loaded_asset_path, tried_asset_paths = _cli_load_material" in script
         assert 'material_candidates = ["/Game/Drone/MA_Glow", "/Game/Drone/MA_Glow.MA_Glow"]' in script
         assert '"material": loaded_asset_path' in script
+        assert 'bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)' in script
+        assert '"code": "MATERIAL_HLSL_CODE_UNSUPPORTED_ASSET"' in script
         compile(script, "<material-hlsl-script>", "exec")
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_hlsl_code_missing_bridge_has_upgrade_guidance(self, mock_exec):
+        from cli_anything.unreal.core.materials import get_material_hlsl_code
+
+        mock_exec.return_value = {
+            "error": "CliAnythingBridgeLibrary is unavailable in this editor",
+            "bridge_missing": True,
+        }
+
+        result = get_material_hlsl_code(MagicMock(), "/Game/M_Test")
+
+        assert "not loaded" in result["error"]
+        assert "plugin-upgrade" in result["error"]
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_hlsl_code_type_error_is_not_misreported_as_missing_bridge(self, mock_exec):
+        from cli_anything.unreal.core.materials import get_material_hlsl_code
+
+        bridge_error = (
+            "CliAnythingBridgeLibrary: Failed to convert parameter 'material' when calling "
+            "function 'CliAnythingBridgeLibrary.GetMaterialHLSLCode'"
+        )
+        mock_exec.return_value = {"error": bridge_error, "error_type": "TypeError"}
+
+        result = get_material_hlsl_code(MagicMock(), "/Game/MF_Test")
+
+        assert result == {"error": bridge_error, "error_type": "TypeError"}
+        assert "not loaded" not in result["error"]
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_material_hlsl_code_cli_preserves_unsupported_asset_code(self, mock_exec):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec.return_value = {
+            "error": "Unsupported asset class for material hlsl-code: MaterialFunction",
+            "code": "MATERIAL_HLSL_CODE_UNSUPPORTED_ASSET",
+            "asset_class": "MaterialFunction",
+            "supported_classes": ["Material", "MaterialInstanceConstant"],
+        }
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.material.require_editor",
+            return_value=MagicMock(),
+        ), patch("cli_anything.unreal.commands.material.require_project"):
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "material", "hlsl-code", "/Game/MF_Test",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "MATERIAL_HLSL_CODE_UNSUPPORTED_ASSET"
+        assert data["details"]["asset_class"] == "MaterialFunction"
 
     @patch("cli_anything.unreal.core.script_runner.run_python_code")
     def test_material_shader_source_script_is_valid_python(self, mock_run):

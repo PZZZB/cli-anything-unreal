@@ -567,24 +567,37 @@ mat, loaded_asset_path, tried_asset_paths = _cli_load_material(material_path, ma
 if mat is None:
     result = {{"error": "Material not found: " + material_path, "tried": tried_asset_paths}}
 else:
-    bridge = unreal.CliAnythingBridgeLibrary
-    # Construct output path under project Saved/CliAnything/
-    _saved = unreal.Paths.project_saved_dir()
-    output_path = os.path.join(_saved, "CliAnything", "{mat_name}.ush")
-    output_path = output_path.replace("\\", "/")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    ret = bridge.get_material_hlsl_code(mat, output_path)
-    if ret:
-        with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = len(f.readlines())
+    bridge = getattr(unreal, "CliAnythingBridgeLibrary", None)
+    if bridge is None:
         result = {{
-            "material": loaded_asset_path,
-            "file": output_path,
-            "lines": lines,
-            "source": "plugin",
+            "error": "CliAnythingBridgeLibrary is unavailable in this editor",
+            "bridge_missing": True,
+        }}
+    elif not isinstance(mat, unreal.MaterialInterface):
+        result = {{
+            "error": "Unsupported asset class for material hlsl-code: " + mat.get_class().get_name(),
+            "code": "MATERIAL_HLSL_CODE_UNSUPPORTED_ASSET",
+            "asset_class": mat.get_class().get_name(),
+            "supported_classes": ["Material", "MaterialInstanceConstant"],
         }}
     else:
-        result = {{"error": "GetMaterialHLSLCode returned empty. Material may not be compiled yet."}}
+        # Construct output path under project Saved/CliAnything/
+        _saved = unreal.Paths.project_saved_dir()
+        output_path = os.path.join(_saved, "CliAnything", "{mat_name}.ush")
+        output_path = output_path.replace("\\", "/")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        ret = bridge.get_material_hlsl_code(mat, output_path)
+        if ret:
+            with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = len(f.readlines())
+            result = {{
+                "material": loaded_asset_path,
+                "file": output_path,
+                "lines": lines,
+                "source": "plugin",
+            }}
+        else:
+            result = {{"error": "GetMaterialHLSLCode returned empty. Material may not be compiled yet."}}
 '''
 
 _PLUGIN_GET_SHADER_SOURCE_SCRIPT = r'''import unreal
@@ -690,7 +703,8 @@ def get_material_hlsl_code(
 
     Args:
         api: Connected UEEditorAPI instance.
-        material_path: Content path (e.g. /Game/M_Test).
+        material_path: Material or MaterialInstanceConstant content path
+            (e.g. /Game/M_Test). MaterialFunction is unsupported.
         output_path: Optional custom output path. Defaults to project Saved dir.
         project_dir: Project directory for auto-deploying the plugin.
 
@@ -713,7 +727,7 @@ def get_material_hlsl_code(
         mat_name=mat_name,
     )
 
-    if "error" in result and "CliAnythingBridgeLibrary" in result.get("error", ""):
+    if result.get("bridge_missing") is True:
         plugin_dir = f"{project_dir}/Plugins/CliAnythingBridge" if project_dir else "<project>/Plugins/CliAnythingBridge"
         return {
             "error": (

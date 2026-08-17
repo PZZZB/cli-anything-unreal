@@ -148,6 +148,7 @@ For Custom HLSL, discover available cbuffers/structs (`cbuffer View`, `FPrimitiv
 ### `material hlsl-code` - Lightweight, No Recompile
 
 Returns `/Engine/Generated/Material.ush` with `FMaterialPixelParameters` + material structs. No `cbuffer View`.
+Supports Material and MaterialInstanceConstant assets. MaterialFunction assets return `MATERIAL_HLSL_CODE_UNSUPPORTED_ASSET`.
 
 ```bash
 ue-cli material hlsl-code /Game/M_Custom

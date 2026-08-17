@@ -514,11 +514,12 @@ def material_recompile(state: AppState, material_path):
 @handle_error
 @click.pass_obj
 def material_hlsl_code(state: AppState, material_path):
-    """Get material HLSL expression source code (Material.ush).
+    """Get Material or MaterialInstance HLSL expression source (Material.ush).
 
     Returns the translated HLSL from FMaterialResource::GetMaterialExpressionSource().
     Contains FMaterialPixelParameters struct and all Custom node code.
     Does NOT contain cbuffer View or Primitive definitions (use shader-source for that).
+    MaterialFunction assets return MATERIAL_HLSL_CODE_UNSUPPORTED_ASSET.
 
     Output: <project>/Saved/CliAnything/<MaterialName>.ush
 
