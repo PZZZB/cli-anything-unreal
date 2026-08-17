@@ -8,6 +8,7 @@ class UMaterial;
 class UMaterialInterface;
 class UBlueprint;
 class UTexture2D;
+class UStaticMeshComponent;
 class UScriptStruct;
 class UWidgetBlueprint;
 
@@ -177,6 +178,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString GetActorComponentTree(AActor* Actor, bool bIncludeVisualization = false);
+
+	/**
+	 * Reads non-reflected per-LOD vertex-paint data from a StaticMeshComponent.
+	 * Supports PaintedVertices and OverrideVertexColors. Returns JSON.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CliAnything")
+	static FString GetStaticMeshComponentLODProperty(UStaticMeshComponent* Component, int32 LODIndex, const FString& PropertyName);
 
 	/**
 	 * Blueprint editing compatibility surface. UE 4.26 does not expose

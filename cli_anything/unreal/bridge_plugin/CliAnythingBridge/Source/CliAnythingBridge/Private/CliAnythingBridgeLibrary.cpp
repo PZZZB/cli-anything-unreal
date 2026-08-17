@@ -38,6 +38,11 @@
 #include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
+#if ENGINE_MAJOR_VERSION >= 5
+#include "StaticMeshComponentLODInfo.h"
+#endif
+#include "Rendering/ColorVertexBuffer.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
@@ -1207,7 +1212,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.33");
+	return TEXT("1.34");
 }
 
 FString UCliAnythingBridgeLibrary::ConnectMaterialOutput(UMaterial* Material, const FString& FromNode, const FString& FromOutputName, const FString& PropertyName)
@@ -2055,4 +2060,86 @@ FString UCliAnythingBridgeLibrary::GetActorComponentTree(AActor* Actor, bool bIn
 	}
 	Json += TEXT("]");
 	return Json;
+}
+
+FString UCliAnythingBridgeLibrary::GetStaticMeshComponentLODProperty(
+	UStaticMeshComponent* Component,
+	int32 LODIndex,
+	const FString& PropertyName)
+{
+	if (!Component) return JsonError(TEXT("StaticMeshComponent is null."));
+	if (!Component->LODData.IsValidIndex(LODIndex))
+	{
+		return FString::Printf(
+			TEXT("{\"error\":\"LODData index out of range: %d\",\"lod_index\":%d,\"lod_count\":%d}"),
+			LODIndex,
+			LODIndex,
+			Component->LODData.Num());
+	}
+
+	const FStaticMeshComponentLODInfo& LODInfo = Component->LODData[LODIndex];
+	FString ValueJson;
+	if (PropertyName.Equals(TEXT("PaintedVertices"), ESearchCase::IgnoreCase))
+	{
+		ValueJson = TEXT("[");
+		for (int32 Index = 0; Index < LODInfo.PaintedVertices.Num(); ++Index)
+		{
+			if (Index > 0) ValueJson += TEXT(",");
+			const FPaintedVertex& Vertex = LODInfo.PaintedVertices[Index];
+			ValueJson += FString::Printf(
+				TEXT("{\"position\":{\"x\":%s,\"y\":%s,\"z\":%s},")
+				TEXT("\"normal\":{\"x\":%s,\"y\":%s,\"z\":%s,\"w\":%s},")
+				TEXT("\"color\":{\"r\":%d,\"g\":%d,\"b\":%d,\"a\":%d}}"),
+				*FString::SanitizeFloat(Vertex.Position.X),
+				*FString::SanitizeFloat(Vertex.Position.Y),
+				*FString::SanitizeFloat(Vertex.Position.Z),
+				*FString::SanitizeFloat(Vertex.Normal.X),
+				*FString::SanitizeFloat(Vertex.Normal.Y),
+				*FString::SanitizeFloat(Vertex.Normal.Z),
+				*FString::SanitizeFloat(Vertex.Normal.W),
+				static_cast<int32>(Vertex.Color.R),
+				static_cast<int32>(Vertex.Color.G),
+				static_cast<int32>(Vertex.Color.B),
+				static_cast<int32>(Vertex.Color.A));
+		}
+		ValueJson += TEXT("]");
+	}
+	else if (PropertyName.Equals(TEXT("OverrideVertexColors"), ESearchCase::IgnoreCase))
+	{
+		if (!LODInfo.OverrideVertexColors)
+		{
+			ValueJson = TEXT("null");
+		}
+		else
+		{
+			const FColorVertexBuffer& Colors = *LODInfo.OverrideVertexColors;
+			ValueJson = FString::Printf(
+				TEXT("{\"num_vertices\":%u,\"stride\":%u,\"allocated_size\":%u,\"colors\":["),
+				Colors.GetNumVertices(),
+				Colors.GetStride(),
+				Colors.GetAllocatedSize());
+			for (uint32 Index = 0; Index < Colors.GetNumVertices(); ++Index)
+			{
+				if (Index > 0) ValueJson += TEXT(",");
+				const FColor& Color = Colors.VertexColor(Index);
+				ValueJson += FString::Printf(
+					TEXT("{\"r\":%d,\"g\":%d,\"b\":%d,\"a\":%d}"),
+					static_cast<int32>(Color.R),
+					static_cast<int32>(Color.G),
+					static_cast<int32>(Color.B),
+					static_cast<int32>(Color.A));
+			}
+			ValueJson += TEXT("]}");
+		}
+	}
+	else
+	{
+		return JsonError(TEXT("Unsupported StaticMeshComponent LOD property: ") + PropertyName);
+	}
+
+	return FString::Printf(
+		TEXT("{\"status\":\"ok\",\"lod_index\":%d,\"property\":\"%s\",\"value\":%s}"),
+		LODIndex,
+		*JsonEscape(PropertyName),
+		*ValueJson);
 }

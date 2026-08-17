@@ -73,6 +73,8 @@ def scene_property(state: AppState, object_path, expression):
         scene property <actor_path> Tags
         # Write Intensity on the DirectionalLightComponent subobject
         scene property <actor_path>.LightComponent0 Intensity=5.0
+        # Read instance-painted vertex data (Bridge 1.34+)
+        scene property <static_mesh_component_path> LODData[0].PaintedVertices
         # Toggle bHidden on actor
         scene property <actor_path> bHidden=true
     """

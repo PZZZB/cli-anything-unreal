@@ -10,10 +10,86 @@ Key Remote Control endpoints used:
   PUT /remote/object/describe  — List all properties & functions on an object
 """
 
+import json
+import re
 import time
 
 
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+
+_BRIDGE_CDO = "/Script/CliAnythingBridge.Default__CliAnythingBridgeLibrary"
+_STATIC_MESH_LOD_PROPERTY = re.compile(
+    r"^LODData\[(\d+)\]\.(OverrideVertexColors|PaintedVertices)$",
+    re.IGNORECASE,
+)
+
+
+def _get_static_mesh_lod_property(
+    api: UEEditorAPI,
+    object_path: str,
+    property_name: str,
+    match: re.Match[str],
+) -> dict:
+    """Read non-reflected StaticMeshComponent LOD fields via native bridge."""
+    lod_index = int(match.group(1))
+    field_name = match.group(2)
+    canonical_field = (
+        "OverrideVertexColors"
+        if field_name.casefold() == "overridevertexcolors"
+        else "PaintedVertices"
+    )
+    response = api.call_function(
+        _BRIDGE_CDO,
+        "GetStaticMeshComponentLODProperty",
+        {
+            "Component": object_path,
+            "LODIndex": lod_index,
+            "PropertyName": canonical_field,
+        },
+        timeout=30,
+    )
+    raw = response.get("ReturnValue")
+    if not isinstance(raw, str):
+        return {
+            "error": (
+                f"Property expression '{property_name}' requires "
+                "CliAnythingBridge 1.34 or newer."
+            ),
+            "object_path": object_path,
+            "property": property_name,
+            "detail": response.get("error", response),
+            "suggestion": "Run 'editor plugin-upgrade', relaunch the editor, then retry.",
+        }
+    try:
+        bridge_result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {
+            "error": f"Native property reader returned invalid JSON: {exc}",
+            "object_path": object_path,
+            "property": property_name,
+        }
+    if not isinstance(bridge_result, dict):
+        return {
+            "error": "Native property reader returned non-object JSON.",
+            "object_path": object_path,
+            "property": property_name,
+        }
+    if bridge_result.get("error"):
+        bridge_result.setdefault("object_path", object_path)
+        bridge_result.setdefault("property", property_name)
+        return bridge_result
+    if "value" not in bridge_result:
+        return {
+            "error": "Native property reader response omitted value.",
+            "object_path": object_path,
+            "property": property_name,
+            "detail": bridge_result,
+        }
+    return {
+        property_name: bridge_result["value"],
+        "read_via": "native_bridge",
+    }
 
 
 def list_actors(
@@ -174,6 +250,15 @@ def get_actor_property(api: UEEditorAPI, object_path: str, property_name: str) -
     result = api.get_property(object_path, property_name)
     if "not accessible via Remote Control" not in str(result.get("error", "")):
         return result
+
+    lod_match = _STATIC_MESH_LOD_PROPERTY.fullmatch(property_name)
+    if lod_match:
+        return _get_static_mesh_lod_property(
+            api,
+            object_path,
+            property_name,
+            lod_match,
+        )
 
     # Remote Control omits some useful reflected component properties,
     # including StaticMesh. Unreal Python can still read those editor-exposed

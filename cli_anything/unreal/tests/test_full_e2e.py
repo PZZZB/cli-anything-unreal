@@ -2227,6 +2227,46 @@ class TestSceneE2E:
         if "read_via" in payload["result"]:
             assert payload["result"]["read_via"] == "unreal_python"
 
+    def test_scene_property_reads_static_mesh_lod_vertex_paint_fields(self, cli_runner, api_port, api):
+        """Native bridge reads non-reflected LODData vertex-paint fields."""
+        from cli_anything.unreal.core.scene import get_actor_components, list_actors
+        from cli_anything.unreal.unreal_cli import cli
+
+        mesh_component = None
+        inspected_components = []
+        actors = list_actors(api, actor_class="StaticMeshActor").get("actors", [])
+        for actor in actors:
+            components = get_actor_components(api, actor["path"]).get("components", [])
+            for component in components:
+                if component["class"] != "StaticMeshComponent":
+                    continue
+                inspected_components.append(component["path"])
+                lod_data = api.get_property(component["path"], "LODData").get("LODData")
+                if isinstance(lod_data, list) and lod_data:
+                    mesh_component = component
+                    break
+            if mesh_component is not None:
+                break
+        if mesh_component is None:
+            pytest.skip(
+                "No StaticMeshComponent with LODData[0] is available; "
+                f"inspected {inspected_components}"
+            )
+
+        for expression, expected_type in (
+            ("LODData[0].PaintedVertices", list),
+            ("LODData[0].OverrideVertexColors", (dict, type(None))),
+        ):
+            read_result = cli_runner.invoke(cli, [
+                "--output", "json", "--port", str(api_port),
+                "scene", "property", mesh_component["path"], expression,
+            ])
+            assert read_result.exit_code == 0, read_result.output
+            payload = json.loads(read_result.output)
+            assert payload["status"] == "success"
+            assert isinstance(payload["result"][expression], expected_type)
+            assert payload["result"]["read_via"] == "native_bridge"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  E2E: Asset Management

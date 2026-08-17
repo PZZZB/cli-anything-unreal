@@ -162,6 +162,62 @@ class TestScene:
         assert "return _value.get_path_name()" in script
         mock_run.assert_called_once_with(api, script, save=False)
 
+    def test_get_actor_property_reads_static_mesh_lod_field_through_bridge(self):
+        from cli_anything.unreal.core.scene import get_actor_property
+
+        api = self._mock_api()
+        api.get_property.return_value = {
+            "error": "Property 'LODData[0].PaintedVertices' is not accessible via Remote Control (likely private)."
+        }
+        api.call_function.return_value = {
+            "ReturnValue": json.dumps({
+                "status": "ok",
+                "lod_index": 0,
+                "property": "PaintedVertices",
+                "value": [],
+            })
+        }
+
+        result = get_actor_property(
+            api,
+            "/Game/Map:Actor_0.StaticMeshComponent0",
+            "LODData[0].PaintedVertices",
+        )
+
+        assert result == {
+            "LODData[0].PaintedVertices": [],
+            "read_via": "native_bridge",
+        }
+        api.call_function.assert_called_once_with(
+            "/Script/CliAnythingBridge.Default__CliAnythingBridgeLibrary",
+            "GetStaticMeshComponentLODProperty",
+            {
+                "Component": "/Game/Map:Actor_0.StaticMeshComponent0",
+                "LODIndex": 0,
+                "PropertyName": "PaintedVertices",
+            },
+            timeout=30,
+        )
+
+    def test_get_actor_property_reports_bridge_upgrade_for_static_mesh_lod_field(self):
+        from cli_anything.unreal.core.scene import get_actor_property
+
+        api = self._mock_api()
+        api.get_property.return_value = {
+            "error": "Property is not accessible via Remote Control (likely private)."
+        }
+        api.call_function.return_value = {"error": "Function not found"}
+
+        result = get_actor_property(
+            api,
+            "/Game/Map:Actor_0.StaticMeshComponent0",
+            "LODData[2].OverrideVertexColors",
+        )
+
+        assert "CliAnythingBridge 1.34 or newer" in result["error"]
+        assert "plugin-upgrade" in result["suggestion"]
+        assert result["detail"] == "Function not found"
+
     def test_get_actor_property_does_not_mask_other_remote_control_errors(self):
         from cli_anything.unreal.core.scene import get_actor_property
 

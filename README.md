@@ -177,11 +177,13 @@ ue-cli --output json --project "$Project" material get-param /Game/MyMaterialIns
 ue-cli --output json --project "$Project" material shader-source /Game/MyMaterial
 ue-cli --output json --project "$Project" screenshot capture --path "F:/output/material_check.png"
 ue-cli --output json --project "$Project" screenshot capture --path "F:/output/stat_evidence.png" --include-ui
+ue-cli --output json --project "$Project" scene property "<StaticMeshComponentPath>" "LODData[0].PaintedVertices"
 ue-cli --output json --project "$Project" editor run-script --no-save -c 'result={"label":"quoted value"}'
 ue-cli --output json --project "$Project" editor cvar get r.VSync --timeout 10
 ```
 
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
+Bridge 1.34 lets `scene property` read StaticMeshComponent instance-paint fields through `LODData[N].PaintedVertices` and `LODData[N].OverrideVertexColors`. Those fields are native, non-reflected data; writes remain unsupported.
 `material get-param` returns the effective scalar, vector, texture, or static-switch value, including values inherited from parent material instances or materials.
 `material info` supports Material, MaterialFunction, and MaterialInstanceConstant assets. Bridge 1.29 reads these assets directly through Remote Control, including graph edges, outputs, textures, and instance parameters, without creating Python expression wrappers. A stale bridge returns `MATERIAL_INFO_BRIDGE_REQUIRED` with an upgrade command.
 

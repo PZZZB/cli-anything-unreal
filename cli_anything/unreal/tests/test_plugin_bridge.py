@@ -581,7 +581,30 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.33"
+        assert version == "1.34"
+
+    def test_static_mesh_lod_property_reader_uses_native_vertex_paint_data(self):
+        """Bridge exposes LOD fields omitted from Unreal reflection."""
+        from cli_anything.unreal.core.plugin_bridge import _BUNDLED_PLUGIN_DIR
+
+        header = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Public"
+            / "CliAnythingBridgeLibrary.h"
+        ).read_text(encoding="utf-8")
+        cpp = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+
+        assert "GetStaticMeshComponentLODProperty" in header
+        assert "LODInfo.PaintedVertices" in cpp
+        assert "LODInfo.OverrideVertexColors" in cpp
 
     def test_material_compile_errors_support_material_functions(self):
         """Bridge routes MaterialFunction assets through transient preview materials."""
