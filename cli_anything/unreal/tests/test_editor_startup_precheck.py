@@ -4053,6 +4053,93 @@ def test_wait_for_api_timeout_keeps_startup_log_window_for_diagnostics(tmp_path)
     assert any("FalconTunnel" in hint for hint in result["log_hints"])
 
 
+def test_wait_for_api_missing_virtual_shader_reports_full_editor_rebuild(tmp_path):
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
+
+    project_path = r"F:\CustomEngineGame\Game.uproject"
+    log_file = tmp_path / "Game.log"
+    log_file.write_text("previous launch\n", encoding="utf-8")
+    proc = MagicMock(pid=4242)
+    wrote_fatal = False
+
+    def append_fatal_while_process_is_alive():
+        nonlocal wrote_fatal
+        if not wrote_fatal:
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    "Fatal error: [ShaderCore.cpp] [Line: 2823] "
+                    "Couldn't find source file of virtual shader path "
+                    "'/Engine/Private/VirtualTextureBCUpload.usf'\n"
+                )
+            wrote_fatal = True
+        return None
+
+    proc.poll.side_effect = append_fatal_while_process_is_alive
+    state = MagicMock()
+    state.json_output = True
+    state.session.project_path = project_path
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI"
+    ) as api_cls, patch(
+        "cli_anything.unreal.core.editor_lifecycle._restore_packages_blocker",
+        return_value=None,
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle.time.time",
+        side_effect=[100.0, 101.0, 103.1],
+    ):
+        api_cls.return_value.is_alive.return_value = False
+        result = _wait_for_api(proc, 30010, 10, log_file, state)
+
+    assert result["status"] == "error_dialog"
+    assert result["failure_kind"] == "engine_binary_source_mismatch"
+    assert result["likely_cause"] == "stale_or_mixed_engine_binaries"
+    assert result["diagnostic_basis"] == "registered_virtual_shader_source_missing"
+    assert result["missing_virtual_shader_path"] == (
+        "/Engine/Private/VirtualTextureBCUpload.usf"
+    )
+    assert result["requires_full_editor_rebuild"] is True
+    assert result["recovery_command"] == (
+        f'ue-cli --project "{project_path}" build compile '
+        "--platform Win64 --config Development"
+    )
+    assert "--module" not in result["recovery_command"]
+
+
+@pytest.mark.parametrize("returncode", [3221225785, -1073741511])
+def test_wait_for_api_entrypoint_not_found_reports_full_editor_rebuild(
+    tmp_path,
+    returncode,
+):
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
+
+    project_path = r"F:\CustomEngineGame\Game.uproject"
+    log_file = tmp_path / "Game.log"
+    log_file.write_text("previous launch\n", encoding="utf-8")
+    proc = MagicMock(pid=4242)
+    proc.poll.return_value = returncode
+    state = MagicMock()
+    state.json_output = True
+    state.session.project_path = project_path
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI"
+    ) as api_cls:
+        api_cls.return_value.is_alive.return_value = False
+        result = _wait_for_api(proc, 30010, 10, log_file, state)
+
+    assert result["status"] == "crashed"
+    assert result["failure_kind"] == "engine_binary_entrypoint_mismatch"
+    assert result["windows_status"] == "STATUS_ENTRYPOINT_NOT_FOUND"
+    assert result["returncode_hex"] == "0xC0000139"
+    assert result["requires_full_editor_rebuild"] is True
+    assert result["recovery_command"] == (
+        f'ue-cli --project "{project_path}" build compile '
+        "--platform Win64 --config Development"
+    )
+    assert "--module" not in result["recovery_command"]
+
+
 def test_remote_control_diagnostics_ignore_old_and_other_port_bind_failures(tmp_path):
     from cli_anything.unreal.core.editor_lifecycle import _diagnose_api_unreachable
 
@@ -4487,6 +4574,76 @@ def test_run_editor_launch_task_timeout_returns_exact_poll_command(tmp_path, mon
     assert result["status"] == "timeout"
     assert result["result"]["next_command"] == expected
     assert result["error"]["details"]["next_command"] == expected
+
+
+@pytest.mark.parametrize(
+    ("wait_result", "expected_code"),
+    [
+        (
+            {
+                "status": "error_dialog",
+                "failure_kind": "engine_binary_source_mismatch",
+                "error": "Missing registered virtual shader source.",
+            },
+            "EDITOR_ENGINE_BINARY_SOURCE_MISMATCH",
+        ),
+        (
+            {
+                "status": "crashed",
+                "failure_kind": "engine_binary_entrypoint_mismatch",
+                "error": "Editor exited with STATUS_ENTRYPOINT_NOT_FOUND.",
+            },
+            "EDITOR_ENGINE_BINARY_ENTRYPOINT_MISMATCH",
+        ),
+    ],
+)
+def test_run_editor_launch_task_promotes_engine_binary_mismatch_code(
+    tmp_path,
+    monkeypatch,
+    wait_result,
+    expected_code,
+):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text(
+        '{"FileVersion": 3, "EngineAssociation": "5.7"}',
+        encoding="utf-8",
+    )
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+        "timeout": 120,
+    })
+    proc = MagicMock(pid=4242)
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"ready": True, "errors": [], "warnings": []},
+        "project": {"ready": True, "errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value=wait_result):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == expected_code
+    assert result["error"]["details"] == wait_result
 
 
 def test_run_editor_launch_task_reports_restore_packages_error(tmp_path, monkeypatch):

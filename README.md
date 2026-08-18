@@ -102,6 +102,8 @@ The Agent queries explicitly; no background listener is created. Editor-dependen
 
 Controlled launch requires WebRemoteControl, which Unreal does not start under `-NullRHI`. `editor launch` rejects that extra argument before creating a task or starting UnrealEditor. When launch receives `--extra-arg=-abslog=PATH`, task status and startup diagnostics report and inspect that explicit log file.
 
+If startup reports a missing registered virtual shader source or Windows `STATUS_ENTRYPOINT_NOT_FOUND`, `editor launch` returns `EDITOR_ENGINE_BINARY_SOURCE_MISMATCH` or `EDITOR_ENGINE_BINARY_ENTRYPOINT_MISMATCH`. These signatures can follow a custom Engine branch switch that leaves stale or mixed DLLs. Use the returned `recovery_command` to compile the full Editor target without `--module`, then retry launch.
+
 After status becomes `online`, run a read-only editor query:
 
 ```powershell

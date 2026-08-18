@@ -2299,6 +2299,22 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "message": wait_result.get("error", "Editor crashed during launch map recovery."),
             "details": wait_result,
         }
+    elif wait_result.get("failure_kind") == "engine_binary_source_mismatch":
+        final_status = "failed"
+        final_phase = "blocked"
+        final_error = {
+            "code": "EDITOR_ENGINE_BINARY_SOURCE_MISMATCH",
+            "message": wait_result.get("error", "Engine binary/source mismatch detected during startup."),
+            "details": wait_result,
+        }
+    elif wait_result.get("failure_kind") == "engine_binary_entrypoint_mismatch":
+        final_status = "failed"
+        final_phase = "exited"
+        final_error = {
+            "code": "EDITOR_ENGINE_BINARY_ENTRYPOINT_MISMATCH",
+            "message": wait_result.get("error", "Engine DLL entry-point mismatch detected during startup."),
+            "details": wait_result,
+        }
     else:
         final_status = "failed"
         final_phase = "exited"

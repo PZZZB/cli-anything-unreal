@@ -21,6 +21,12 @@ _FATAL_LOG_PATTERNS = [
     "Assertion failed:",
 ]
 
+_WINDOWS_STATUS_ENTRYPOINT_NOT_FOUND = 0xC0000139
+_MISSING_VIRTUAL_SHADER_SOURCE_PATTERN = re.compile(
+    r"Couldn't find source file of virtual shader path\s+['\"](?P<shader_path>[^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+
 
 def _active_launch_task_for_project(
     project_path: str | None,
@@ -226,6 +232,59 @@ def _extract_log_error(text: str) -> tuple[str | None, str | None]:
             end = min(len(text), match.end() + 300)
             return text[start:end].strip(), pattern
     return None, None
+
+
+def _full_editor_rebuild_diagnostics(
+    *,
+    project_path: str | None,
+    log_error: str | None = None,
+    returncode: int | None = None,
+) -> dict:
+    """Recognize launch signatures that need a full, non-module Editor rebuild."""
+    diagnostic_basis = None
+    failure_kind = None
+    shader_path = None
+    if log_error:
+        shader_match = _MISSING_VIRTUAL_SHADER_SOURCE_PATTERN.search(log_error)
+        if shader_match:
+            diagnostic_basis = "registered_virtual_shader_source_missing"
+            failure_kind = "engine_binary_source_mismatch"
+            shader_path = shader_match.group("shader_path")
+
+    normalized_returncode = None
+    if returncode is not None:
+        try:
+            normalized_returncode = int(returncode) & 0xFFFFFFFF
+        except (TypeError, ValueError):
+            normalized_returncode = None
+        if normalized_returncode == _WINDOWS_STATUS_ENTRYPOINT_NOT_FOUND:
+            diagnostic_basis = "windows_status_entrypoint_not_found"
+            failure_kind = "engine_binary_entrypoint_mismatch"
+
+    if failure_kind is None:
+        return {}
+
+    result = {
+        "failure_kind": failure_kind,
+        "likely_cause": "stale_or_mixed_engine_binaries",
+        "diagnostic_basis": diagnostic_basis,
+        "requires_full_editor_rebuild": True,
+        "suggestion": (
+            "The checked-out Engine source and loaded DLL set may be inconsistent. "
+            "Run a full Editor target compile without --module, then retry editor launch."
+        ),
+    }
+    if project_path:
+        result["recovery_command"] = (
+            f'ue-cli --project "{project_path}" build compile '
+            "--platform Win64 --config Development"
+        )
+    if shader_path:
+        result["missing_virtual_shader_path"] = shader_path
+    if normalized_returncode == _WINDOWS_STATUS_ENTRYPOINT_NOT_FOUND:
+        result["windows_status"] = "STATUS_ENTRYPOINT_NOT_FOUND"
+        result["returncode_hex"] = "0xC0000139"
+    return result
 
 def _check_log_errors(log_file: Path) -> str | None:
     if not log_file.exists():
@@ -589,6 +648,12 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
             if log_tail:
                 crash_result["log_tail"] = log_tail
             project_path = getattr(state.session, "project_path", None)
+            crash_result.update(
+                _full_editor_rebuild_diagnostics(
+                    project_path=project_path,
+                    returncode=returncode,
+                )
+            )
             if project_path:
                 crash_result["next_command"] = (
                     f'ue-cli --project "{project_path}" editor launch'
@@ -659,11 +724,18 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
         if elapsed > 2:
             log_error, log_offset = _check_log_errors_incremental(log_file, log_offset)
             if log_error:
-                return {
+                error_result = {
                     "status": "error_dialog",
                     "log_file": str(log_file),
                     "error": f"Editor appears stuck on an error dialog: {log_error}",
                 }
+                error_result.update(
+                    _full_editor_rebuild_diagnostics(
+                        project_path=getattr(state.session, "project_path", None),
+                        log_error=log_error,
+                    )
+                )
+                return error_result
 
         now = time.time()
         if now >= next_beat:
