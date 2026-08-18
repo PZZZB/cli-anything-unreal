@@ -1316,6 +1316,8 @@ SHADER_PLATFORMS = {
     "metal_sm5": "METAL_SM5",
 }
 
+SHADER_DUMP_WAIT_TIMEOUT_SECONDS = 10.0
+
 
 _PLUGIN_GET_ACTIVE_SHADER_PLATFORM_SCRIPT = r'''import unreal
 
@@ -1376,6 +1378,7 @@ def get_material_hlsl(
     project_dir: str | None = None,
     platform: str = "sm6",
     shader_type: str = "pixel",
+    wait_timeout: float = SHADER_DUMP_WAIT_TIMEOUT_SECONDS,
 ) -> dict:
     """Get the compiled HLSL/USF shader code for a material.
 
@@ -1389,6 +1392,7 @@ def get_material_hlsl(
         project_dir: Project directory (to find ShaderDebugInfo).
         platform: Shader platform: "sm6" (default), "sm5", "vulkan", etc.
         shader_type: "pixel" (PS), "vertex" (VS), "all", or specific pass name.
+        wait_timeout: Seconds to wait for dump files after recompilation returns.
 
     Returns:
         {
@@ -1464,9 +1468,12 @@ def get_material_hlsl(
                 recompile_result.setdefault("code", "MATERIAL_SHADER_RECOMPILE_FAILED")
                 return recompile_result
 
-            # Wait for dump to appear (shader compilation is async)
-            deadline = time.time() + 120  # up to 2 min for large materials
-            while time.time() < deadline:
+            # Shader compilation may finish after PostEditChange returns. Keep
+            # that grace period short by default and let callers extend it for
+            # unusually large materials instead of appearing hung for 2 min.
+            wait_timeout = max(0.0, float(wait_timeout))
+            deadline = time.monotonic() + wait_timeout
+            while True:
                 dump_dir = _find_shader_dump_dir(debug_base, mat_name)
                 if dump_dir:
                     # Verify .usf files exist
@@ -1475,21 +1482,32 @@ def get_material_hlsl(
                         # Wait a bit more to ensure all files are written
                         time.sleep(2)
                         break
-                time.sleep(3)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(1.0, remaining))
 
         finally:
             # Restore CVar
             restore_val = str(old_value) if old_value and old_value != "0" else "0"
             api.set_cvar("r.DumpShaderDebugInfo", restore_val)
 
-    if not dump_dir or not dump_dir.exists():
+    dump_has_usf = bool(
+        dump_dir
+        and dump_dir.exists()
+        and any(dump_dir.rglob("*.usf"))
+    )
+    if not dump_has_usf:
+        search_details = _shader_dump_search_details(debug_base, mat_name)
         return {
             "error": f"No shader dump found for '{mat_name}' on platform '{platform_dir_name}'. "
-                     "Shader compilation may still be in progress. "
-                     "Try again in a minute, or run: RecompileShaders all (with r.DumpShaderDebugInfo=1)",
+                     f"Waited {wait_timeout:g} seconds after recompilation. "
+                     "Increase --wait-timeout only if shader compilation is still active.",
             "code": "SHADER_DUMP_NOT_FOUND",
             "available_platforms": _available_shader_dump_platforms(project_dir),
             "recompile": recompile_result,
+            "wait_timeout_seconds": wait_timeout,
+            **search_details,
         }
 
     # ── Step 3: Read shader files ──────────────────────────────────
@@ -1511,6 +1529,33 @@ def _find_shader_dump_dir(debug_base: Path, mat_name: str) -> Optional[Path]:
         if d.is_dir() and d.name.startswith(f"{mat_name}_"):
             return d
     return None
+
+
+def _shader_dump_search_details(debug_base: Path, mat_name: str) -> dict:
+    """Return bounded diagnostics for a failed material dump lookup."""
+    details = {
+        "search_root": str(debug_base),
+        "searched_directory_count": 0,
+        "candidate_count": 0,
+        "candidate_directories": [],
+    }
+    try:
+        if not debug_base.is_dir():
+            return details
+        directories = [path for path in debug_base.iterdir() if path.is_dir()]
+    except OSError as exc:
+        details["search_error"] = str(exc)
+        return details
+
+    candidates = sorted(
+        path.name
+        for path in directories
+        if path.name.startswith(f"{mat_name}_")
+    )
+    details["searched_directory_count"] = len(directories)
+    details["candidate_count"] = len(candidates)
+    details["candidate_directories"] = candidates[:20]
+    return details
 
 
 def _available_shader_dump_platforms(project_dir: str) -> list[str]:

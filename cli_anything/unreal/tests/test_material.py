@@ -1,7 +1,8 @@
 """Tests for test_material.py — Uses synthetic data only, no UE editor required."""
 
 import json
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -382,6 +383,55 @@ class TestMaterials:
         mock_api.set_cvar.assert_any_call("r.DumpShaderDebugInfo", "0")
         mock_api.exec_console.assert_not_called()
 
+    @patch("cli_anything.unreal.core.materials.time.monotonic")
+    @patch("cli_anything.unreal.core.materials.time.sleep")
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_dump_hlsl_missing_dump_respects_wait_timeout(
+        self,
+        mock_exec,
+        mock_sleep,
+        mock_monotonic,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.materials import get_material_hlsl
+
+        mock_exec.side_effect = [
+            {"active_platform": "PCD3D_SM6"},
+            {"status": "ok", "package_dirty_restored": True},
+        ]
+        mock_monotonic.side_effect = [100.0, 100.0, 101.0, 102.0]
+        mock_api = MagicMock()
+        mock_api.get_cvar.return_value = "0"
+        empty_candidate = (
+            tmp_path
+            / "Saved"
+            / "ShaderDebugInfo"
+            / "PCD3D_SM6"
+            / "M_Test_EMPTY"
+        )
+        empty_candidate.mkdir(parents=True)
+
+        result = get_material_hlsl(
+            mock_api,
+            "/Game/M_Test",
+            project_dir=str(tmp_path),
+            platform="sm6",
+            wait_timeout=2.0,
+        )
+
+        assert result["code"] == "SHADER_DUMP_NOT_FOUND"
+        assert result["wait_timeout_seconds"] == 2.0
+        assert Path(result["search_root"]).parts[-3:] == (
+            "Saved",
+            "ShaderDebugInfo",
+            "PCD3D_SM6",
+        )
+        assert result["searched_directory_count"] == 1
+        assert result["candidate_count"] == 1
+        assert result["candidate_directories"] == ["M_Test_EMPTY"]
+        assert mock_sleep.call_args_list == [call(0.5), call(1.0), call(1.0)]
+        mock_api.set_cvar.assert_any_call("r.DumpShaderDebugInfo", "0")
+
     @patch("cli_anything.unreal.core.materials.get_material_hlsl")
     def test_dump_hlsl_cli_promotes_missing_dump_error(self, mock_hlsl, tmp_path):
         from click.testing import CliRunner
@@ -402,6 +452,7 @@ class TestMaterials:
                 "--output", "json",
                 "material", "dump-hlsl", "/Game/M_Test",
                 "--output", str(output_path),
+                "--wait-timeout", "2.5",
             ])
 
         assert result.exit_code == 3
@@ -410,6 +461,7 @@ class TestMaterials:
         assert data["code"] == "SHADER_DUMP_NOT_FOUND"
         assert data["details"]["available_platforms"] == ["PCD3D_SM6", "VM"]
         assert not output_path.exists()
+        assert mock_hlsl.call_args.kwargs["wait_timeout"] == 2.5
 
     @patch("cli_anything.unreal.core.materials.get_material_hlsl")
     def test_dump_hlsl_cli_reports_output_write_failure(self, mock_hlsl, tmp_path):

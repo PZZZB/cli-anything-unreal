@@ -166,10 +166,25 @@ def material_analyze(state: AppState, material_path):
 @click.option("--shader-type", default="pixel",
               type=click.Choice(["pixel", "vertex", "all"]),
               help="Which shader stage to return")
+@click.option(
+    "--wait-timeout",
+    default=10.0,
+    show_default=True,
+    type=click.FloatRange(min=0.0),
+    help="Seconds to wait for shader dump files after recompilation returns.",
+)
 @click.option("--full", is_flag=True, help="Return full .usf file (not just material code)")
 @handle_error
 @click.pass_obj
-def material_hlsl(state: AppState, material_path, output_path, platform, shader_type, full):
+def material_hlsl(
+    state: AppState,
+    material_path,
+    output_path,
+    platform,
+    shader_type,
+    wait_timeout,
+    full,
+):
     """Get compiled HLSL/USF shader code for a material.
 
     Triggers shader recompile with debug dump, reads the generated code.
@@ -188,6 +203,7 @@ def material_hlsl(state: AppState, material_path, output_path, platform, shader_
         project_dir=state.session.project_dir,
         platform=platform,
         shader_type=shader_type,
+        wait_timeout=wait_timeout,
     )
 
     if "error" in result:
@@ -202,6 +218,10 @@ def material_hlsl(state: AppState, material_path, output_path, platform, shader_
             if code == "SHADER_PLATFORM_NOT_ACTIVE"
             else "Check shader compilation and available_platforms, then retry."
         )
+        if code == "SHADER_DUMP_NOT_FOUND":
+            suggestion = (
+                "Inspect details.search_root; increase --wait-timeout only while shader compilation is active."
+            )
         if code == "MATERIAL_SHADER_DUMP_BRIDGE_UNAVAILABLE":
             suggestion = "Run editor plugin-upgrade, then retry after the editor restarts."
         raise AppError(
