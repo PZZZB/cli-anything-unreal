@@ -20,6 +20,7 @@ from cli_anything.unreal.commands import AppError, AppState, _same_project_path,
 from cli_anything.unreal.core.tasks import (
     FINAL_TASK_STATUSES,
     TaskWorkerSpawnError,
+    cancel_task,
     load_task,
     reconcile_task_state,
     submit_task,
@@ -300,7 +301,29 @@ def _run_task(command: str, payload: dict, *, timeout: int | None, no_wait: bool
             "suggested_poll_interval_seconds": 5,
         }
 
-    final_task = _wait_for_task_with_log_stream(task["task_id"], timeout, payload.get("log_file"))
+    try:
+        final_task = _wait_for_task_with_log_stream(
+            task["task_id"], timeout, payload.get("log_file")
+        )
+    except (KeyboardInterrupt, click.Abort):
+        cancelled = cancel_task(task["task_id"])
+        if cancelled is not None:
+            error = cancelled.get("error", {})
+            if error.get("code") == "TASK_CANCEL_FAILED":
+                raise AppError(
+                    "TASK_CANCEL_FAILED",
+                    error.get(
+                        "message",
+                        "Interrupted build task cancellation failed.",
+                    ),
+                    exit_code=4,
+                    suggestion=(
+                        "Inspect remaining process diagnostics before retrying "
+                        "the build."
+                    ),
+                    details=task_progress(cancelled),
+                ) from None
+        raise
     if final_task is None:
         current = load_task(task["task_id"]) or task
         if timeout is None:

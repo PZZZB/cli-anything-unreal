@@ -4168,6 +4168,85 @@ class TestBuildCLI:
         assert captured["payload"]["platform"] == "Android"
         assert captured["payload"]["build_config"] == "Development"
 
+    def test_build_compile_interrupt_cancels_owned_task_before_abort(
+        self, temp_project
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        cancelled_task = {
+            "task_id": "t-interrupted",
+            "command": "build.compile",
+            "status": "cancelled",
+            "cancelled": True,
+        }
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.build.find_running_editors",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.commands.build.submit_task",
+            return_value={"task_id": "t-interrupted"},
+        ), patch(
+            "cli_anything.unreal.commands.build._wait_for_task_with_log_stream",
+            side_effect=KeyboardInterrupt,
+        ), patch(
+            "cli_anything.unreal.commands.build.cancel_task",
+            return_value=cancelled_task,
+        ) as cancel:
+            result = runner.invoke(cli, [
+                "--project", temp_project["uproject"],
+                "build", "compile",
+            ])
+
+        assert result.exit_code == 1
+        assert "Aborted!" in result.output
+        cancel.assert_called_once_with("t-interrupted")
+
+    def test_build_compile_interrupt_reports_cancellation_failure(
+        self, temp_project
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        failed_task = {
+            "task_id": "t-interrupted",
+            "command": "build.compile",
+            "status": "running",
+            "error": {
+                "code": "TASK_CANCEL_FAILED",
+                "message": "Build task cancellation left processes running.",
+            },
+            "cancel_result": {"remaining": [1234]},
+        }
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.build.find_running_editors",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.commands.build.submit_task",
+            return_value={"task_id": "t-interrupted"},
+        ), patch(
+            "cli_anything.unreal.commands.build._wait_for_task_with_log_stream",
+            side_effect=KeyboardInterrupt,
+        ), patch(
+            "cli_anything.unreal.commands.build.cancel_task",
+            return_value=failed_task,
+        ) as cancel:
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "--project", temp_project["uproject"],
+                "build", "compile",
+            ])
+
+        assert result.exit_code == 4
+        data = self._parse_json_output(result.output)
+        assert data["code"] == "TASK_CANCEL_FAILED"
+        assert data["details"]["cancel_result"]["remaining"] == [1234]
+        cancel.assert_called_once_with("t-interrupted")
+
     def test_build_compile_accepts_repeatable_module_option(self, temp_project):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
