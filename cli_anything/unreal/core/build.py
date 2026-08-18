@@ -63,6 +63,20 @@ _COOK_FAILURE_PATTERN = re.compile(
     r"\bCook failed\b|\bError_UnknownCookFailure\b",
     re.IGNORECASE,
 )
+_UBT_CONFLICTING_INSTANCE_PATTERN = re.compile(
+    r"\bResult:\s*Failed\s*\(ConflictingInstance\)\s*$",
+    re.IGNORECASE,
+)
+_UBT_CONFLICTING_MUTEX_PATTERN = re.compile(
+    r"\bA conflicting instance of "
+    r"(?P<mutex>Global\\UnrealBuildTool_Mutex_[0-9a-f]+) "
+    r"is already running\.",
+    re.IGNORECASE,
+)
+_UBT_CONFLICTING_LEGACY_PATTERN = re.compile(
+    r"\bA conflicting instance of UnrealBuildTool is already running\.\s*$",
+    re.IGNORECASE,
+)
 
 _TARGET_LEXICAL_NOISE_PATTERN = re.compile(
     r"//[^\r\n]*|/\*.*?\*/|"
@@ -422,6 +436,48 @@ def _build_failure_diagnostics(
         return {}
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    conflict_result_lines = [
+        line for line in lines if _UBT_CONFLICTING_INSTANCE_PATTERN.search(line)
+    ]
+    conflict_mutex_matches = []
+    for line in lines:
+        match = _UBT_CONFLICTING_MUTEX_PATTERN.search(line)
+        if match:
+            conflict_mutex_matches.append((line, match))
+    conflict_legacy_lines = [
+        line for line in lines if _UBT_CONFLICTING_LEGACY_PATTERN.search(line)
+    ]
+    if conflict_result_lines or conflict_mutex_matches or conflict_legacy_lines:
+        diagnostic = (
+            conflict_mutex_matches[-1][0]
+            if conflict_mutex_matches
+            else (
+                conflict_legacy_lines[-1]
+                if conflict_legacy_lines
+                else conflict_result_lines[-1]
+            )
+        )
+        result = {
+            "code": "BUILD_CONFLICTING_INSTANCE",
+            "failure_kind": "ubt_mutex_conflict",
+            "error": (
+                "UnrealBuildTool could not start because another instance is "
+                "using this engine's global mutex."
+            ),
+            "diagnostic": diagnostic,
+            "conflicting_process_hint": (
+                "Another UnrealBuildTool process using the same engine owns the "
+                "global build mutex."
+            ),
+            "suggestion": (
+                "Wait for the other UnrealBuildTool process to finish, or stop it "
+                "if you own it, then retry the build."
+            ),
+        }
+        if conflict_mutex_matches:
+            result["mutex_name"] = conflict_mutex_matches[-1][1].group("mutex")
+        return result
+
     plugin_load_failures = []
     for line in lines:
         match = _PLUGIN_LOAD_FAILURE_PATTERN.search(line)

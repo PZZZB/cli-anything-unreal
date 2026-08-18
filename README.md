@@ -231,6 +231,8 @@ Runners should either stream stdout live or replay captured stdout once, never b
 
 Failed cook/package results prioritize terminal plugin-load failures over compiler-like lines from earlier phases. These failures return `code=BUILD_PLUGIN_LOAD_FAILED`, `failure_kind=plugin_load_failure`, the primary `diagnostic`, plugin/module names when available, and `phase=cook` when the UAT log identifies Cook as the failing phase.
 
+When UBT cannot start because another process owns the same engine's global build mutex, `build compile` returns `code=BUILD_CONFLICTING_INSTANCE`, `failure_kind=ubt_mutex_conflict`, the original UBT diagnostic, and a wait-or-stop recovery hint. UE5 results also include `mutex_name` when UBT reports it. This classification uses explicit UBT conflict evidence rather than AutomationTool's overloaded exit code, which may be labeled `Error_SDKNotFound` even when no SDK problem occurred.
+
 `build compile --module NAME` is a focused project or engine-core module build. If the current Editor target receipt identifies `NAME` as an Engine plugin module, ue-cli rejects the command before UBT with `ENGINE_PLUGIN_MODULE_UNSUPPORTED` and provides a full `build compile` recovery command. Project-targeted UBT can omit Engine plugin output actions and otherwise fail with `Unable to find output items for module`.
 
 ## Features

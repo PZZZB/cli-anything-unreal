@@ -962,6 +962,98 @@ class TestBuildSuccessPaths:
         assert result["actions_json_file"] == str(actions_file)
         assert "without emitting a compiler diagnostic" in result["diagnostic"]
 
+    def test_compile_failure_classifies_ubt_mutex_conflict_before_uat_exit_label(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.build import _normalize_compile_result
+
+        mutex_name = (
+            r"Global\UnrealBuildTool_Mutex_"
+            "cc1e4ec248d9b3ed35259397698050712f573880"
+        )
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_text(
+            "\n".join([
+                f"A conflicting instance of {mutex_name} is already running.",
+                "Result: Failed (ConflictingInstance)",
+                "Took 0.65s to run dotnet.exe, ExitCode=10",
+                (
+                    "AutomationTool exiting with ExitCode=10 "
+                    "(Error_SDKNotFound)"
+                ),
+                "BUILD FAILED",
+            ]),
+            encoding="utf-8",
+        )
+
+        result = _normalize_compile_result(
+            {"returncode": 10, "log_file": str(log_file)},
+            uproject_path=str(tmp_path / "Test.uproject"),
+            engine_root=str(tmp_path / "Engine"),
+            config="Development",
+            platform="Win64",
+        )
+
+        assert result["status"] == "error"
+        assert result["code"] == "BUILD_CONFLICTING_INSTANCE"
+        assert result["failure_kind"] == "ubt_mutex_conflict"
+        assert result["mutex_name"] == mutex_name
+        assert result["diagnostic"].startswith("A conflicting instance")
+        assert "another instance" in result["error"].lower()
+        assert "SDK" not in result["error"]
+        assert "other UnrealBuildTool process" in result["suggestion"]
+
+    def test_compile_exit_10_without_conflict_evidence_remains_generic(self, tmp_path):
+        from cli_anything.unreal.core.build import _normalize_compile_result
+
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_text(
+            "AutomationTool exiting with ExitCode=10 (Error_SDKNotFound)\n",
+            encoding="utf-8",
+        )
+
+        result = _normalize_compile_result(
+            {"returncode": 10, "log_file": str(log_file)},
+            uproject_path=str(tmp_path / "Test.uproject"),
+            engine_root=str(tmp_path / "Engine"),
+            config="Development",
+            platform="Win64",
+        )
+
+        assert result["status"] == "error"
+        assert "code" not in result
+        assert result["error"].startswith("Compile failed (exit 10)")
+
+    def test_compile_failure_classifies_legacy_ubt_mutex_conflict(self, tmp_path):
+        from cli_anything.unreal.core.build import _normalize_compile_result
+
+        diagnostic = (
+            "ERROR: A conflicting instance of UnrealBuildTool is already running."
+        )
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_text(
+            "\n".join([
+                diagnostic,
+                "Result: Failed (OtherCompilationError)",
+                "BUILD FAILED",
+            ]),
+            encoding="utf-8",
+        )
+
+        result = _normalize_compile_result(
+            {"returncode": 6, "log_file": str(log_file)},
+            uproject_path=str(tmp_path / "Test.uproject"),
+            engine_root=str(tmp_path / "Engine"),
+            config="Development",
+            platform="Win64",
+        )
+
+        assert result["code"] == "BUILD_CONFLICTING_INSTANCE"
+        assert result["failure_kind"] == "ubt_mutex_conflict"
+        assert result["diagnostic"] == diagnostic
+        assert "mutex_name" not in result
+
     def test_compile_failure_returns_real_compiler_diagnostics(self, tmp_path):
         from cli_anything.unreal.core.build import _normalize_result
 
