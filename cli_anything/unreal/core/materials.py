@@ -17,7 +17,7 @@ from typing import Optional
 
 from cli_anything.unreal.core.plugin_bridge import ensure_plugin_deployed
 from cli_anything.unreal.core.script_runner import SavePolicy
-from cli_anything.unreal.errors import raise_for_legacy_error
+from cli_anything.unreal.errors import UeCliError, raise_for_legacy_error
 from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
 
@@ -931,6 +931,29 @@ def analyze_material(
     # Get full material info
     info = get_material_info(api, material_path, project_dir)
     raise_for_legacy_error(info, default_code="MATERIAL_ANALYZE_FAILED")
+
+    asset_class = info.get("class", "")
+    if asset_class == "MaterialInstanceConstant":
+        suggestion = (
+            "Run 'material info' for effective instance parameters, or run "
+            "'material analyze <parent-material>' for parent graph analysis."
+        )
+        raise UeCliError(
+            code="MATERIAL_ANALYZE_UNSUPPORTED_CLASS",
+            message=(
+                "Material graph analysis is unavailable for "
+                "MaterialInstanceConstant because ue-cli cannot inspect its "
+                "compiled static permutation."
+            ),
+            exit_code=3,
+            suggestion=suggestion,
+            details={
+                "material": info.get("path") or material_path,
+                "asset_class": asset_class,
+                "parent": info.get("parent"),
+                "supported_classes": ["Material"],
+            },
+        )
 
     # ── Analysis rules ────────────────────────────────────────────────
 
