@@ -2945,19 +2945,39 @@ def _is_transport_timeout_result(result: dict) -> bool:
     return any(marker in text for marker in markers)
 
 
-def _raise_editor_connection_lost(result: dict, operation: str) -> None:
+def _raise_editor_connection_lost(
+    result: dict,
+    operation: str,
+    *,
+    diagnostics: dict | None = None,
+) -> None:
     details = dict(result)
     details["failure_kind"] = "transport_disconnect"
     details["operation"] = operation
+    if diagnostics:
+        diagnostic_failure_kind = diagnostics.get("failure_kind")
+        if diagnostic_failure_kind and diagnostic_failure_kind != "transport_disconnect":
+            details["transport_failure_kind"] = "transport_disconnect"
+        details.update(diagnostics)
+    if operation == "editor run-script":
+        details["delivery_state"] = "unknown"
+        details["retry_safe"] = False
+    if details.get("failure_kind") in {"editor_process_exited", "editor_crash_detected"}:
+        suggestion = (
+            "Inspect fatal_log_tail and log_file, then fix the Unreal Engine or project crash cause and relaunch the editor. "
+            "The script may have partially executed; assess side effects before any retry."
+        )
+    else:
+        suggestion = (
+            "Run editor status to check whether Unreal Editor crashed, exited, or is restarting; "
+            "relaunch if offline, then assess possible side effects before retrying."
+        )
     raise AppError(
         "EDITOR_CONNECTION_LOST",
         f"Editor connection was lost while running {operation}.",
         exit_code=3,
         details=details,
-        suggestion=(
-            "Run editor status to check whether Unreal Editor crashed, exited, or is restarting; "
-            "relaunch if offline, then retry after the editor is online."
-        ),
+        suggestion=suggestion,
     )
 
 
@@ -3210,47 +3230,61 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
             _raise_unsafe_run_script_operation(unsafe)
 
     api = require_editor(state)
+    from cli_anything.unreal.core.editor_lifecycle import (
+        capture_editor_disconnect_context,
+        close_editor_disconnect_context,
+        collect_editor_disconnect_diagnostics,
+    )
 
-    if code is not None or stdin_code is not None:
-        result = run_python_code(
-            api, code if code is not None else stdin_code,
-            project_dir=state.session.project_dir,
-            timeout=timeout,
-            save=not no_save,
-        )
-    else:
-        result = run_python_script(
-            api, script_path,
-            project_dir=state.session.project_dir,
-            timeout=timeout,
-            save=not no_save,
-        )
-    if isinstance(result, dict) and result.get("error"):
-        if _is_transport_disconnect_result(result):
-            _raise_editor_connection_lost(result, "editor run-script")
-        if _is_transport_timeout_result(result):
-            retry_timeout = max(60, timeout * 2)
-            retry_command = _editor_run_script_retry_command(
-                state,
-                script_path,
-                timeout=retry_timeout,
-                no_save=no_save,
+    disconnect_context = capture_editor_disconnect_context(api, state.session.project_path)
+    try:
+        if code is not None or stdin_code is not None:
+            result = run_python_code(
+                api, code if code is not None else stdin_code,
+                project_dir=state.session.project_dir,
+                timeout=timeout,
+                save=not no_save,
             )
-            _raise_editor_script_timeout(
-                result,
-                "editor run-script",
-                timeout,
-                retry_timeout=retry_timeout,
-                retry_command=retry_command,
+        else:
+            result = run_python_script(
+                api, script_path,
+                project_dir=state.session.project_dir,
+                timeout=timeout,
+                save=not no_save,
             )
-        raise AppError(
-            "SCRIPT_EXECUTION_FAILED",
-            str(result.get("error")),
-            exit_code=3,
-            details=result,
-            suggestion="Fix the UE Python script exception and rerun editor run-script.",
-        )
-    output(result, state)
+        if isinstance(result, dict) and result.get("error"):
+            if _is_transport_disconnect_result(result):
+                diagnostics = collect_editor_disconnect_diagnostics(disconnect_context)
+                _raise_editor_connection_lost(
+                    result,
+                    "editor run-script",
+                    diagnostics=diagnostics,
+                )
+            if _is_transport_timeout_result(result):
+                retry_timeout = max(60, timeout * 2)
+                retry_command = _editor_run_script_retry_command(
+                    state,
+                    script_path,
+                    timeout=retry_timeout,
+                    no_save=no_save,
+                )
+                _raise_editor_script_timeout(
+                    result,
+                    "editor run-script",
+                    timeout,
+                    retry_timeout=retry_timeout,
+                    retry_command=retry_command,
+                )
+            raise AppError(
+                "SCRIPT_EXECUTION_FAILED",
+                str(result.get("error")),
+                exit_code=3,
+                details=result,
+                suggestion="Fix the UE Python script exception and rerun editor run-script.",
+            )
+        output(result, state)
+    finally:
+        close_editor_disconnect_context(disconnect_context)
 
 
 @editor_group.command("api-discover")

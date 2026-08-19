@@ -21,6 +21,12 @@ _FATAL_LOG_PATTERNS = [
     "Assertion failed:",
 ]
 
+_RUNTIME_FATAL_LOG_PATTERN = re.compile(
+    r"Assertion failed:|Fatal Error:|LowLevelFatalError|Unhandled Exception|"
+    r"Crash in runnable thread|Signal 11 caught|StaticShutdownAfterError",
+    re.IGNORECASE,
+)
+
 _WINDOWS_STATUS_ENTRYPOINT_NOT_FOUND = 0xC0000139
 _MISSING_VIRTUAL_SHADER_SOURCE_PATTERN = re.compile(
     r"Couldn't find source file of virtual shader path\s+['\"](?P<shader_path>[^'\"]+)['\"]",
@@ -368,6 +374,180 @@ def _bounded_log_tail_lines(
         line if len(line) <= max_line_chars else line[:max_line_chars] + "..."
         for line in lines[-limit:]
     ]
+
+
+def _bounded_fatal_log_tail_lines(
+    log_file: Path,
+    *,
+    since_offset: int,
+    limit: int = 8,
+    max_line_chars: int = 500,
+) -> list[str]:
+    """Return bounded fatal/assert context written after an operation began."""
+    if not log_file.exists():
+        return []
+    try:
+        size = log_file.stat().st_size
+        offset = int(since_offset)
+        if offset < 0 or offset > size:
+            offset = 0
+        with log_file.open("rb") as handle:
+            handle.seek(max(offset, size - 128 * 1024, 0))
+            text = handle.read().decode("utf-8", errors="replace")
+    except (OSError, TypeError, ValueError):
+        return []
+
+    lines = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", raw_line).strip()
+        if line:
+            lines.append(line)
+    matched = [index for index, line in enumerate(lines) if _RUNTIME_FATAL_LOG_PATTERN.search(line)]
+    if not matched:
+        return []
+
+    selected: list[str] = []
+    for index in matched:
+        for line in lines[index:min(len(lines), index + 3)]:
+            if line not in selected:
+                selected.append(line)
+    return [
+        line if len(line) <= max_line_chars else line[:max_line_chars] + "..."
+        for line in selected[-limit:]
+    ]
+
+
+class _EditorProcessExitProbe:
+    """Keep a Windows process handle so exit code survives process teardown."""
+
+    def __init__(self, pid: int):
+        self.pid = int(pid)
+        self._handle = None
+        self._kernel32 = None
+        if sys.platform != "win32" or self.pid <= 0:
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            open_process.restype = wintypes.HANDLE
+            handle = open_process(0x00100000 | 0x1000, False, self.pid)
+            if handle:
+                self._kernel32 = kernel32
+                self._handle = handle
+        except (AttributeError, OSError, TypeError, ValueError):
+            self._handle = None
+            self._kernel32 = None
+
+    def snapshot(self) -> dict:
+        result = {"editor_pid": self.pid}
+        if self._handle and self._kernel32:
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                get_exit_code = self._kernel32.GetExitCodeProcess
+                get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+                get_exit_code.restype = wintypes.BOOL
+                exit_code = wintypes.DWORD()
+                if get_exit_code(self._handle, ctypes.byref(exit_code)):
+                    code = int(exit_code.value)
+                    alive = code == 259  # STILL_ACTIVE
+                    result.update(
+                        process_alive=alive,
+                        process_exit_status="running" if alive else "exited",
+                    )
+                    if not alive:
+                        result["process_exit_code"] = code
+                        result["process_exit_code_hex"] = f"0x{code:08X}"
+                    return result
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass
+
+        from cli_anything.unreal.utils.ue_backend import _windows_process_exists
+
+        alive = _windows_process_exists(self.pid)
+        if alive is not None:
+            result.update(
+                process_alive=alive,
+                process_exit_status="running" if alive else "exited",
+            )
+        return result
+
+    def close(self) -> None:
+        if not self._handle or not self._kernel32:
+            return
+        try:
+            self._kernel32.CloseHandle(self._handle)
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+        finally:
+            self._handle = None
+
+
+def capture_editor_disconnect_context(api, project_path: str | None) -> dict:
+    """Capture PID handle and log offset before a potentially fatal editor call."""
+    raw_pid = getattr(api, "_verified_editor_pid", None)
+    pid = None
+    if isinstance(raw_pid, (int, str)) and not isinstance(raw_pid, bool):
+        try:
+            pid = int(raw_pid)
+        except (TypeError, ValueError):
+            pid = None
+
+    context: dict = {}
+    if pid and pid > 0:
+        context["process_probe"] = _EditorProcessExitProbe(pid)
+
+    if project_path:
+        project = Path(project_path)
+        extra_args = None
+        cmdline = getattr(api, "_verified_editor_cmdline", None)
+        if isinstance(cmdline, str) and cmdline:
+            from cli_anything.unreal.utils.ue_backend import _windows_cmdline_to_argv
+
+            extra_args = _windows_cmdline_to_argv(cmdline)
+        log_file = _resolve_launch_log_file(project.parent, project.stem, extra_args)
+        context["log_file"] = log_file
+        try:
+            context["log_offset"] = log_file.stat().st_size
+        except OSError:
+            context["log_offset"] = 0
+    return context
+
+
+def collect_editor_disconnect_diagnostics(context: dict) -> dict:
+    """Collect bounded crash evidence after an editor transport disconnect."""
+    probe = context.get("process_probe")
+    process = probe.snapshot() if probe is not None else {}
+    log_file = context.get("log_file")
+    fatal_log_tail = []
+    if isinstance(log_file, Path):
+        fatal_log_tail = _bounded_fatal_log_tail_lines(
+            log_file,
+            since_offset=int(context.get("log_offset") or 0),
+        )
+
+    details = dict(process)
+    if isinstance(log_file, Path) and log_file.exists():
+        details["log_file"] = str(log_file)
+    if fatal_log_tail:
+        details["fatal_log_tail"] = fatal_log_tail
+
+    if process.get("process_alive") is False:
+        details["failure_kind"] = "editor_process_exited"
+    elif fatal_log_tail:
+        details["failure_kind"] = "editor_crash_detected"
+    return details
+
+
+def close_editor_disconnect_context(context: dict) -> None:
+    probe = context.get("process_probe")
+    if probe is not None:
+        probe.close()
 
 
 def _external_editor_crash_diagnostics(lines: list[str]) -> dict:

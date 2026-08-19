@@ -452,8 +452,9 @@ def require_editor(
             exit_code=4,
             suggestion="Launch the editor with: editor launch --project <path-to-.uproject>",
         )
+    verified_owner = None
     try:
-        _guard_editor_project(state, UEEditorAPI)
+        verified_owner = _guard_editor_project(state, UEEditorAPI)
     except AppError as initial_guard_error:
         if state.port_is_explicit or not state.session.project_path:
             raise
@@ -466,7 +467,10 @@ def require_editor(
             raise initial_guard_error
         state.session.port = live_port
         api = live_api
-        _guard_editor_project(state, UEEditorAPI)
+        verified_owner = _guard_editor_project(state, UEEditorAPI)
+    if verified_owner:
+        api._verified_editor_pid = verified_owner.get("pid")
+        api._verified_editor_cmdline = verified_owner.get("cmdline")
     return api
 
 

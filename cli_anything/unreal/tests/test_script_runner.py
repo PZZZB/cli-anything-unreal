@@ -1834,6 +1834,76 @@ class TestScriptRunner:
         assert "connection was lost" in data["message"]
         assert "editor status" in data["suggestion"]
         assert data["details"]["failure_kind"] == "transport_disconnect"
+        assert data["details"]["delivery_state"] == "unknown"
+        assert data["details"]["retry_safe"] is False
+
+    def test_editor_run_script_connection_reset_reports_editor_crash_evidence(self, tmp_path):
+        """A dead editor and new fatal log lines should enrich the disconnect error."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        project = tmp_path / "CrashCase.uproject"
+        project.write_text("{}\n", encoding="utf-8")
+        log_file = tmp_path / "Saved" / "Logs" / "CrashCase.log"
+        log_file.parent.mkdir(parents=True)
+        log_file.write_text(
+            "LogWindows: Error: Fatal Error: stale crash from previous session\n"
+            "LogInit: editor online\n",
+            encoding="utf-8",
+        )
+
+        api = MagicMock()
+        api._verified_editor_pid = 99999999
+        api._verified_editor_cmdline = f'UnrealEditor.exe "{project}"'
+
+        def disconnect_after_fatal(*_args, **_kwargs):
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    "LogWindows: Error: Assertion failed: MipView.GammaSpace == LayerData.SourceGammaSpace\n"
+                    "LogWindows: Error: TextureDerivedDataTask.cpp:422\n"
+                    "LogWindows: Error: Crash in runnable thread Background Worker #13\n"
+                )
+            return {
+                "error": (
+                    "('Connection aborted.', ConnectionResetError(10054, "
+                    "'remote host forcibly closed', None, 10054, None))"
+                ),
+            }
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.utils.ue_backend.find_engine_root",
+            return_value=str(tmp_path / "Engine"),
+        ), patch(
+            "cli_anything.unreal.commands.editor.require_editor",
+            return_value=api,
+        ), patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            side_effect=disconnect_after_fatal,
+        ):
+            result = runner.invoke(cli, [
+                "--project", str(project),
+                "--output", "json",
+                "editor", "run-script", "-", "--no-save",
+            ], input="result = {}\n")
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        details = data["details"]
+        assert data["code"] == "EDITOR_CONNECTION_LOST"
+        assert details["failure_kind"] == "editor_process_exited"
+        assert details["transport_failure_kind"] == "transport_disconnect"
+        assert details["editor_pid"] == 99999999
+        assert details["process_alive"] is False
+        assert details["process_exit_status"] == "exited"
+        assert details["delivery_state"] == "unknown"
+        assert details["retry_safe"] is False
+        assert details["log_file"] == str(log_file)
+        assert details["fatal_log_tail"] == [
+            "LogWindows: Error: Assertion failed: MipView.GammaSpace == LayerData.SourceGammaSpace",
+            "LogWindows: Error: TextureDerivedDataTask.cpp:422",
+            "LogWindows: Error: Crash in runnable thread Background Worker #13",
+        ]
 
     def test_editor_run_script_read_timeout_is_timeout_error(self):
         """HTTP read timeouts should not be diagnosed as Python exceptions."""

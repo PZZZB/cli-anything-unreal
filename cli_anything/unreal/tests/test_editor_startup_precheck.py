@@ -1,10 +1,37 @@
 ﻿import json
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process handle contract")
+def test_editor_process_exit_probe_preserves_exit_code_after_process_exit():
+    from cli_anything.unreal.core.editor_lifecycle import _EditorProcessExitProbe
+
+    process = subprocess.Popen([
+        sys.executable,
+        "-c",
+        "import sys, time; time.sleep(0.2); sys.exit(7)",
+    ])
+    probe = _EditorProcessExitProbe(process.pid)
+    try:
+        process.wait(timeout=10)
+        snapshot = probe.snapshot()
+    finally:
+        probe.close()
+        if process.poll() is None:
+            process.kill()
+
+    assert snapshot["editor_pid"] == process.pid
+    assert snapshot["process_alive"] is False
+    assert snapshot["process_exit_status"] == "exited"
+    assert snapshot["process_exit_code"] == 7
+    assert snapshot["process_exit_code_hex"] == "0x00000007"
 
 
 
