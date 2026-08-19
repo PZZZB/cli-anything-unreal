@@ -862,6 +862,53 @@ def test_editor_close_kills_matching_zombie_project_process(mini_project):
     assert data["result"]["closed_processes"] == [{"pid": 1234, "project": mini_project}]
 
 
+def test_editor_close_force_terminates_project_editor_blocked_by_startup_dialog(
+    mini_project,
+):
+    from click.testing import CliRunner
+    from cli_anything.unreal.commands import AppError
+    from cli_anything.unreal.unreal_cli import cli
+
+    blocked = AppError(
+        "EDITOR_BLOCKED_BY_DIALOG",
+        "Editor execution appears blocked by a non-brokered dialog window.",
+        exit_code=4,
+        details={
+            "confirmations": [
+                {
+                    "pid": 1234,
+                    "source": "window",
+                    "title": "Missing MiniProject Modules",
+                    "answerable": False,
+                }
+            ]
+        },
+    )
+    with patch(
+        "cli_anything.unreal.commands.editor.require_editor",
+        side_effect=blocked,
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend.find_running_editors",
+        return_value=[{"pid": 1234, "project": mini_project}],
+    ), patch(
+        "cli_anything.unreal.utils.ue_backend._kill_process_tree_result",
+        return_value={"ok": True},
+    ) as kill_process:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close", "--force",
+        ])
+
+    assert result.exit_code == 0, result.output
+    kill_process.assert_called_once_with(1234)
+    data = json.loads(result.output)
+    assert data["result"]["status"] == "closed"
+    assert data["result"]["method"] == "process_tree_kill"
+    assert data["result"]["closed_processes"] == [
+        {"pid": 1234, "project": mini_project}
+    ]
+
+
 def test_editor_close_recovers_unique_live_port_before_reporting_offline():
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

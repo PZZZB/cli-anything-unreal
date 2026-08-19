@@ -2125,6 +2125,7 @@ def editor_close(state: AppState, force: bool):
         offline_codes = {"EDITOR_UNREACHABLE"}
         if force:
             offline_codes.update({
+                "EDITOR_BLOCKED_BY_DIALOG",
                 "EDITOR_PROJECT_NOT_RUNNING",
                 "EDITOR_PROJECT_VERIFICATION_FAILED",
             })

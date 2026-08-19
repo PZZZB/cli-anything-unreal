@@ -86,7 +86,7 @@ These commands use a project-local mailbox, not Remote Control, so `list`, `answ
 | `confirmation answer CONFIRMATION_ID --choice CHOICE [--wait SEC]` | Submit one exact reported choice through the out-of-band mailbox |
 | `confirmation disable [--pid PID]` | End the lease; any unresolved brokered dialog falls back to normal editor UI |
 
-Editor-dependent commands detect an active brokered dialog before dispatch and return `EDITOR_BLOCKED_BY_CONFIRMATION` with `next_command`. If a request itself triggers the dialog, the same code replaces its transport timeout. A detected non-brokered window returns `EDITOR_BLOCKED_BY_DIALOG`; `confirmation list` reports it but does not auto-click it.
+Editor-dependent commands detect an active brokered dialog before dispatch and return `EDITOR_BLOCKED_BY_CONFIRMATION` with `next_command`. If a request itself triggers the dialog, the same code replaces its transport timeout. A detected non-brokered window returns `EDITOR_BLOCKED_BY_DIALOG`; `confirmation list` reports it but does not auto-click it. With explicit authorization to discard editor state, `editor close --force` can terminate verified processes matching the selected project while such a startup window is open.
 
 ## project - Project Management
 

@@ -116,7 +116,7 @@ Call `confirmation list` in these cases:
 - A destructive, overwrite, import, save, plugin, map-transition, or long-running operation has not produced expected progress.
 - Before retrying a command with unknown delivery, closing the editor, or declaring the editor hung.
 
-The lease must be enabled before the dialog occurs. Bridge interception covers standard `FMessageDialog` calls after the bridge installs its post-engine-init hook. Startup recovery, custom Slate windows, platform file pickers, and third-party dialogs may appear as `source=window`, `answerable=false`; inspect those in editor UI. Never auto-click **Restore Packages**. A lease expiry or `confirmation disable` removes hidden interception and sends the unresolved standard dialog to normal editor UI.
+The lease must be enabled before the dialog occurs. Bridge interception covers standard `FMessageDialog` calls after the bridge installs its post-engine-init hook. Startup recovery, custom Slate windows, platform file pickers, and third-party dialogs may appear as `source=window`, `answerable=false`; inspect those in editor UI. If closing is the requested outcome and discarding state is explicitly authorized, `editor close --force` may terminate verified processes matching the selected project without answering the window. Never auto-click **Restore Packages**. A lease expiry or `confirmation disable` removes hidden interception and sends the unresolved standard dialog to normal editor UI.
 
 The command that triggered a brokered dialog may already have executed side effects before asking. After answering, verify editor/project state before retrying it.
 
@@ -339,7 +339,7 @@ ue-cli editor api-discover "/Game/Maps/L.L:PersistentLevel.MyActor_0"
 | Connection refused | Editor not running | Follow lifecycle above |
 | Timeout | Editor busy: shaders/loading | Run `editor status`; if reachable, wait 10-15s and retry |
 | `EDITOR_BLOCKED_BY_CONFIRMATION` | Standard UE dialog is waiting in Bridge mailbox | Run returned `confirmation list`, inspect, then `confirmation answer` with an allowed choice |
-| `EDITOR_BLOCKED_BY_DIALOG` | Startup/custom/non-brokered window blocks UE | Run returned `confirmation list`, then resolve the reported window in editor UI |
+| `EDITOR_BLOCKED_BY_DIALOG` | Startup/custom/non-brokered window blocks UE | Run returned `confirmation list`; resolve it in editor UI, or use `editor close --force` only when closing and discarding state are explicitly authorized |
 | "modules built with different engine version" | Binary/engine mismatch | `editor preflight` -> `build compile` -> `editor launch` |
 | Screenshot fails | Editor window not visible/minimized | Foreground editor, retry |
 
