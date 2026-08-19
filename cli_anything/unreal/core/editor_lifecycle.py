@@ -26,6 +26,14 @@ _MISSING_VIRTUAL_SHADER_SOURCE_PATTERN = re.compile(
     r"Couldn't find source file of virtual shader path\s+['\"](?P<shader_path>[^'\"]+)['\"]",
     re.IGNORECASE,
 )
+_FILESYSTEM_DDC_MAINTAINER_THREAD_PATTERN = re.compile(
+    r"Runnable thread FileSystemCacheStoreMaintainer crashed",
+    re.IGNORECASE,
+)
+_FILESYSTEM_DDC_MAINTAINER_STACK_PATTERN = re.compile(
+    r"FFileSystemCacheStoreMaintainer::(?:CreateContentRoot|Scan|Loop)",
+    re.IGNORECASE,
+)
 
 
 def _active_launch_task_for_project(
@@ -361,6 +369,31 @@ def _bounded_log_tail_lines(
         for line in lines[-limit:]
     ]
 
+
+def _external_editor_crash_diagnostics(lines: list[str]) -> dict:
+    """Classify known editor-owned crash stacks without implying a ue-cli failure."""
+    text = "\n".join(lines)
+    if not (
+        _FILESYSTEM_DDC_MAINTAINER_THREAD_PATTERN.search(text)
+        and _FILESYSTEM_DDC_MAINTAINER_STACK_PATTERN.search(text)
+    ):
+        return {}
+
+    return {
+        "failure_kind": "external_editor_ddc_crash",
+        "likely_cause": "unreal_engine_filesystem_ddc_maintainer_crash",
+        "external_component": "Unreal Engine DerivedDataCache",
+        "diagnostic_basis": "FileSystemCacheStoreMaintainer crash stack",
+        "editor_automation_dispatched": False,
+        "retry_safe_after_exit": True,
+        "suggestion": (
+            "Unreal Editor crashed in its file-system DDC maintainer before Remote Control "
+            "came online. Retry editor launch once. If the same signature repeats, preserve "
+            "log_file and CrashReportClient artifacts and repair the Engine/DDC environment; "
+            "ue-cli cannot repair this editor crash."
+        ),
+    }
+
 def _remote_control_health_from_lines(
     lines: list[str],
     *,
@@ -647,6 +680,12 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
             )
             if log_tail:
                 crash_result["log_tail"] = log_tail
+            diagnostic_lines = _bounded_log_tail_lines(
+                log_file,
+                since_offset=startup_log_offset,
+                limit=64,
+                max_line_chars=2000,
+            )
             project_path = getattr(state.session, "project_path", None)
             crash_result.update(
                 _full_editor_rebuild_diagnostics(
@@ -654,6 +693,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
                     returncode=returncode,
                 )
             )
+            crash_result.update(_external_editor_crash_diagnostics(diagnostic_lines))
             if project_path:
                 crash_result["next_command"] = (
                     f'ue-cli --project "{project_path}" editor launch'

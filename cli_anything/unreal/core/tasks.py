@@ -2299,6 +2299,17 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "message": wait_result.get("error", "Editor crashed during launch map recovery."),
             "details": wait_result,
         }
+    elif wait_result.get("failure_kind") == "external_editor_ddc_crash":
+        final_status = "failed"
+        final_phase = "exited"
+        final_error = {
+            "code": "EDITOR_EXTERNAL_DDC_CRASH",
+            "message": wait_result.get(
+                "error",
+                "Unreal Editor crashed in its file-system DDC maintainer during startup.",
+            ),
+            "details": wait_result,
+        }
     elif wait_result.get("failure_kind") == "engine_binary_source_mismatch":
         final_status = "failed"
         final_phase = "blocked"

@@ -4285,6 +4285,49 @@ def test_wait_for_api_crash_reports_progress_and_bounded_log_tail(tmp_path):
     assert progress[0]["process_alive"] is False
 
 
+def test_wait_for_api_classifies_external_filesystem_ddc_crash(tmp_path):
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
+
+    log_file = tmp_path / "RXGame.log"
+    log_file.write_text("previous launch\n", encoding="utf-8")
+    proc = MagicMock()
+
+    def exit_after_writing_crash():
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(
+                "LogThreadingWindows: Error: Runnable thread "
+                "FileSystemCacheStoreMaintainer crashed.\n"
+                "Fatal error!\n"
+                "UnrealEditor-DerivedDataCache.dll!"
+                "UE::DerivedData::FFileSystemCacheStoreMaintainer::CreateContentRoot()\n"
+                "UnrealEditor-DerivedDataCache.dll!"
+                "UE::DerivedData::FFileSystemCacheStoreMaintainer::Scan()\n"
+            )
+        return 3
+
+    proc.poll.side_effect = exit_after_writing_crash
+    state = MagicMock()
+    state.json_output = True
+    state.session.project_path = r"F:\RXGame_2\RXGame.uproject"
+
+    with patch(
+        "cli_anything.unreal.core.editor_lifecycle.time.time",
+        side_effect=[100.0, 101.0, 102.0],
+    ):
+        result = _wait_for_api(proc, 30011, 120, log_file, state)
+
+    assert result["status"] == "crashed"
+    assert result["failure_kind"] == "external_editor_ddc_crash"
+    assert result["likely_cause"] == "unreal_engine_filesystem_ddc_maintainer_crash"
+    assert result["external_component"] == "Unreal Engine DerivedDataCache"
+    assert result["editor_automation_dispatched"] is False
+    assert result["retry_safe_after_exit"] is True
+    assert "Retry editor launch once" in result["suggestion"]
+    assert result["next_command"] == (
+        'ue-cli --project "F:\\RXGame_2\\RXGame.uproject" editor launch'
+    )
+
+
 def test_detect_ue_dialogs_matches_restore_packages_top_level_for_process(monkeypatch):
     import ctypes
 
@@ -4642,9 +4685,17 @@ def test_run_editor_launch_task_timeout_returns_exact_poll_command(tmp_path, mon
             },
             "EDITOR_ENGINE_BINARY_ENTRYPOINT_MISMATCH",
         ),
+        (
+            {
+                "status": "crashed",
+                "failure_kind": "external_editor_ddc_crash",
+                "error": "Unreal Editor crashed in its file-system DDC maintainer.",
+            },
+            "EDITOR_EXTERNAL_DDC_CRASH",
+        ),
     ],
 )
-def test_run_editor_launch_task_promotes_engine_binary_mismatch_code(
+def test_run_editor_launch_task_promotes_specific_startup_error_code(
     tmp_path,
     monkeypatch,
     wait_result,

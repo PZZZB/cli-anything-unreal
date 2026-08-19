@@ -104,6 +104,8 @@ Controlled launch requires WebRemoteControl, which Unreal does not start under `
 
 If startup reports a missing registered virtual shader source or Windows `STATUS_ENTRYPOINT_NOT_FOUND`, `editor launch` returns `EDITOR_ENGINE_BINARY_SOURCE_MISMATCH` or `EDITOR_ENGINE_BINARY_ENTRYPOINT_MISMATCH`. These signatures can follow a custom Engine branch switch that leaves stale or mixed DLLs. Use the returned `recovery_command` to compile the full Editor target without `--module`, then retry launch.
 
+If Unreal Editor exits before Remote Control startup with a `FileSystemCacheStoreMaintainer` crash stack, `editor launch` returns `EDITOR_EXTERNAL_DDC_CRASH` with `failure_kind=external_editor_ddc_crash`. This identifies an Unreal Engine DerivedDataCache failure rather than a Bridge failure, confirms no editor automation command was dispatched, and recommends one retry. If it repeats, preserve the reported log and CrashReportClient artifacts for Engine/DDC diagnosis.
+
 After status becomes `online`, run a read-only editor query:
 
 ```powershell
