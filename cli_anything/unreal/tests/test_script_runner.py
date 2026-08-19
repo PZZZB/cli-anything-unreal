@@ -828,6 +828,101 @@ class TestScriptRunner:
             else:
                 sys.modules.pop("unreal", None)
 
+    def test_api_discover_marks_reflected_functions_missing_from_python(self):
+        """Reflection-only functions must not look callable on a Python class."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        import sys
+        import types
+
+        class FakeEditorSubsystemBlueprintLibrary:
+            @staticmethod
+            def set_preview_platform(name):
+                pass
+
+            @staticmethod
+            def disable_preview_platform():
+                pass
+
+        mock_api = MagicMock()
+        bridge_data = {
+            "EditorSubsystemBlueprintLibrary": {
+                "class": "EditorSubsystemBlueprintLibrary",
+                "properties": [],
+                "functions": [
+                    {
+                        "name": "SetPreviewPlatform",
+                        "owner": "EditorSubsystemBlueprintLibrary",
+                        "params": [{"name": "Name", "type": "FName"}],
+                    },
+                    {
+                        "name": "GetPreviewPlatformOptions",
+                        "owner": "EditorSubsystemBlueprintLibrary",
+                        "params": [],
+                    },
+                    {
+                        "name": "DisablePreviewPlatform",
+                        "owner": "EditorSubsystemBlueprintLibrary",
+                        "params": [],
+                    },
+                ],
+            }
+        }
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.EditorSubsystemBlueprintLibrary = (
+            FakeEditorSubsystemBlueprintLibrary
+        )
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            detail = api_discover(
+                mock_api,
+                "EditorSubsystemBlueprintLibrary",
+                detail=(
+                    "GetPreviewPlatformOptions,SetPreviewPlatform,"
+                    "DisablePreviewPlatform"
+                ),
+                timeout=5,
+            )
+
+            assert detail["python_callability_checked"] is True
+            items = {item["name"]: item["detail"] for item in detail["items"]}
+            assert items["SetPreviewPlatform"]["python_callable"] is True
+            assert items["SetPreviewPlatform"]["python_name"] == (
+                "set_preview_platform"
+            )
+            assert items["SetPreviewPlatform"]["python_path"] == (
+                "unreal.EditorSubsystemBlueprintLibrary.set_preview_platform"
+            )
+            assert items["DisablePreviewPlatform"]["python_callable"] is True
+            assert items["GetPreviewPlatformOptions"]["python_callable"] is False
+            assert "python_name" not in items["GetPreviewPlatformOptions"]
+            assert "python_path" not in items["GetPreviewPlatformOptions"]
+
+            summary = api_discover(
+                mock_api,
+                "EditorSubsystemBlueprintLibrary",
+                query="PreviewPlatform",
+                timeout=5,
+            )
+            assert summary["python_callability_checked"] is True
+            assert summary["python_unavailable_functions"] == [
+                "GetPreviewPlatformOptions"
+            ]
+            assert summary["python_function_bindings"] == {
+                "SetPreviewPlatform": "set_preview_platform",
+                "DisablePreviewPlatform": "disable_preview_platform",
+            }
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
     def test_api_discover_detail_includes_python_only_wrapper_methods(self):
         """Exact detail lookup should find Python bindings omitted by reflection."""
         from cli_anything.unreal.core.script_runner import api_discover

@@ -539,6 +539,83 @@ def _cli_python_symbol(_target, _target_name, _name):
     }
 
 
+def _cli_python_name_key(_name):
+    return "".join(_ch for _ch in str(_name).lower() if _ch.isalnum())
+
+
+def _cli_python_callable_bindings(_target):
+    try:
+        _names = dir(_target)
+    except Exception:
+        return None
+
+    _bindings = {}
+    for _name in _names:
+        if _name.startswith("_"):
+            continue
+        try:
+            _value = _cli_inspect.getattr_static(_target, _name)
+        except Exception:
+            continue
+        if not callable(_value):
+            continue
+        _key = _cli_python_name_key(_name)
+        if _key and _key not in _bindings:
+            _bindings[_key] = _name
+    return _bindings
+
+
+def _cli_annotate_python_callability(
+    _out, _target, _target_name, _full_path=None
+):
+    if _target is None:
+        return _out
+
+    _bindings = _cli_python_callable_bindings(_target)
+    if _bindings is None:
+        _out["python_callability_checked"] = False
+        return _out
+
+    _out["python_callability_checked"] = True
+    _python_path = _full_path or ("unreal." + _target_name)
+
+    _function_bindings = {}
+    _unavailable = []
+    for _name in _out.get("functions", []):
+        _python_name = _bindings.get(_cli_python_name_key(_name))
+        if _python_name is None:
+            _unavailable.append(_name)
+        else:
+            _function_bindings[_name] = _python_name
+    if _function_bindings:
+        _out["python_function_bindings"] = _function_bindings
+    else:
+        _out.pop("python_function_bindings", None)
+    if _unavailable:
+        _out["python_unavailable_functions"] = _unavailable
+    else:
+        _out.pop("python_unavailable_functions", None)
+
+    for _item in _out.get("items", []):
+        if _item.get("kind") != "function":
+            continue
+        _detail = _item.setdefault("detail", {})
+        _name = _item.get("name", _detail.get("name", ""))
+        _python_name = _bindings.get(_cli_python_name_key(_name))
+        _detail["python_callable"] = _python_name is not None
+        if _python_name is not None:
+            _detail["python_name"] = _python_name
+            _detail["python_path"] = _python_path + "." + _python_name
+            _detail.pop("python_unavailable_reason", None)
+        else:
+            _detail.pop("python_name", None)
+            _detail.pop("python_path", None)
+            _detail["python_unavailable_reason"] = (
+                "No matching callable is exposed on " + _python_path
+            )
+    return _out
+
+
 def _cli_add_python_symbols(_out, _target, _target_name, _query=None, _detail=None):
     if _target is None or (not _query and not _detail):
         return _out
@@ -748,6 +825,9 @@ if "error" not in result:
         result, _python_target, _class_name,
         _query={query!r}, _detail={detail!r},
     )
+    result = _cli_annotate_python_callability(
+        result, _python_target, _class_name, _full_path=".".join(_parts)
+    )
     result["target_name"] = _class_name
     result["python_exposed"] = _python_target is not None
     if _python_target is not None:
@@ -764,6 +844,9 @@ if _cli_resolve_ok:
     _discover_result = _cli_add_python_symbols(
         _discover_result, _resolved_python_target, _resolved_class,
         _query={query!r}, _detail={detail!r},
+    )
+    _discover_result = _cli_annotate_python_callability(
+        _discover_result, _resolved_python_target, _resolved_class
     )
     _discover_result.update(_instance_context)
     result = _discover_result
