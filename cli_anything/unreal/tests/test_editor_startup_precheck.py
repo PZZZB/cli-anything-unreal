@@ -2484,6 +2484,7 @@ def test_editor_launch_preserves_matching_project_process_when_api_owner_differs
     ]
 
     with patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=running), \
+         patch("cli_anything.unreal.utils.ue_backend._windows_process_exists", return_value=None), \
          patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=True), \
          patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port", return_value=99999), \
          patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
@@ -2502,6 +2503,35 @@ def test_editor_launch_preserves_matching_project_process_when_api_owner_differs
     assert data["details"]["decision"] == "preserve_existing_editor"
 
 
+def test_editor_launch_ignores_matching_process_that_exited_after_discovery(mini_project):
+    """A stale process snapshot must not block the next editor launch."""
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["command"] = command
+        captured["payload"] = payload
+        return {"task_id": "task-xyz", "status": "submitted"}
+
+    with patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 61980, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend._windows_process_exists", return_value=False) as process_exists, \
+         patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
+         patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
+         patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait",
+        ])
+
+    assert result.exit_code == 0, result.output
+    process_exists.assert_called_once_with(61980)
+    assert captured["command"] == "editor.launch"
+
+
 def test_editor_launch_does_not_kill_process_owned_by_active_launch_task(mini_project, tmp_path, monkeypatch):
     from click.testing import CliRunner
     from cli_anything.unreal.core.tasks import create_task, save_task
@@ -2517,6 +2547,7 @@ def test_editor_launch_does_not_kill_process_owned_by_active_launch_task(mini_pr
     with patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
              {"pid": 16044, "project": mini_project},
          ]), \
+         patch("cli_anything.unreal.utils.ue_backend._windows_process_exists", return_value=True), \
          patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive", return_value=False), \
          patch("cli_anything.unreal.utils.ue_backend.detect_ue_dialogs", return_value=[]), \
          patch("cli_anything.unreal.utils.ue_backend._kill_process_tree") as kill_proc, \

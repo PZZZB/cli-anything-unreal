@@ -85,6 +85,7 @@ ue-cli --output json task wait <task_id> --timeout 300
 
 `task wait` exits 0 for a completed task, 3 for a failed/task-timeout result, and 4 for cancellation or caller wait timeout. A caller timeout never cancels the task; output keeps the current task status and adds `wait.status=timeout` plus a follow-up command.
 Task records keep lifecycle `status` separate from the current `phase` (for example, `running` plus `waiting_remote_control`). Terminal states are monotonic: a late worker result cannot replace cancellation or another final outcome. A timed-out editor launch can become completed only after `editor status` verifies the recorded process identity and port owner.
+Before an offline or starting process snapshot blocks a Windows launch, ue-cli revalidates PID existence. A confirmed exit is ignored; a live or inconclusive PID remains preserved.
 Interrupting a foreground build command with Ctrl+C synchronously cancels its owned task and process tree before ue-cli exits. If safe cancellation cannot be confirmed, ue-cli returns `TASK_CANCEL_FAILED` with remaining-process diagnostics instead of only printing `Aborted!`.
 
 If crash recovery blocks startup, the launch task returns `EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES` with the matching UnrealEditor PID and window title. Choose **Restore Selected** or **Skip Restore** in that existing editor, then run `editor status`; do not launch a second editor for the project.

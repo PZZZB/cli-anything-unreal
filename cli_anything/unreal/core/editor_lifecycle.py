@@ -93,7 +93,11 @@ def _same_project_path(left: str | None, right: str | None) -> bool:
         return Path(left).as_posix().lower() == Path(right).as_posix().lower()
 
 def _check_already_running(session, state) -> dict | None:
-    from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs, find_running_editors
+    from cli_anything.unreal.utils.ue_backend import (
+        _windows_process_exists,
+        detect_ue_dialogs,
+        find_running_editors,
+    )
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
 
     running = find_running_editors()
@@ -118,6 +122,8 @@ def _check_already_running(session, state) -> dict | None:
                     "project": proc_project,
                     "message": f"Editor is already running for this project (PID {editor_pid}).",
                 }
+            if sys.platform == "win32" and _windows_process_exists(editor_pid) is False:
+                continue
             active_launch = _active_launch_task_for_project(proc_project, editor_pid)
             if active_launch:
                 starting = {
