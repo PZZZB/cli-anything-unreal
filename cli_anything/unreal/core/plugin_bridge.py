@@ -569,6 +569,7 @@ def compile_bridge_plugin(
             resolved_engine_root,
             config,
             [_PLUGIN_NAME],
+            require_requested_module_product=False,
         )
     result["output_validation"] = output_validation or {"status": "ok"}
     if output_validation.get("status") == "error":

@@ -946,8 +946,16 @@ def _validate_win64_editor_build_products(
     engine_root: str,
     config: str,
     modules: list[str] | tuple[str, ...] | None = None,
+    *,
+    require_requested_module_product: bool = True,
 ) -> dict:
-    """Validate PE products declared by UE's generated Editor target receipt."""
+    """Validate PE products declared by UE's generated Editor target receipt.
+
+    ``modules`` also enables RequiredResource manifest checks. Some project
+    receipts do not enumerate project-plugin DLLs, so callers that validate a
+    plugin separately can validate all receipt PE products without requiring a
+    matching module product.
+    """
     target, target_error = _resolve_editor_target(uproject_path)
     if target_error or not target:
         return {}
@@ -1017,7 +1025,7 @@ def _validate_win64_editor_build_products(
             continue
         if Path(raw_path).suffix.casefold() not in _PE_BUILD_PRODUCT_SUFFIXES:
             continue
-        if requested_modules:
+        if requested_modules and require_requested_module_product:
             binary_tokens = set(Path(raw_path).stem.casefold().split("-"))
             if requested_modules.isdisjoint(binary_tokens):
                 continue
@@ -1060,7 +1068,7 @@ def _validate_win64_editor_build_products(
         }
 
     if validated_count == 0:
-        if requested_modules:
+        if requested_modules and require_requested_module_product:
             reason = (
                 "BuildProducts contains no PE file for requested module(s): "
                 + ", ".join(sorted(modules or ()))

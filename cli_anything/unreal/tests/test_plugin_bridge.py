@@ -481,7 +481,112 @@ class TestPluginBridge:
         assert initial_validation["status"] == "error"
         assert initial_validation["code"] == "INVALID_BUILD_OUTPUT"
         assert initial_validation["failure_kind"] == "missing_editor_module_manifests"
-        mock_validate.assert_called_once()
+        mock_validate.assert_called_once_with(
+            str(uproject),
+            str(engine_root),
+            "Development",
+            ["CliAnythingBridge"],
+            require_requested_module_product=False,
+        )
+
+    def test_compile_bridge_plugin_accepts_project_receipt_without_bridge_product(
+        self,
+        tmp_path,
+    ):
+        """Project receipts need not enumerate a separately verified plugin DLL."""
+        from cli_anything.unreal.core.plugin_bridge import (
+            compile_bridge_plugin,
+            ensure_plugin_deployed,
+        )
+
+        project_dir = tmp_path / "Project"
+        project_dir.mkdir()
+        uproject = project_dir / "Project.uproject"
+        uproject.write_text('{"FileVersion": 3}', encoding="utf-8")
+        source_dir = project_dir / "Source"
+        source_dir.mkdir()
+        (source_dir / "ProjectEditor.Target.cs").write_text(
+            "Type = TargetType.Editor;",
+            encoding="utf-8",
+        )
+        ensure_plugin_deployed(str(project_dir))
+
+        engine_root = tmp_path / "EngineRoot"
+        engine_bin = engine_root / "Engine" / "Binaries" / "Win64"
+        engine_bin.mkdir(parents=True)
+        (engine_bin / "UnrealEditor.exe").write_bytes(b"engine")
+        (engine_bin / "UnrealEditor.modules").write_text(
+            json.dumps({"BuildId": "engine-build", "Modules": {}}),
+            encoding="utf-8",
+        )
+
+        project_bin = project_dir / "Binaries" / "Win64"
+        project_bin.mkdir(parents=True)
+        project_editor = project_bin / "ProjectEditor.exe"
+        project_editor.write_bytes(b"project-editor")
+        project_modules = project_bin / "UnrealEditor.modules"
+        project_modules.write_text(
+            json.dumps({"BuildId": "engine-build", "Modules": {}}),
+            encoding="utf-8",
+        )
+        (project_bin / "ProjectEditor.target").write_text(
+            json.dumps({
+                "TargetName": "ProjectEditor",
+                "TargetType": "Editor",
+                "Platform": "Win64",
+                "Configuration": "Development",
+                "BuildProducts": [
+                    {"Path": str(project_editor), "Type": "Executable"},
+                    {"Path": str(project_modules), "Type": "RequiredResource"},
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        def targeted_compile(*args, **kwargs):
+            plugin_bin = (
+                project_dir
+                / "Plugins"
+                / "CliAnythingBridge"
+                / "Binaries"
+                / "Win64"
+            )
+            plugin_bin.mkdir(parents=True)
+            (plugin_bin / "UnrealEditor-CliAnythingBridge.dll").write_bytes(b"MZ")
+            return {
+                "status": "error",
+                "returncode": 0,
+                "code": "INVALID_BUILD_OUTPUT",
+                "failure_kind": "invalid_build_receipt",
+                "error": (
+                    "Compile exited 0, but the Editor target receipt is invalid: "
+                    "BuildProducts contains no PE file for requested module(s): "
+                    "CliAnythingBridge"
+                ),
+            }
+
+        with patch(
+            "cli_anything.unreal.core.build.compile_project",
+            side_effect=targeted_compile,
+        ), patch(
+            "cli_anything.unreal.core.build._validate_pe_image",
+            return_value=None,
+        ):
+            result = compile_bridge_plugin(
+                str(uproject),
+                engine_root=str(engine_root),
+            )
+
+        assert result["status"] == "ok"
+        assert result["full_editor_build_required"] is False
+        assert result["metadata_repair"]["action"] == "created"
+        assert result["output_validation"] == {"status": "ok"}
+        assert result["bridge_binary_status"]["ready"] is True
+        assert result["compile_result"]["status"] == "ok"
+        assert result["compile_result"]["output_recovered"] is True
+        assert result["compile_result"]["initial_output_validation"][
+            "failure_kind"
+        ] == "invalid_build_receipt"
 
     def test_compile_bridge_plugin_stops_before_full_build_when_target_invalid(
         self,
