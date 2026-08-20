@@ -2041,12 +2041,26 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         return cancelled_task
 
     def _record_launch_progress(progress: dict) -> None:
+        progress = dict(progress)
+        waiting_for_user = progress.get("status") == "waiting_for_user_action"
+        if waiting_for_user:
+            progress.setdefault(
+                "next_command",
+                f'ue-cli --project "{state.session.project_path}" editor status {task_id}',
+            )
         transition_task(
             task_id,
             status="running",
-            phase="waiting_remote_control",
+            phase="waiting_user_action" if waiting_for_user else "waiting_remote_control",
             log_file=str(log_file),
             result_patch=progress,
+            result_remove=() if waiting_for_user else (
+                "blocking_reason",
+                "blocking_dialog",
+                "message",
+                "suggestion",
+                "next_command",
+            ),
         )
 
     wait_result = _wait_for_api(
@@ -2253,11 +2267,6 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             "next_command",
             f'ue-cli --project "{state.session.project_path}" editor status {task["task_id"]}',
         )
-    elif wait_result.get("status") == "blocked_by_restore_packages":
-        wait_result.setdefault(
-            "next_command",
-            f'ue-cli --project "{state.session.project_path}" editor status',
-        )
 
     wait_status = wait_result.get("status")
     if wait_status == "online":
@@ -2270,17 +2279,6 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         final_error = {
             "code": "TASK_TIMEOUT",
             "message": wait_result.get("error", "Editor startup timed out"),
-            "details": wait_result,
-        }
-    elif wait_status == "blocked_by_restore_packages":
-        final_status = "failed"
-        final_phase = "blocked"
-        final_error = {
-            "code": "EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES",
-            "message": wait_result.get(
-                "error",
-                "Editor startup is blocked by the Restore Packages dialog.",
-            ),
             "details": wait_result,
         }
     elif wait_status == "map_mismatch":

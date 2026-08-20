@@ -88,7 +88,7 @@ Task records keep lifecycle `status` separate from the current `phase` (for exam
 Before an offline or starting process snapshot blocks a Windows launch, ue-cli revalidates PID existence. A confirmed exit is ignored; a live or inconclusive PID remains preserved.
 Interrupting a foreground build command with Ctrl+C synchronously cancels its owned task and process tree before ue-cli exits. If safe cancellation cannot be confirmed, ue-cli returns `TASK_CANCEL_FAILED` with remaining-process diagnostics instead of only printing `Aborted!`.
 
-If crash recovery blocks startup, the launch task returns `EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES` with the matching UnrealEditor PID and window title. Choose **Restore Selected** or **Skip Restore** in that existing editor, then run `editor status`; do not launch a second editor for the project.
+If crash recovery blocks startup, the launch task stays `running` with phase `waiting_user_action`, matching UnrealEditor PID/window evidence, and a poll command. Choose **Restore Selected** or **Skip Restore** in that existing editor; the same launch task resumes and can complete. Its configured launch timeout still applies. ue-cli never auto-clicks this dialog.
 
 For agent-owned interactive sessions, ue-cli can broker standard UE confirmation dialogs through a local mailbox. Arm it before an operation that may prompt:
 

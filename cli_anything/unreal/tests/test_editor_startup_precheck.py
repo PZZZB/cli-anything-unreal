@@ -4386,14 +4386,18 @@ def test_wait_for_api_classifies_external_filesystem_ddc_crash(tmp_path):
     )
 
 
-def test_detect_ue_dialogs_matches_restore_packages_top_level_for_process(monkeypatch):
+@pytest.mark.parametrize("restore_title", ["Restore Packages", "恢复包"])
+def test_detect_ue_dialogs_matches_restore_packages_top_level_for_process(
+    monkeypatch,
+    restore_title,
+):
     import ctypes
 
     from cli_anything.unreal.utils.ue_backend import detect_ue_dialogs
 
     class FakeUser32:
         titles = {
-            101: "Restore Packages",
+            101: restore_title,
             202: "Warning",
         }
         process_ids = {
@@ -4433,13 +4437,34 @@ def test_detect_ue_dialogs_matches_restore_packages_top_level_for_process(monkey
     )
 
     assert detect_ue_dialogs(process_id=4242) == [{
-        "title": "Restore Packages",
+        "title": restore_title,
         "hwnd": 101,
         "process_id": 4242,
     }]
 
 
-def test_wait_for_api_reports_restore_packages_blocker(tmp_path):
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Restore Packages", True),
+        ("恢复包", True),
+        ("Warning", False),
+    ],
+)
+def test_restore_packages_blocker_recognizes_supported_titles(title, expected):
+    from cli_anything.unreal.core.editor_lifecycle import _restore_packages_blocker
+
+    proc = MagicMock(pid=4242)
+    with patch(
+        "cli_anything.unreal.utils.ue_backend.detect_ue_dialogs",
+        return_value=[{"title": title, "hwnd": 101, "process_id": 4242}],
+    ):
+        result = _restore_packages_blocker(proc)
+
+    assert (result is not None) is expected
+
+
+def test_wait_for_api_waits_for_restore_packages_then_resumes(tmp_path):
     from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
 
     log_file = tmp_path / "TestProj.log"
@@ -4458,16 +4483,21 @@ def test_wait_for_api_reports_restore_packages_blocker(tmp_path):
 
     with patch(
         "cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive",
-        return_value=False,
+        side_effect=[False, True],
+    ), patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+        return_value=4242,
     ), patch(
         "cli_anything.unreal.core.editor_lifecycle._restore_packages_blocker",
-        return_value=blocker,
+        side_effect=[blocker, None, None],
     ), patch(
         "cli_anything.unreal.core.editor_lifecycle.time.time",
-        side_effect=[100.0, 100.1],
+        return_value=100.1,
     ), patch(
         "cli_anything.unreal.core.editor_lifecycle.time.monotonic",
         return_value=200.0,
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle.time.sleep",
     ):
         result = _wait_for_api(
             proc,
@@ -4478,12 +4508,62 @@ def test_wait_for_api_reports_restore_packages_blocker(tmp_path):
             on_progress=progress.append,
         )
 
-    assert result["status"] == "blocked_by_restore_packages"
+    assert result["status"] == "online"
+    assert result["process_alive"] is True
+    assert progress[0]["status"] == "waiting_for_user_action"
+    assert progress[0]["blocking_dialog"] == blocker
+    assert progress[1]["status"] == "waiting_for_remote_control"
+    assert progress[2]["status"] == "waiting_for_remote_control"
+
+
+def test_wait_for_api_times_out_if_restore_packages_stays_open(tmp_path):
+    from cli_anything.unreal.core.editor_lifecycle import _wait_for_api
+
+    log_file = tmp_path / "TestProj.log"
+    log_file.write_text("", encoding="utf-8")
+    proc = MagicMock(pid=4242)
+    proc.poll.return_value = None
+    state = MagicMock(json_output=True)
+    progress = []
+    blocker = {
+        "title": "Restore Packages",
+        "hwnd": 101,
+        "process_id": 4242,
+    }
+
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI.is_alive",
+        return_value=False,
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle._restore_packages_blocker",
+        return_value=blocker,
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle._diagnose_api_unreachable",
+        return_value={},
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle.time.time",
+        side_effect=[100.0, 100.1, 100.2, 101.1],
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle.time.monotonic",
+        return_value=200.0,
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle.time.sleep",
+    ):
+        result = _wait_for_api(
+            proc,
+            30021,
+            1,
+            log_file,
+            state,
+            on_progress=progress.append,
+        )
+
+    assert result["status"] == "timeout"
     assert result["failure_kind"] == "blocked_by_restore_packages"
     assert result["startup_phase"] == "blocked_by_restore_packages"
     assert result["blocking_dialog"] == blocker
-    assert result["process_alive"] is True
-    assert progress[-1] == result
+    assert "1s launch timeout" in result["error"]
+    assert progress[-1]["status"] == "waiting_for_user_action"
 
 
 def test_run_editor_launch_task_persists_wait_progress(tmp_path, monkeypatch):
@@ -4802,8 +4882,8 @@ def test_run_editor_launch_task_promotes_specific_startup_error_code(
     assert result["error"]["details"] == wait_result
 
 
-def test_run_editor_launch_task_reports_restore_packages_error(tmp_path, monkeypatch):
-    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+def test_run_editor_launch_task_keeps_restore_packages_recoverable(tmp_path, monkeypatch):
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task, load_task
 
     monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
     project_dir = tmp_path / "TestProj"
@@ -4820,6 +4900,50 @@ def test_run_editor_launch_task_reports_restore_packages_error(tmp_path, monkeyp
     })
     proc = MagicMock()
     proc.pid = 4242
+
+    def wait_for_choice_then_resume(
+        _proc,
+        _port,
+        _timeout,
+        _log_file,
+        _state,
+        on_progress=None,
+    ):
+        assert on_progress is not None
+        on_progress({
+            "status": "waiting_for_user_action",
+            "startup_phase": "blocked_by_restore_packages",
+            "blocking_reason": "restore_packages",
+            "process_alive": True,
+            "blocking_dialog": {
+                "title": "Restore Packages",
+                "hwnd": 101,
+                "process_id": 4242,
+            },
+        })
+        waiting = load_task(task["task_id"])
+        assert waiting["status"] == "running"
+        assert waiting["phase"] == "waiting_user_action"
+        assert waiting["result"]["status"] == "waiting_for_user_action"
+        assert waiting["result"]["next_command"].endswith(
+            f"editor status {task['task_id']}"
+        )
+        on_progress({
+            "status": "waiting_for_remote_control",
+            "startup_phase": "waiting_for_remote_control",
+            "process_alive": True,
+        })
+        resumed = load_task(task["task_id"])
+        assert resumed["status"] == "running"
+        assert resumed["phase"] == "waiting_remote_control"
+        assert "blocking_dialog" not in resumed["result"]
+        assert "next_command" not in resumed["result"]
+        return {
+            "status": "online",
+            "startup_phase": "ready",
+            "process_alive": True,
+            "port": 30021,
+        }
 
     with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
         "ready": True,
@@ -4839,25 +4963,16 @@ def test_run_editor_launch_task_reports_restore_packages_error(tmp_path, monkeyp
              "message": "Bridge plugin binary is ready.",
          }), \
          patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=proc), \
-         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={
-             "status": "blocked_by_restore_packages",
-             "startup_phase": "blocked_by_restore_packages",
-             "process_alive": True,
-             "blocking_dialog": {
-                 "title": "Restore Packages",
-                 "hwnd": 101,
-                 "process_id": 4242,
-             },
-             "error": "Editor startup is blocked by the Restore Packages dialog.",
-         }):
+         patch(
+             "cli_anything.unreal.core.editor_lifecycle._wait_for_api",
+             side_effect=wait_for_choice_then_resume,
+         ):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
-    expected = f'ue-cli --project "{uproject}" editor status'
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "EDITOR_LAUNCH_BLOCKED_BY_RESTORE_PACKAGES"
-    assert result["result"]["status"] == "blocked_by_restore_packages"
-    assert result["result"]["next_command"] == expected
-    assert result["error"]["details"]["blocking_dialog"]["process_id"] == 4242
+    assert result["status"] == "completed"
+    assert result["phase"] == "online"
+    assert result["result"]["status"] == "online"
+    assert "error" not in result
 
 
 def test_summarize_startup_precheck_includes_bridge_plugin_issues():

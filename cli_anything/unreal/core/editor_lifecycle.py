@@ -797,7 +797,9 @@ def _restore_packages_blocker(proc) -> dict | None:
     for dialog in dialogs:
         title = str(dialog.get("title") or "")
         title_lower = title.casefold()
-        if "restore" not in title_lower or "package" not in title_lower:
+        is_english_restore = "restore" in title_lower and "package" in title_lower
+        is_simplified_chinese_restore = title.strip() == "恢复包"
+        if not (is_english_restore or is_simplified_chinese_restore):
             continue
         return {
             "title": title,
@@ -828,6 +830,7 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
     heartbeat_interval = 60.0
     next_beat = start_time + heartbeat_interval
     result = {}
+    active_restore_blocker = None
     startup_log_offset = log_file.stat().st_size if log_file.exists() else 0
     log_offset = startup_log_offset
 
@@ -835,19 +838,19 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
         returncode = proc.poll()
         elapsed_seconds = int(time.monotonic() - progress_start)
         progress = {
+            "status": "waiting_for_remote_control",
             "startup_phase": "waiting_for_remote_control",
             "elapsed_seconds": elapsed_seconds,
             "port": poll_port,
             "process_alive": returncode is None,
             "log_file": str(log_file),
         }
-        if on_progress is not None:
-            try:
-                on_progress(progress)
-            except Exception:
-                pass
-
         if returncode is not None:
+            if on_progress is not None:
+                try:
+                    on_progress(progress)
+                except Exception:
+                    pass
             crash_result = {
                 "status": "crashed",
                 "failure_kind": "editor_process_exited",
@@ -886,6 +889,44 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
                 )
             return crash_result
 
+        restore_blocker = _restore_packages_blocker(proc)
+        if restore_blocker is not None:
+            active_restore_blocker = restore_blocker
+            blocked_result = {
+                "status": "waiting_for_user_action",
+                "startup_phase": "blocked_by_restore_packages",
+                "blocking_reason": "restore_packages",
+                "port": poll_port,
+                "process_alive": True,
+                "elapsed_seconds": elapsed_seconds,
+                "log_file": str(log_file),
+                "blocking_dialog": restore_blocker,
+                "message": "Editor startup is waiting for a choice in the Restore Packages dialog.",
+                "suggestion": (
+                    "Choose Restore Selected or Skip Restore in the Unreal Editor dialog, "
+                    "then keep polling this launch task. Do not start a second editor for this project."
+                ),
+            }
+            if on_progress is not None:
+                try:
+                    on_progress(blocked_result)
+                except Exception:
+                    pass
+            now = time.time()
+            if now >= next_beat:
+                if not state.json_output:
+                    _emit_heartbeat("editor", now - start_time, Path(log_file))
+                next_beat += heartbeat_interval
+            time.sleep(poll_interval)
+            continue
+        active_restore_blocker = None
+
+        if on_progress is not None:
+            try:
+                on_progress(progress)
+            except Exception:
+                pass
+
         if api.is_alive():
             owner_pid = None
             owner_verified = sys.platform != "win32"
@@ -921,30 +962,6 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
                     on_progress(progress)
                 except Exception:
                     pass
-
-        restore_blocker = _restore_packages_blocker(proc)
-        if restore_blocker is not None:
-            blocked_result = {
-                "status": "blocked_by_restore_packages",
-                "failure_kind": "blocked_by_restore_packages",
-                "startup_phase": "blocked_by_restore_packages",
-                "port": poll_port,
-                "process_alive": True,
-                "elapsed_seconds": elapsed_seconds,
-                "log_file": str(log_file),
-                "blocking_dialog": restore_blocker,
-                "error": "Editor startup is blocked by the Restore Packages dialog.",
-                "suggestion": (
-                    "Choose Restore Selected or Skip Restore in the Unreal Editor dialog, "
-                    "then run editor status. Do not start a second editor for this project."
-                ),
-            }
-            if on_progress is not None:
-                try:
-                    on_progress(blocked_result)
-                except Exception:
-                    pass
-            return blocked_result
 
         elapsed = time.time() - start_time
         if elapsed > 2:
@@ -986,4 +1003,21 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
         result["error"] += f" Log hint: {log_error}"
     diagnostics = _diagnose_api_unreachable(log_file, poll_port, since_offset=startup_log_offset)
     result.update(diagnostics)
+    if active_restore_blocker is not None:
+        result.update({
+            "failure_kind": "blocked_by_restore_packages",
+            "startup_phase": "blocked_by_restore_packages",
+            "blocking_reason": "restore_packages",
+            "blocking_dialog": active_restore_blocker,
+            "error": (
+                "Editor startup remained blocked by the Restore Packages dialog "
+                f"for the {timeout}s launch timeout."
+                if timeout is not None
+                else "Editor startup remained blocked by the Restore Packages dialog."
+            ),
+            "suggestion": (
+                "Choose Restore Selected or Skip Restore in the existing Unreal Editor, "
+                "then run editor status. Do not start a second editor for this project."
+            ),
+        })
     return result

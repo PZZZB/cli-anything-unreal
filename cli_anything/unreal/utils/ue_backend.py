@@ -2537,7 +2537,7 @@ def detect_ue_dialogs(process_id: int | None = None) -> list[dict]:
         "confirmation", "delete", "replace",
         # Recovery / autosave
         "autosave", "recover", "auto-save", "unsaved",
-        "crash", "restore", "unexpected shutdown",
+        "crash", "restore", "unexpected shutdown", "恢复包",
     ]
 
     target_pid = int(process_id) if process_id is not None else None
