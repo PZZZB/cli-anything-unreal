@@ -16,6 +16,7 @@ Workflow examples live in sibling workflow docs.
 | `editor open-level /Game/PATH` | Safely open an existing level via `LevelEditorSubsystem.LoadLevel`, then verifies the active editor world. The path must include its Unreal mount root; use this instead of top-level `EditorLoadingAndSavingUtils.load_map` in `run-script` | Yes |
 | `editor save-level` | Safely save current level; editor disconnects return top-level `EDITOR_CONNECTION_LOST` | Yes |
 | `editor exec [--timeout SEC] [--log-wait SEC] COMMAND` | Run UE console command and return captured project Output Log text. For `Automation RunTests`, `--log-wait` waits up to SEC for `Automation Test Queue Empty`. Separate-process output is not observable: `LiveCoding.Compile` returns `LIVECODING_RESULT_UNOBSERVABLE` after submission so it cannot be mistaken for compile success | Yes |
+| `editor live-coding-compile [--timeout SEC] [--log-wait SEC]` | Windows UE5: run `LiveCoding.CompileSync`, wait for its terminal result, and report success/no-changes/failure/cancellation. Timeouts and disconnects stay unknown and are never retried. UE4 returns `LIVECODING_SYNC_UNSUPPORTED` before dispatch | Yes (UE5) |
 | `editor viewport camera [--timeout SEC]` | Read active Level Viewport camera using UE-version-compatible fallback | Yes |
 | `editor viewport game-view [on\|off\|toggle]` | Read or change active Level Viewport game-view state; changes return verified before/after values | Yes |
 | `editor viewport bookmark jump --index N [--timeout SEC]` | Jump Level Viewport bookmark 0-9; Windows only | Yes |

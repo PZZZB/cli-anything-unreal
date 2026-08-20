@@ -161,7 +161,7 @@ ue-cli editor exec "r.DumpRenderTargetPoolMemory"
 
 `editor exec` returns bounded captured output in `log_output`/`log_text`. `omitted_line_count` reports lines excluded by filtering or the fixed inline limit; `log_file` keeps complete diagnostics. Automation runs retain lifecycle/result lines instead of unrelated discovery noise.
 
-`LiveCoding.Compile` is different: Unreal completes it asynchronously in the separate `LiveCodingConsole`, whose final result is not available through Remote Control or the project Output Log. `editor exec LiveCoding.Compile` therefore submits the request but exits non-zero with `LIVECODING_RESULT_UNOBSERVABLE`; never use it as a compile-success check. For a deterministic result, close the editor and run `build compile`, or inspect `LiveCodingConsole` manually when the editor must remain open.
+`LiveCoding.Compile` is different: Unreal completes it asynchronously in the separate `LiveCodingConsole`. `editor exec LiveCoding.Compile` therefore submits the request but exits non-zero with `LIVECODING_RESULT_UNOBSERVABLE`; never use it as a compile-success check. On Windows UE5, use `editor live-coding-compile --timeout 600` to invoke `LiveCoding.CompileSync` and wait for a structured success, no-changes, failure, or cancellation result while the editor remains open. A timeout or disconnect stays unknown and is never retried; an editor crash includes process and fatal-log evidence when available. UE4.26 lacks the synchronous engine API and returns `LIVECODING_SYNC_UNSUPPORTED` before dispatch.
 
 Negative CVar values are valid:
 

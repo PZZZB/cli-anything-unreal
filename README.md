@@ -187,6 +187,7 @@ ue-cli --output json --project "$Project" screenshot capture --path "F:/output/s
 ue-cli --output json --project "$Project" scene property "<StaticMeshComponentPath>" "LODData[0].PaintedVertices"
 ue-cli --output json --project "$Project" editor run-script --no-save -c 'result={"label":"quoted value"}'
 ue-cli --output json --project "$Project" editor cvar get r.VSync --timeout 10
+ue-cli --output json --project "$Project" editor live-coding-compile --timeout 600
 ```
 
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
@@ -209,6 +210,7 @@ Each `editor run-script` invocation receives fresh globals. Deferred Unreal call
 If the editor connection resets, `EDITOR_CONNECTION_LOST` keeps script delivery unknown and unsafe to replay. When the selected editor exits or writes new fatal/assert lines during the call, details include the editor PID, process status or exit code when available, configured log path, and a bounded `fatal_log_tail`.
 `editor cvar get` confirms the selected editor's TCP listener, then uses the remaining timeout for the requested CVar. It does not spend the budget on a duplicate functional readiness call. Query timeouts report the actual request stage; verified missing CVars return `CVAR_NOT_FOUND`.
 `editor exec --timeout` never redispatches a command after an ambiguous transport failure. A timeout returns nonzero `EDITOR_EXEC_DELIVERY_UNKNOWN`; inspect editor state and logs before retrying because a non-idempotent command may already have run. Inline command logs are bounded; `omitted_line_count` reports omitted lines and `log_file` retains complete diagnostics. Automation commands lower Unreal's runtime-only interactive-FPS gate to 1 FPS without saving project configuration, so background agent runs do not require human window focus.
+On Windows UE5, `editor live-coding-compile` invokes Unreal's synchronous `LiveCoding.CompileSync`, waits for `success`, `no_changes`, `failed`, or `cancelled`, and returns that terminal state. A timeout remains unknown and is never retried. Editor exits include PID and bounded fatal-log evidence when available. UE4 returns `LIVECODING_SYNC_UNSUPPORTED` before dispatch because UE4.26 has no synchronous Live Coding result API.
 
 ## Multiple Editors
 

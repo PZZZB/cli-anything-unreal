@@ -2707,6 +2707,116 @@ def _deterministic_compile_commands(state: AppState) -> list[str]:
     ]
 
 
+@editor_group.command("live-coding-compile")
+@click.option(
+    "--timeout",
+    default=600,
+    type=click.IntRange(min=1),
+    help="Max seconds to wait for the UE5 Live Coding terminal result.",
+)
+@click.option(
+    "--log-wait",
+    default=3.0,
+    type=click.FloatRange(min=0.0),
+    help="Max seconds to wait for the terminal result to flush to the project log.",
+)
+@handle_error
+@click.pass_obj
+def editor_live_coding_compile(state: AppState, timeout: int, log_wait: float):
+    """Compile through UE5 Live Coding and wait for its terminal result."""
+    from cli_anything.unreal.core.editor_lifecycle import (
+        capture_editor_disconnect_context,
+        close_editor_disconnect_context,
+        collect_editor_disconnect_diagnostics,
+    )
+    from cli_anything.unreal.core.live_coding import (
+        finalize_live_coding_compile_result,
+        get_live_coding_sync_support,
+        raise_live_coding_request_failure,
+    )
+
+    ensure_inferred_project(state)
+    support = get_live_coding_sync_support(state.session.engine_root)
+    if support["supported"] is False:
+        raise AppError(
+            "LIVECODING_SYNC_UNSUPPORTED",
+            "Synchronous Live Coding result observation is unavailable for this engine.",
+            exit_code=3,
+            suggestion=(
+                "Use Unreal Engine 5 on Windows, or close the editor and run "
+                "`ue-cli --project <path-to.uproject> build compile`."
+            ),
+            details=support,
+        )
+
+    api = require_editor(state)
+    log_file = _resolve_editor_log_file(state)
+    log_start = log_file.stat().st_size if log_file and log_file.exists() else 0
+    disconnect_context = capture_editor_disconnect_context(api, state.session.project_path)
+    started_at = time.monotonic()
+    try:
+        result = _exec_console_with_log_capture(
+            api,
+            "LiveCoding.CompileSync",
+            timeout=timeout,
+        )
+        duration_seconds = time.monotonic() - started_at
+        if result.get("error"):
+            diagnostics = collect_editor_disconnect_diagnostics(disconnect_context)
+            raise_live_coding_request_failure(
+                result,
+                timeout=timeout,
+                duration_seconds=duration_seconds,
+                support=support,
+                diagnostics=diagnostics,
+            )
+
+        log_begin_marker = result.pop("_log_begin_marker", None)
+        log_end_marker = result.pop("_log_end_marker", None)
+        file_log_text = ""
+        if log_begin_marker and log_end_marker:
+            file_log_text = _read_log_delta(
+                log_file,
+                log_start,
+                wait_seconds=log_wait,
+                begin_marker=log_begin_marker,
+                end_marker=log_end_marker,
+            )
+        if file_log_text:
+            result["log_file"] = str(log_file)
+            existing_output = list(result.get("log_output") or [])
+            seen_output = {
+                str(item.get("Output", ""))
+                for item in existing_output
+                if isinstance(item, dict)
+            }
+            result["log_output"] = existing_output + [
+                {
+                    "Type": "Info",
+                    "Output": line,
+                    "Source": "editor_log_file",
+                }
+                for line in file_log_text.splitlines()
+                if line and line not in seen_output
+            ]
+            result["log_text"] = "\n".join(
+                str(item.get("Output", ""))
+                for item in result["log_output"]
+                if isinstance(item, dict)
+            )
+            result["capture_mode"] = "editor_log_file"
+
+        _bound_editor_exec_logs(result, log_file, 0)
+        result = finalize_live_coding_compile_result(
+            result,
+            duration_seconds=duration_seconds,
+            support=support,
+        )
+        output(result, state)
+    finally:
+        close_editor_disconnect_context(disconnect_context)
+
+
 @editor_group.command("exec")
 @click.option(
     "--timeout",

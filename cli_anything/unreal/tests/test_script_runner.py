@@ -2760,6 +2760,164 @@ result = {'status': 'live_editor_ok'}
         ]
 
 
+    def test_editor_live_coding_compile_reports_no_changes(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        result_payload = {
+            "status": "executed",
+            "command": "LiveCoding.CompileSync",
+            "capture_mode": "python_log_output",
+            "log_output": [{
+                "Type": "Info",
+                "Output": "LogLiveCoding: Display: Live coding succeeded, no code changes detected",
+            }],
+            "log_text": "LogLiveCoding: Display: Live coding succeeded, no code changes detected",
+            "_log_begin_marker": None,
+            "_log_end_marker": None,
+        }
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor", return_value=MagicMock()), \
+             patch("cli_anything.unreal.commands.editor._resolve_editor_log_file", return_value=None), \
+             patch("cli_anything.unreal.commands.editor._exec_console_with_log_capture", return_value=result_payload):
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "live-coding-compile",
+                "--timeout", "30", "--log-wait", "0",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["result"]
+        assert data["status"] == "completed"
+        assert data["completion_observable"] is True
+        assert data["completion_status"] == "no_changes"
+        assert data["succeeded"] is True
+
+
+    def test_editor_live_coding_compile_promotes_failure(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        result_payload = {
+            "status": "executed",
+            "command": "LiveCoding.CompileSync",
+            "capture_mode": "python_log_output",
+            "log_output": [{
+                "Type": "Error",
+                "Output": "LogLiveCoding: Error: Live coding failed, please see Live console",
+            }],
+            "log_text": "LogLiveCoding: Error: Live coding failed, please see Live console",
+            "_log_begin_marker": None,
+            "_log_end_marker": None,
+        }
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor", return_value=MagicMock()), \
+             patch("cli_anything.unreal.commands.editor._resolve_editor_log_file", return_value=None), \
+             patch("cli_anything.unreal.commands.editor._exec_console_with_log_capture", return_value=result_payload):
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "live-coding-compile",
+                "--timeout", "30", "--log-wait", "0",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "LIVECODING_COMPILE_FAILED"
+        assert data["details"]["completion_observable"] is True
+        assert data["details"]["completion_status"] == "failed"
+        assert data["details"]["succeeded"] is False
+
+
+    def test_editor_live_coding_compile_rejects_ue4_before_dispatch(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        support = {
+            "supported": False,
+            "engine_version": "4.26.2",
+            "minimum_engine_version": "5.0",
+            "platform": "win32",
+            "reason": "engine_version_unsupported",
+        }
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.core.live_coding.get_live_coding_sync_support",
+            return_value=support,
+        ), patch("cli_anything.unreal.commands.editor.require_editor") as require:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "live-coding-compile",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "LIVECODING_SYNC_UNSUPPORTED"
+        assert data["details"] == support
+        require.assert_not_called()
+
+
+    def test_editor_live_coding_compile_reports_editor_crash(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        failure = {
+            "error": "Connection reset by peer",
+            "raw": {"error": "Connection reset by peer"},
+        }
+        diagnostics = {
+            "failure_kind": "editor_process_exited",
+            "editor_pid": 4242,
+            "process_alive": False,
+            "fatal_log_tail": ["Fatal error: UObjectHash.cpp Line 644"],
+        }
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor", return_value=MagicMock()), \
+             patch("cli_anything.unreal.commands.editor._resolve_editor_log_file", return_value=None), \
+             patch("cli_anything.unreal.commands.editor._exec_console_with_log_capture", return_value=failure), \
+             patch("cli_anything.unreal.core.editor_lifecycle.capture_editor_disconnect_context", return_value={}), \
+             patch("cli_anything.unreal.core.editor_lifecycle.collect_editor_disconnect_diagnostics", return_value=diagnostics), \
+             patch("cli_anything.unreal.core.editor_lifecycle.close_editor_disconnect_context"):
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "live-coding-compile",
+                "--timeout", "30",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "LIVECODING_EDITOR_CRASHED"
+        assert data["details"]["editor_pid"] == 4242
+        assert data["details"]["retry_safe"] is False
+        assert "UObjectHash.cpp" in data["details"]["fatal_log_tail"][0]
+
+
+    def test_editor_live_coding_compile_timeout_stays_unknown(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        error = "HTTPConnectionPool: Read timed out. (read timeout=1)"
+        failure = {"error": error, "raw": {"error": error}}
+        diagnostics = {
+            "editor_pid": 4242,
+            "process_alive": True,
+            "process_exit_status": "running",
+        }
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor", return_value=MagicMock()), \
+             patch("cli_anything.unreal.commands.editor._resolve_editor_log_file", return_value=None), \
+             patch("cli_anything.unreal.commands.editor._exec_console_with_log_capture", return_value=failure), \
+             patch("cli_anything.unreal.core.editor_lifecycle.capture_editor_disconnect_context", return_value={}), \
+             patch("cli_anything.unreal.core.editor_lifecycle.collect_editor_disconnect_diagnostics", return_value=diagnostics), \
+             patch("cli_anything.unreal.core.editor_lifecycle.close_editor_disconnect_context"):
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "live-coding-compile",
+                "--timeout", "1",
+            ])
+
+        assert result.exit_code == 4
+        data = json.loads(result.output)
+        assert data["code"] == "LIVECODING_COMPILE_TIMEOUT"
+        assert data["details"]["completion_status"] == "unknown"
+        assert data["details"]["process_alive"] is True
+        assert data["details"]["retry_safe"] is False
+
+
     def test_editor_run_script_cli(self, tmp_path):
         """``editor run-script`` should call run_python_script."""
         from click.testing import CliRunner
