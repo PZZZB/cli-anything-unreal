@@ -3274,7 +3274,7 @@ def test_plugin_upgrade_reports_locked_dll_from_compile_log(mini_project, tmp_pa
 
 
 def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
-    """_run_editor_launch_task compiles and retries when plugin fails to load."""
+    """Bridge load failure terminates its editor before compile and retry."""
     from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
 
     mock_proc = MagicMock()
@@ -3318,10 +3318,122 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
 
     mock_compile.assert_called_once()
+    mock_proc.terminate.assert_called_once()
+    mock_proc.wait.assert_called_once_with(timeout=5)
     assert mock_popen.call_count == 2
     assert all("-unattended" in call.args[0] for call in mock_popen.call_args_list)
     assert result["status"] == "completed"
     assert result["result"].get("recompiled") is True
+    assert result["result"]["startup_failure"]["plugin"] == "CliAnythingBridge"
+    assert result["result"]["bridge_rebuild_editor_cleanup"]["ok"] is True
+
+
+def test_run_editor_launch_task_reports_unrelated_plugin_load_failure(tmp_path):
+    """An unrelated plugin failure must not trigger a Bridge rebuild."""
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 4242
+
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+    startup_error = (
+        "Plugin 'MFMeshDecal' failed to load because module "
+        "'MFMeshDecalEditor' could not be loaded."
+    )
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date", "version": "1.34"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin", return_value={
+             "status": "error", "code": "BRIDGE_OUTPUT_CLEAN_FAILED"
+         }) as mock_compile, \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={
+             "status": "error_dialog", "error": startup_error
+         }):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "EDITOR_PLUGIN_LOAD_FAILED"
+    assert result["error"]["details"]["plugin"] == "MFMeshDecal"
+    assert result["error"]["details"]["module"] == "MFMeshDecalEditor"
+    assert result["error"]["details"]["diagnostic"] == startup_error
+    assert result["error"]["details"]["bridge_rebuild_attempted"] is False
+    mock_compile.assert_not_called()
+    mock_popen.assert_called_once()
+
+
+def test_run_editor_launch_task_stops_if_bridge_editor_cannot_be_terminated(tmp_path):
+    """Bridge compile must not begin while the spawned editor may hold its DLL."""
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    mock_proc = MagicMock(pid=4242)
+    project_dir = tmp_path / "TestProj"
+    project_dir.mkdir()
+    uproject = project_dir / "TestProj.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": 30010,
+    })
+    startup_error = (
+        "Plugin 'CliAnythingBridge' failed to load because module "
+        "'CliAnythingBridge' could not be found."
+    )
+    cleanup = {"ok": False, "pid": 4242, "still_running": True}
+
+    with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
+        "ready": True,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+    }), \
+         patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockEngine"), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockEngine/Binaries/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_port_in_use", return_value=None), \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge", return_value={
+             "deployed": True, "action": "already_up_to_date"
+         }), \
+         patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=False), \
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True, "reason": "ok", "message": "Bridge plugin binary is ready."
+         }), \
+         patch("cli_anything.unreal.core.tasks._terminate_just_spawned_process", return_value=cleanup), \
+         patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin") as mock_compile, \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc), \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={
+             "status": "error_dialog", "error": startup_error
+         }):
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "BRIDGE_REBUILD_EDITOR_TERMINATION_FAILED"
+    assert result["error"]["details"]["startup_failure"]["diagnostic"] == startup_error
+    assert result["error"]["details"]["editor_cleanup"] == cleanup
+    mock_compile.assert_not_called()
 
 
 def test_run_editor_launch_task_precompiles_when_bridge_binary_missing(tmp_path):

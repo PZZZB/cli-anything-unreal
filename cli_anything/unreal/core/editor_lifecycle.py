@@ -40,6 +40,14 @@ _FILESYSTEM_DDC_MAINTAINER_STACK_PATTERN = re.compile(
     r"FFileSystemCacheStoreMaintainer::(?:CreateContentRoot|Scan|Loop)",
     re.IGNORECASE,
 )
+_PLUGIN_LOAD_FAILURE_PATTERN = re.compile(
+    r"\bPlugin\s+['\"](?P<plugin>[^'\"]+)['\"]\s+failed to load\b",
+    re.IGNORECASE,
+)
+_PLUGIN_LOAD_MODULE_PATTERN = re.compile(
+    r"\bmodule\s+['\"](?P<module>[^'\"]+)['\"]\s+could not be (?:found|loaded)\b",
+    re.IGNORECASE,
+)
 
 
 def _active_launch_task_for_project(
@@ -252,6 +260,36 @@ def _extract_log_error(text: str) -> tuple[str | None, str | None]:
             end = min(len(text), match.end() + 300)
             return text[start:end].strip(), pattern
     return None, None
+
+
+def _plugin_load_failure_diagnostics(error_text: str | None) -> dict | None:
+    """Extract one editor startup plugin/module failure without changing it."""
+    if not error_text:
+        return None
+
+    matching_line = None
+    plugin_match = None
+    for line in str(error_text).splitlines() or [str(error_text)]:
+        match = _PLUGIN_LOAD_FAILURE_PATTERN.search(line)
+        if match:
+            matching_line = line.strip()
+            plugin_match = match
+    if plugin_match is None or matching_line is None:
+        return None
+
+    result = {
+        "failure_kind": "plugin_load_failure",
+        "diagnostic": matching_line,
+        "plugin": plugin_match.group("plugin"),
+        "suggestion": (
+            "Verify that this plugin is enabled and that its module is built for "
+            "the selected Unreal Engine, then retry editor launch."
+        ),
+    }
+    module_match = _PLUGIN_LOAD_MODULE_PATTERN.search(str(error_text))
+    if module_match:
+        result["module"] = module_match.group("module")
+    return result
 
 
 def _full_editor_rebuild_diagnostics(
@@ -969,9 +1007,16 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
             if log_error:
                 error_result = {
                     "status": "error_dialog",
+                    "startup_phase": "blocked_by_error_dialog",
+                    "port": poll_port,
+                    "process_alive": True,
+                    "elapsed_seconds": elapsed_seconds,
                     "log_file": str(log_file),
                     "error": f"Editor appears stuck on an error dialog: {log_error}",
                 }
+                plugin_load_failure = _plugin_load_failure_diagnostics(log_error)
+                if plugin_load_failure:
+                    error_result.update(plugin_load_failure)
                 error_result.update(
                     _full_editor_rebuild_diagnostics(
                         project_path=getattr(state.session, "project_path", None),

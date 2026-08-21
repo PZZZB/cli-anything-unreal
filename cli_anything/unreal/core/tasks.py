@@ -1765,6 +1765,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         _check_already_running,
         _check_port_in_use,
         _deploy_bridge,
+        _plugin_load_failure_diagnostics,
         _remote_control_launch_error,
         _resolve_launch_log_file,
         _summarize_startup_precheck,
@@ -2203,13 +2204,54 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         on_progress=_record_launch_progress,
     )
 
-    # Auto-compile and retry if plugin failed to load
-    if wait_result.get("status") == "error_dialog" and "failed to load" in wait_result.get("error", ""):
+    plugin_load_failure = _plugin_load_failure_diagnostics(wait_result.get("error"))
+    if plugin_load_failure:
+        wait_result.update(plugin_load_failure)
+
+    # Rebuild only when startup named CliAnythingBridge as the failing plugin.
+    is_bridge_load_failure = bool(
+        wait_result.get("status") == "error_dialog"
+        and plugin_load_failure
+        and str(plugin_load_failure.get("plugin") or "").casefold()
+        == "clianythingbridge"
+    )
+    if plugin_load_failure and not is_bridge_load_failure:
+        wait_result["bridge_rebuild_attempted"] = False
+    if is_bridge_load_failure:
+        startup_failure = dict(wait_result)
+        editor_cleanup = _terminate_just_spawned_process(proc, process_identity)
+        if not editor_cleanup.get("ok"):
+            return transition_task(
+                task_id,
+                status="failed",
+                phase="blocked",
+                error={
+                    "code": "BRIDGE_REBUILD_EDITOR_TERMINATION_FAILED",
+                    "message": (
+                        "CliAnythingBridge failed to load, but the spawned editor "
+                        "could not be safely terminated before rebuilding it."
+                    ),
+                    "details": {
+                        "startup_failure": startup_failure,
+                        "editor_cleanup": editor_cleanup,
+                    },
+                },
+                result_patch={
+                    "startup_failure": startup_failure,
+                    "bridge_rebuild_editor_cleanup": editor_cleanup,
+                },
+            ) or task
+
+        wait_result["bridge_rebuild_attempted"] = True
         task = transition_task(
             task_id,
             status="compiling",
             phase="compiling_bridge",
-            result_patch={"compile_reason": "Bridge plugin failed to load"},
+            result_patch={
+                "compile_reason": "CliAnythingBridge plugin failed to load",
+                "startup_failure": startup_failure,
+                "bridge_rebuild_editor_cleanup": editor_cleanup,
+            },
         ) or task
         if task.get("status") != "compiling":
             return task
@@ -2227,6 +2269,8 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             rollback = rollback_plugin_deployment(deploy_result)
             error_details = dict(compile_result)
             error_details["bridge_rollback"] = rollback
+            error_details["startup_failure"] = startup_failure
+            error_details["bridge_rebuild_editor_cleanup"] = editor_cleanup
             return transition_task(
                 task_id,
                 status="failed",
@@ -2242,6 +2286,8 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
                 result_patch={
                     "compile_result": compile_result,
                     "bridge_rollback": rollback,
+                    "startup_failure": startup_failure,
+                    "bridge_rebuild_editor_cleanup": editor_cleanup,
                 },
             ) or task
 
@@ -2453,6 +2499,17 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         final_error = {
             "code": "EDITOR_ENGINE_BINARY_ENTRYPOINT_MISMATCH",
             "message": wait_result.get("error", "Engine DLL entry-point mismatch detected during startup."),
+            "details": wait_result,
+        }
+    elif wait_result.get("failure_kind") == "plugin_load_failure":
+        final_status = "failed"
+        final_phase = "blocked" if wait_result.get("process_alive") is not False else "exited"
+        final_error = {
+            "code": "EDITOR_PLUGIN_LOAD_FAILED",
+            "message": wait_result.get(
+                "diagnostic",
+                wait_result.get("error", "An Unreal Editor plugin failed to load during startup."),
+            ),
             "details": wait_result,
         }
     else:
