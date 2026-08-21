@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,15 @@ BUILD_TASK_COMMANDS = {"build.compile", "build.cook", "build.package"}
 EDITOR_LAUNCH_SPAWN_GRACE_SECONDS = 30
 _WINDOWS_TASK_IO_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
 _WINDOWS_PROCESS_IDENTITY_QUERY_TIMEOUT_SECONDS = 3
+_COOK_STALL_THRESHOLD_SECONDS = 600
+_COOK_STALL_THRESHOLD_ENV = "UE_CLI_COOK_STALL_THRESHOLD_SECONDS"
+_COOK_DIAGNOSTIC_LOG_BYTES = 1024 * 1024
+_COOK_BLOCKED_PATTERN = re.compile(
+    r"Cooker has been blocked from saving (?:the )?current packages for\s+"
+    r"([0-9]+(?:\.[0-9]+)?)\s+seconds?\b",
+    re.IGNORECASE,
+)
+_COOK_PACKAGE_PATTERN = re.compile(r"/Game/[A-Za-z0-9_./-]+")
 _UNCHANGED = object()
 _TASK_STATUS_TRANSITIONS = {
     "submitted": {"running", "failed", "cancelled"},
@@ -841,6 +851,121 @@ def active_build_tasks(project_path: str) -> list[dict]:
     return active
 
 
+def _cook_stall_threshold_seconds() -> int:
+    raw_value = os.environ.get(_COOK_STALL_THRESHOLD_ENV)
+    if raw_value is None:
+        return _COOK_STALL_THRESHOLD_SECONDS
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return _COOK_STALL_THRESHOLD_SECONDS
+
+
+def _read_log_suffix(log_file: Path, max_bytes: int) -> str:
+    try:
+        with log_file.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes), os.SEEK_SET)
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _strip_cook_log_prefix(line: str) -> str:
+    text = line.strip()
+    for marker in ("LogCook: Warning:", "LogCook: Display:", "LogCook:"):
+        marker_index = text.find(marker)
+        if marker_index >= 0:
+            return text[marker_index + len(marker):].strip()
+    return text
+
+
+def _cook_stall_diagnostic(task: dict) -> dict | None:
+    if (
+        task.get("command") not in {"build.cook", "build.package"}
+        or task.get("status") in FINAL_TASK_STATUSES
+    ):
+        return None
+
+    payload = task.get("payload", {})
+    log_file_value = task.get("log_file") or payload.get("log_file")
+    if not log_file_value:
+        return None
+    log_text = _read_log_suffix(
+        Path(str(log_file_value)),
+        _COOK_DIAGNOSTIC_LOG_BYTES,
+    )
+    matches = list(_COOK_BLOCKED_PATTERN.finditer(log_text))
+    if not matches:
+        return None
+
+    latest_match = matches[-1]
+    blocked_seconds_value = float(latest_match.group(1))
+    blocked_seconds: int | float = blocked_seconds_value
+    if blocked_seconds_value.is_integer():
+        blocked_seconds = int(blocked_seconds_value)
+
+    packages: list[str] = []
+    objects: list[str] = []
+    section = None
+    for line in log_text[latest_match.end():].splitlines()[:64]:
+        text = _strip_cook_log_prefix(line)
+        lowered = text.casefold()
+        if "packages in the savequeue:" in lowered:
+            section = "packages"
+            continue
+        if (
+            "objects that have not yet returned true from "
+            "iscachedcookedplatformdataloaded:" in lowered
+        ):
+            section = "objects"
+            continue
+        if not text:
+            continue
+        if "cooker has been blocked from saving" in lowered:
+            break
+        if (
+            "cooked packages " in lowered
+            or "cookworkerheartbeat:" in lowered
+        ):
+            section = None
+            continue
+        if section == "packages":
+            packages.extend(_COOK_PACKAGE_PATTERN.findall(text))
+        elif section == "objects":
+            objects.append(text[:500])
+        if len(packages) >= 5 and len(objects) >= 5:
+            break
+
+    packages = list(dict.fromkeys(packages))[:5]
+    objects = list(dict.fromkeys(objects))[:5]
+    threshold_seconds = _cook_stall_threshold_seconds()
+    stalled = blocked_seconds_value >= threshold_seconds
+    diagnostic = {
+        "code": "COOK_SAVE_STALLED" if stalled else "COOK_SAVE_BLOCKED",
+        "message": (
+            "Cook worker reports a package-save stall."
+            if stalled
+            else "Cook worker reports a package-save blockage below the stall threshold."
+        ),
+        "stalled": stalled,
+        "blocked_seconds": blocked_seconds,
+        "threshold_seconds": threshold_seconds,
+        "packages": packages,
+        "objects": objects,
+        "log_file": str(log_file_value),
+        "cancellation_under_user_control": True,
+        "cancellation_command": f"ue-cli task cancel {task['task_id']}",
+        "retry_guidance": (
+            "Inspect the named package/object and cooked-platform-data cache. "
+            "Cancel only if progress is no longer expected; retry after resolving "
+            "the asset or cache issue."
+        ),
+    }
+    return diagnostic
+
+
 def task_progress(task: dict) -> dict:
     status = task.get("status", "submitted")
     result = {
@@ -855,8 +980,14 @@ def task_progress(task: dict) -> dict:
         result["pid"] = task["pid"]
     if "worker_pid" in task:
         result["worker_pid"] = task["worker_pid"]
-    if "log_file" in task:
-        result["log_file"] = task["log_file"]
+    log_file = task.get("log_file") or task.get("payload", {}).get("log_file")
+    if log_file:
+        result["log_file"] = log_file
+
+    diagnostic = _cook_stall_diagnostic(task)
+    if diagnostic:
+        result["stalled"] = diagnostic["stalled"]
+        result["diagnostic"] = diagnostic
 
     if "result" in task:
         result["result"] = task["result"]
