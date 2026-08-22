@@ -483,7 +483,7 @@ def register_commands(cli_group: click.Group):
     from cli_anything.unreal.commands.blueprint import blueprint_group
     from cli_anything.unreal.commands.umg import umg_group
     from cli_anything.unreal.commands.screenshot import screenshot_group
-    from cli_anything.unreal.commands.editor import editor_group
+    from cli_anything.unreal.commands.editor import editor_group, editor_status
     from cli_anything.unreal.commands.confirmation import confirmation_group
     from cli_anything.unreal.commands.session import session_group
     from cli_anything.unreal.commands.skills import register as register_skills
@@ -498,6 +498,7 @@ def register_commands(cli_group: click.Group):
     cli_group.add_command(umg_group)
     cli_group.add_command(screenshot_group)
     cli_group.add_command(editor_group)
+    cli_group.add_command(editor_status, "status")
     cli_group.add_command(confirmation_group)
     cli_group.add_command(preflight_cmd)
     cli_group.add_command(session_group)

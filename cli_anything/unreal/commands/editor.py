@@ -1003,6 +1003,7 @@ def _recover_online_launch_result(
 @handle_error
 @click.pass_obj
 def editor_status(state: AppState, scan_range, show_all, timeout, project_path, task_id):
+    """Show detected Unreal Editor sessions and launch-task status."""
     _load_command_project(state, project_path)
     if task_id:
         try:

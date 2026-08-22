@@ -237,6 +237,8 @@ When `--port` is omitted, ue-cli uses the selected project's engine-specific Rem
 
 `editor status` applies a 15-second discovery deadline by default. Use `editor status --timeout <seconds>` when a slow machine needs more time. An exhausted deadline returns `EDITOR_STATUS_TIMEOUT` with the `blocking_phase`; a blocked task read also includes its `task_id`.
 
+`status` is a root alias for `editor status`; it accepts the same `--all`, `--scan-range`, `--timeout`, `--project`, and optional task ID arguments.
+
 `editor close` targets the verified editor for the selected project. Without `--project`, it captures the process owning the selected Remote Control port. By default it reads dirty map/content packages, moves dirty `/Temp/` maps to deterministic `/Game/__UeCliAutoSave_<name>` assets, saves everything else, requires Unreal to confirm the save, then closes. It never asks the caller to classify who changed a package or choose a save path. Unknown/offline state and same-project stale peers are preserved as machine-readable failures because they cannot be saved safely. The single escape hatch, `--force`, allows data loss and offline/stale process termination and should be used only when the request already authorizes that outcome.
 
 ## Output Contract

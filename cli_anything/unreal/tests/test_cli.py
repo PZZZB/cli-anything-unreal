@@ -47,6 +47,35 @@ class TestCLI:
         assert "--timeout" in result.output
         assert "default: 30" in result.output
 
+    def test_root_status_alias_reuses_editor_status(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        instances = [{
+            "status": "online",
+            "project_path": "F:/Example/Example.uproject",
+            "port": 30111,
+        }]
+        with patch(
+            "cli_anything.unreal.commands.editor._scan_editor_status_instances",
+            return_value=instances,
+        ) as scan:
+            result = CliRunner().invoke(cli, [
+                "--output", "json",
+                "status",
+                "--all",
+                "--scan-range", "30110-30112",
+                "--timeout", "2",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {
+            "status": "success",
+            "result": instances,
+        }
+        assert scan.call_args.args[1] == "30110-30112"
+        assert scan.call_args.kwargs == {"timeout": 2.0}
+
     def test_task_wait_returns_completed_task(self):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -195,6 +224,7 @@ class TestCLI:
         names = {item["name"] for item in json.loads(result.output)}
         assert {"umg create", "umg add-widget", "umg tree"}.issubset(names)
         assert "preflight" in names
+        assert "status" in names
         assert "editor open-level" in names
         assert "editor run-script" in names
         assert "editor exec" in names
