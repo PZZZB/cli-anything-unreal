@@ -45,6 +45,24 @@ class TestInstallSkills:
         assert "viewport realtime -> not exposed to Python" not in workflow
         assert "viewport realtime → not exposed to Python" not in workflow
 
+    def test_bundled_skill_warns_about_static_mesh_uv_bounds(self):
+        """Bundled guidance prevents native UV-channel bounds assertions."""
+        references_dir = Path(__file__).parent.parent / "skills" / "references"
+
+        workflow = (references_dir / "workflows-editor.md").read_text(encoding="utf-8")
+        safety = (references_dir / "safety.md").read_text(encoding="utf-8")
+
+        assert "StaticMeshDescription.get_vertex_instance_uv" in workflow
+        assert "StaticMeshEditorSubsystem" in workflow
+        assert "EditorStaticMeshLibrary" in workflow
+        assert "get_num_uv_channels" in workflow
+        assert "0 <= channel_index < channel_count" in workflow
+        assert 'hasattr(\n        mesh, "get_static_mesh_description"\n    )' in workflow
+        assert "UE4.26 exposes the safe count query but not" in workflow
+        assert "--no-save" in workflow
+        assert "get_vertex_instance_uv" in safety
+        assert "Native out-of-range `check()` can terminate Editor" in safety
+
     def test_install_to_custom_target(self, tmp_path):
         """--target writes the full skill tree to the given dir.
 

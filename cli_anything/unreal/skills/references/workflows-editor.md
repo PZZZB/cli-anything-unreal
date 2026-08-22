@@ -150,6 +150,54 @@ For long scripts that save or modify many assets, pass a larger `--timeout`
 waiting for the HTTP response; the editor completion state is unknown, so run
 `editor status` and inspect the project Output Log before retrying.
 
+### Safe Static Mesh UV Access
+
+`editor run-script` executes in the Unreal Editor process. `--no-save` disables
+automatic package saves; it cannot turn a native Unreal `check()` into a Python
+exception. Never discover UV channels by incrementing `channel_index` in
+`StaticMeshDescription.get_vertex_instance_uv(...)` until an exception occurs.
+An out-of-range channel can terminate the editor.
+
+Query the StaticMesh before reading its MeshDescription, then validate the
+channel index explicitly. UE5 uses `StaticMeshEditorSubsystem`; UE4.26 uses the
+legacy `EditorStaticMeshLibrary`. UE4.26 exposes the safe count query but not
+`StaticMesh.get_static_mesh_description`, so report that read path as
+unsupported:
+
+```python
+import unreal
+
+mesh = unreal.load_asset("/Game/Meshes/SM_Example.SM_Example")
+lod_index = 0
+channel_index = 1
+
+if hasattr(unreal, "StaticMeshEditorSubsystem"):
+    static_mesh_editor = unreal.get_editor_subsystem(
+        unreal.StaticMeshEditorSubsystem
+    )
+else:
+    static_mesh_editor = unreal.EditorStaticMeshLibrary
+
+channel_count = static_mesh_editor.get_num_uv_channels(mesh, lod_index)
+if not 0 <= channel_index < channel_count:
+    raise ValueError(
+        f"UV channel {channel_index} out of range; mesh has {channel_count} channels"
+    )
+
+result = {
+    "uv_channel_count": channel_count,
+    "mesh_description_uv_read_supported": hasattr(
+        mesh, "get_static_mesh_description"
+    ),
+}
+if result["mesh_description_uv_read_supported"]:
+    description = mesh.get_static_mesh_description(lod_index)
+    uv = description.get_vertex_instance_uv(
+        unreal.VertexInstanceID(0), channel_index
+    )
+    result["uv"] = str(uv)
+```
+
 ### Console Commands
 
 Use `editor exec` for UE console commands:
