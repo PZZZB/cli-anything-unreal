@@ -2267,6 +2267,82 @@ class TestSceneE2E:
             assert isinstance(payload["result"][expression], expected_type)
             assert payload["result"]["read_via"] == "native_bridge"
 
+    def test_scene_property_reads_post_process_weighted_blendables(self, cli_runner, api_port, api):
+        """Nested PostProcessSettings blendables return structured entries."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+        from cli_anything.unreal.unreal_cli import cli
+
+        setup = run_python_code(api, '''
+import unreal
+
+subsystem_class = getattr(unreal, "EditorActorSubsystem", None)
+if subsystem_class is not None:
+    actor_subsystem = unreal.get_editor_subsystem(subsystem_class)
+    actor = actor_subsystem.spawn_actor_from_class(
+        unreal.PostProcessVolume,
+        unreal.Vector(600, 0, 0),
+    )
+else:
+    actor_subsystem = None
+    actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
+        unreal.PostProcessVolume,
+        unreal.Vector(600, 0, 0),
+    )
+
+material = unreal.load_asset(
+    "/Engine/EngineMaterials/DefaultPostProcessMaterial.DefaultPostProcessMaterial"
+)
+if actor is None or material is None:
+    result = {"error": "Could not create weighted-blendable fixture."}
+else:
+    actor.set_actor_label("UE CLI E2E Post Process")
+    settings = actor.get_editor_property("settings")
+    weighted = settings.get_editor_property("weighted_blendables")
+    entry = unreal.WeightedBlendable()
+    entry.set_editor_property("weight", 0.625)
+    entry.set_editor_property("object", material)
+    weighted.set_editor_property("array", [entry])
+    settings.set_editor_property("weighted_blendables", weighted)
+    actor.set_editor_property("settings", settings)
+    result = {
+        "actor_path": actor.get_path_name(),
+        "material_path": material.get_path_name(),
+    }
+''', save=False)
+        assert not setup.get("error"), setup
+        actor_path = setup["actor_path"]
+
+        try:
+            expression = "Settings.WeightedBlendables.Array"
+            read_result = cli_runner.invoke(cli, [
+                "--output", "json", "--port", str(api_port),
+                "scene", "property", actor_path, expression,
+            ])
+
+            assert read_result.exit_code == 0, read_result.output
+            payload = json.loads(read_result.output)
+            entries = payload["result"][expression]
+            assert payload["result"]["read_via"] == "unreal_python"
+            assert len(entries) == 1
+            assert entries[0]["weight"] == pytest.approx(0.625)
+            assert entries[0]["object"] == setup["material_path"]
+        finally:
+            cleanup = run_python_code(api, f'''
+import unreal
+
+actor = unreal.load_object(None, {actor_path!r})
+if actor is None:
+    result = {{"destroyed": False, "already_absent": True}}
+else:
+    subsystem_class = getattr(unreal, "EditorActorSubsystem", None)
+    if subsystem_class is not None:
+        destroyed = unreal.get_editor_subsystem(subsystem_class).destroy_actor(actor)
+    else:
+        destroyed = unreal.EditorLevelLibrary.destroy_actor(actor)
+    result = {{"destroyed": bool(destroyed), "already_absent": False}}
+''', save=False)
+            assert cleanup.get("destroyed") or cleanup.get("already_absent"), cleanup
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  E2E: Asset Management

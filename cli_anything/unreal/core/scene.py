@@ -23,6 +23,10 @@ _STATIC_MESH_LOD_PROPERTY = re.compile(
     r"^LODData\[(\d+)\]\.(OverrideVertexColors|PaintedVertices)$",
     re.IGNORECASE,
 )
+_POST_PROCESS_WEIGHTED_BLENDABLES_PROPERTY = re.compile(
+    r"^Settings\.WeightedBlendables\.Array$",
+    re.IGNORECASE,
+)
 
 
 def _get_static_mesh_lod_property(
@@ -90,6 +94,60 @@ def _get_static_mesh_lod_property(
         property_name: bridge_result["value"],
         "read_via": "native_bridge",
     }
+
+
+def _get_post_process_weighted_blendables(
+    api: UEEditorAPI,
+    object_path: str,
+    property_name: str,
+) -> dict:
+    """Read reflected PostProcessVolume blendable entries through UE Python."""
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    script = f'''\
+import unreal as _u
+
+_object_path = {object_path!r}
+_property_name = {property_name!r}
+_object = _u.load_object(None, _object_path)
+
+def _cli_object_path(_value):
+    if _value is None:
+        return None
+    if isinstance(_value, _u.Object):
+        return _value.get_path_name()
+    return str(_value)
+
+if _object is None:
+    result = {{
+        "error": "Object not found: " + _object_path,
+        "object_path": _object_path,
+        "property": _property_name,
+    }}
+else:
+    try:
+        _settings = _object.get_editor_property("settings")
+        _weighted = _settings.get_editor_property("weighted_blendables")
+        _entries = _weighted.get_editor_property("array")
+        _value = []
+        for _entry in _entries:
+            _value.append({{
+                "weight": float(_entry.get_editor_property("weight")),
+                "object": _cli_object_path(_entry.get_editor_property("object")),
+            }})
+        result = {{
+            _property_name: _value,
+            "read_via": "unreal_python",
+        }}
+    except Exception as _exc:
+        result = {{
+            "error": "Property '" + _property_name + "' is not readable via Unreal Python.",
+            "object_path": _object_path,
+            "property": _property_name,
+            "detail": str(_exc),
+        }}
+'''
+    return run_python_code(api, script, save=False)
 
 
 def list_actors(
@@ -258,6 +316,13 @@ def get_actor_property(api: UEEditorAPI, object_path: str, property_name: str) -
             object_path,
             property_name,
             lod_match,
+        )
+
+    if _POST_PROCESS_WEIGHTED_BLENDABLES_PROPERTY.fullmatch(property_name):
+        return _get_post_process_weighted_blendables(
+            api,
+            object_path,
+            property_name,
         )
 
     # Remote Control omits some useful reflected component properties,

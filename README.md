@@ -190,6 +190,7 @@ ue-cli --output json --project "$Project" material shader-source /Game/MyMateria
 ue-cli --output json --project "$Project" screenshot capture --path "F:/output/material_check.png"
 ue-cli --output json --project "$Project" screenshot capture --path "F:/output/stat_evidence.png" --include-ui
 ue-cli --output json --project "$Project" scene property "<StaticMeshComponentPath>" "LODData[0].PaintedVertices"
+ue-cli --output json --project "$Project" scene property "<PostProcessVolumePath>" "Settings.WeightedBlendables.Array"
 ue-cli --output json --project "$Project" editor run-script --no-save -c 'result={"label":"quoted value"}'
 ue-cli --output json --project "$Project" editor cvar get r.VSync --timeout 10
 ue-cli --output json --project "$Project" editor live-coding-compile --timeout 600
@@ -198,6 +199,7 @@ ue-cli --output json --project "$Project" editor live-coding-compile --timeout 6
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
 `editor api-discover` cross-checks reflected functions against the live UE Python wrapper. Detailed function items report `python_callable`, plus `python_name` and `python_path` when a matching binding exists. Filtered summaries list reflection-only entries in `python_unavailable_functions`; class-level `python_exposed` does not imply every reflected function is callable.
 Bridge 1.34 lets `scene property` read StaticMeshComponent instance-paint fields through `LODData[N].PaintedVertices` and `LODData[N].OverrideVertexColors`. Those fields are native, non-reflected data; writes remain unsupported.
+`scene property` reads `Settings.WeightedBlendables.Array` on PostProcessVolume actors as structured `weight` and object-path entries through Unreal Python. This nested expression is read-only.
 `material get-param` returns the effective scalar, vector, texture, or static-switch value, including values inherited from parent material instances or materials.
 `material info` supports Material, MaterialFunction, and MaterialInstanceConstant assets. Bridge 1.29 reads these assets directly through Remote Control, including graph edges, outputs, textures, and instance parameters, without creating Python expression wrappers. A stale bridge returns `MATERIAL_INFO_BRIDGE_REQUIRED` with an upgrade command.
 

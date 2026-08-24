@@ -170,7 +170,7 @@ All scene commands require editor.
 | Command | Description |
 |---------|-------------|
 | `scene list [--class CLASS] [-q QUERY] [--field name\|label\|path\|all] [--exact]` | List actors in current level; outputs `name`, World Outliner `label`, `path`, `class`; `-q` searches name/label/path by default |
-| `scene property ACTOR_PATH PROP[=VALUE]` | Get/set property; Bridge 1.34+ reads `LODData[N].PaintedVertices` and `LODData[N].OverrideVertexColors` on StaticMeshComponents |
+| `scene property ACTOR_PATH PROP[=VALUE]` | Get/set property; reads PostProcessVolume `Settings.WeightedBlendables.Array`; Bridge 1.34+ reads `LODData[N].PaintedVertices` and `LODData[N].OverrideVertexColors` on StaticMeshComponents |
 | `scene get-transform ACTOR_PATH` | Get transform |
 | `scene list-components ACTOR_PATH` | List actor components |
 | `scene get-material ACTOR_PATH [--index N]` | Get material from actor mesh |

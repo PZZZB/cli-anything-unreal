@@ -218,6 +218,41 @@ class TestScene:
         assert "plugin-upgrade" in result["suggestion"]
         assert result["detail"] == "Function not found"
 
+    def test_get_actor_property_reads_post_process_weighted_blendables(self):
+        from cli_anything.unreal.core.scene import get_actor_property
+
+        api = self._mock_api()
+        expression = "Settings.WeightedBlendables.Array"
+        api.get_property.return_value = {
+            "error": f"Property '{expression}' is not accessible via Remote Control (likely private)."
+        }
+        expected = {
+            expression: [{
+                "weight": 0.625,
+                "object": "/Engine/EngineMaterials/DefaultPostProcessMaterial.DefaultPostProcessMaterial",
+            }],
+            "read_via": "unreal_python",
+        }
+
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value=expected,
+        ) as mock_run:
+            result = get_actor_property(
+                api,
+                "/Game/Map:PersistentLevel.PostProcessVolume_0",
+                expression,
+            )
+
+        assert result == expected
+        script = mock_run.call_args.args[1]
+        assert 'get_editor_property("settings")' in script
+        assert 'get_editor_property("weighted_blendables")' in script
+        assert 'get_editor_property("array")' in script
+        assert 'get_editor_property("weight")' in script
+        assert 'get_editor_property("object")' in script
+        mock_run.assert_called_once_with(api, script, save=False)
+
     def test_get_actor_property_does_not_mask_other_remote_control_errors(self):
         from cli_anything.unreal.core.scene import get_actor_property
 
