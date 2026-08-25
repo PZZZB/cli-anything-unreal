@@ -162,7 +162,11 @@ def material_analyze(state: AppState, material_path):
 @click.option("--output", "output_path", required=True,
               help="File path to write the HLSL code to. Required because output is massive.")
 @click.option("--platform", default="sm6",
-              help="Shader platform: sm6 (default), sm5, vulkan, vulkan_es31, opengl_es31, metal")
+              help=(
+                  "Shader platform: sm6 (default), sm5, vulkan, vulkan_es31, "
+                  "vulkan_sm5_android_preview, vulkan_es31_android_preview, "
+                  "opengl_es31, metal"
+              ))
 @click.option("--shader-type", default="pixel",
               type=click.Choice(["pixel", "vertex", "all"]),
               help="Which shader stage to return")
@@ -190,7 +194,8 @@ def material_hlsl(
     Triggers shader recompile with debug dump, reads the generated code.
     CVar r.DumpShaderDebugInfo is automatically saved and restored.
 
-    Platforms: sm6 (DirectX SM6), sm5 (DirectX SM5), vulkan, opengl_es31, metal
+    Platforms include sm6, sm5, vulkan, Android Vulkan preview, opengl_es31,
+    and metal.
     """
     from cli_anything.unreal.core.materials import get_material_hlsl
     import os

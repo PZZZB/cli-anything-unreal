@@ -96,7 +96,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString GetConsoleVariableInfo(const FString& Name);
 
-	/** Returns the running editor's active RHI shader format (for example PCD3D_SM6). */
+	/** Returns the editor's active shader platform, including viewport preview platforms. */
 	UFUNCTION(BlueprintCallable, Category = "CliAnything")
 	static FString GetActiveShaderPlatform();
 

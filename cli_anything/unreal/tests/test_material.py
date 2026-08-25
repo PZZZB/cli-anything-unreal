@@ -327,6 +327,25 @@ class TestMaterials:
 
         assert mock_exec.call_args.kwargs["save_policy"] is SavePolicy.NEVER
 
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_dump_hlsl_resolves_android_preview_platform_alias(self, mock_exec, tmp_path):
+        from cli_anything.unreal.core.materials import get_material_hlsl
+
+        mock_exec.return_value = {"active_platform": "PCD3D_SM6"}
+        mock_api = MagicMock()
+
+        result = get_material_hlsl(
+            mock_api,
+            "/Game/M_Test",
+            project_dir=str(tmp_path),
+            platform="vulkan_sm5_android_preview",
+        )
+
+        assert result["code"] == "SHADER_PLATFORM_NOT_ACTIVE"
+        assert result["requested_platform"] == "VULKAN_SM5_ANDROID_Preview"
+        assert result["active_platform"] == "PCD3D_SM6"
+        mock_api.get_cvar.assert_not_called()
+
     @patch("cli_anything.unreal.core.materials.time.sleep")
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_dump_hlsl_recompile_preserves_dirty_state(self, mock_exec, mock_sleep, tmp_path):

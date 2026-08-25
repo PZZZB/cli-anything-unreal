@@ -687,7 +687,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.35"
+        assert version == "1.36"
 
     def test_static_mesh_lod_property_reader_uses_native_vertex_paint_data(self):
         """Bridge exposes LOD fields omitted from Unreal reflection."""
@@ -896,6 +896,29 @@ class TestPluginBridge:
         assert "Material->PostEditChange()" in function
         assert "Package->SetDirtyFlag(bDirtyBefore)" in function
         assert "package_dirty_restored" in function
+
+    def test_bridge_shader_platform_uses_active_editor_preview_on_ue5(self):
+        """UE5 shader dumps follow editor preview platform, not host RHI."""
+        plugin_dir = Path(__file__).resolve().parents[1] / "bridge_plugin" / "CliAnythingBridge"
+        cpp = (
+            plugin_dir
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+        function = cpp.split(
+            "FString UCliAnythingBridgeLibrary::GetActiveShaderPlatform()",
+            1,
+        )[1].split(
+            "FString UCliAnythingBridgeLibrary::RecompileMaterialShadersForDump",
+            1,
+        )[0]
+
+        assert "#if ENGINE_MAJOR_VERSION >= 5" in function
+        assert "GEditor->GetActiveShaderPlatform()" in function
+        assert "FDataDrivenShaderPlatformInfo::GetName(ActivePlatform)" in function
+        assert "LegacyShaderPlatformToShaderFormat(GMaxRHIShaderPlatform)" in function
 
     def test_bridge_shader_source_refreshes_changed_files_before_extraction(self):
         """Shader extraction must invalidate changed engine shader sources first."""

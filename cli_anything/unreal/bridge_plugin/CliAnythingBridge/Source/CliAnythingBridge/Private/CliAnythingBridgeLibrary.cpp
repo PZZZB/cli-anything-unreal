@@ -20,6 +20,10 @@
 #include "RHI.h"
 #include "ShaderCompiler.h"
 #include "ShaderCompilerCore.h"
+#include "Editor.h"
+#if ENGINE_MAJOR_VERSION >= 5
+#include "DataDrivenShaderPlatformInfo.h"
+#endif
 
 #include "LevelEditor.h"
 #include "SLevelViewport.h"
@@ -1329,7 +1333,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.35");
+	return TEXT("1.36");
 }
 
 FString UCliAnythingBridgeLibrary::ConnectMaterialOutput(UMaterial* Material, const FString& FromNode, const FString& FromOutputName, const FString& PropertyName)
@@ -1425,7 +1429,14 @@ FString UCliAnythingBridgeLibrary::GetConsoleVariableInfo(const FString& Name)
 
 FString UCliAnythingBridgeLibrary::GetActiveShaderPlatform()
 {
+#if ENGINE_MAJOR_VERSION >= 5
+	const EShaderPlatform ActivePlatform = GEditor
+		? GEditor->GetActiveShaderPlatform()
+		: GMaxRHIShaderPlatform;
+	return FDataDrivenShaderPlatformInfo::GetName(ActivePlatform).ToString();
+#else
 	return LegacyShaderPlatformToShaderFormat(GMaxRHIShaderPlatform).ToString();
+#endif
 }
 
 FString UCliAnythingBridgeLibrary::RecompileMaterialShadersForDump(UMaterialInterface* Material)

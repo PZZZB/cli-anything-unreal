@@ -189,7 +189,7 @@ All material commands require editor.
 | `material get-errors MATERIAL_PATH` | Compilation errors for Material, MaterialInstanceConstant, or MaterialFunction (Bridge 1.33+) |
 | `material list-textures MATERIAL_PATH` | Referenced textures |
 | `material analyze MATERIAL_PATH` | Common issue detector |
-| `material dump-hlsl MATERIAL_PATH --output PATH [--platform P] [--shader-type T] [--wait-timeout SECONDS] [--full]` | Compiled HLSL via `r.DumpShaderDebugInfo`; waits 10s for dump files by default |
+| `material dump-hlsl MATERIAL_PATH --output PATH [--platform P] [--shader-type T] [--wait-timeout SECONDS] [--full]` | Compiled HLSL via `r.DumpShaderDebugInfo`; UE5 Android preview aliases include `vulkan_sm5_android_preview` and `vulkan_es31_android_preview`; waits 10s by default |
 | `material hlsl-code MATERIAL_PATH` | Material/MaterialInstance HLSL source; MaterialFunction returns `MATERIAL_HLSL_CODE_UNSUPPORTED_ASSET` |
 | `material shader-source MATERIAL_PATH` | Compiled `.usf` sources with cbuffers/structs |
 
