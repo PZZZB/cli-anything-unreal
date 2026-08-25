@@ -1119,6 +1119,7 @@ class TestCLI:
 
         api = MagicMock()
         api.is_alive.return_value = False
+        api.is_listening.return_value = False
         runner = CliRunner()
         with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=api), \
              patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[
@@ -1170,6 +1171,34 @@ class TestCLI:
         assert data["code"] == "EDITOR_UNREACHABLE"
         assert "30010" in data["message"]
         scan_status.assert_not_called()
+
+    def test_editor_command_reports_existing_listener_when_health_probe_fails(self):
+        """Unresponsive listeners must not suggest launching a second editor."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        api = MagicMock()
+        api.is_alive.return_value = False
+        api.is_listening.return_value = True
+        runner = CliRunner()
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=api) as api_cls:
+            api_cls._get_pid_listening_on_port.return_value = 4321
+            result = runner.invoke(cli, [
+                "--output", "json", "--port", "30010",
+                "editor", "open-level", "/Game/Maps/TestMap",
+            ])
+
+        assert result.exit_code == 4
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_UNREACHABLE"
+        assert data["details"] == {
+            "port": 30010,
+            "listener_reachable": True,
+            "listener_pid": 4321,
+        }
+        assert "run editor status" in data["suggestion"]
+        assert "do not launch another editor" in data["suggestion"]
+        assert "editor launch" not in data["suggestion"]
 
     def test_editor_command_does_not_select_another_projects_live_port(self, temp_project):
         """Project-scoped commands never recover through an unrelated live editor."""

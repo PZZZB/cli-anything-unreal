@@ -536,7 +536,7 @@ def test_editor_status_online_without_project_still_includes_bridge_versions():
     assert "next_command" not in item
 
 
-def test_editor_status_online_bridge_probe_error_is_unknown_not_upgrade(mini_project):
+def test_editor_status_failed_bridge_health_probe_is_unreachable(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
@@ -558,11 +558,16 @@ def test_editor_status_online_bridge_probe_error_is_unknown_not_upgrade(mini_pro
     assert result.exit_code == 0
     data = json.loads(result.output)
     item = data["result"][0]
+    assert item["status"] == "unreachable"
     assert item["bridge_version"] is None
     assert item["bundled_version"] == "1.13"
     assert item["plugin_match"] is None
-    assert "next_command" not in item
-    assert "suggestion" not in item
+    assert item["listener_reachable"] is True
+    assert item["health_probe"] == "failed"
+    assert item["health_probe_error"] == "busy"
+    assert "retry editor status" in item["suggestion"]
+    assert "do not launch another editor" in item["suggestion"]
+    assert item["next_command"] == f'ue-cli --project "{mini_project}" editor status'
 
 
 def test_editor_status_bridge_probe_uses_short_timeout(mini_project):

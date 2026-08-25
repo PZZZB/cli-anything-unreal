@@ -483,6 +483,24 @@ def _add_offline_recovery_hint(entry: dict, observation: dict | None = None) -> 
         entry["suggestion"] = "Run editor launch with --project <path-to.uproject> to start a reachable editor."
 
 
+def _add_failed_health_probe_hint(entry: dict, error: Exception) -> None:
+    entry["status"] = "unreachable"
+    entry["listener_reachable"] = True
+    entry["health_probe"] = "failed"
+    entry["health_probe_error"] = str(error)[:500]
+    entry["message"] = (
+        "Remote Control answered /remote/info, but the functional editor health probe failed; "
+        "UnrealEditor may be busy or hung."
+    )
+    entry["suggestion"] = (
+        "Wait, then retry editor status. If the same editor remains unresponsive, close or restart "
+        "that existing session; do not launch another editor alongside it."
+    )
+    project_path = entry.get("project_path")
+    if project_path:
+        entry["next_command"] = f'ue-cli --project "{project_path}" editor status'
+
+
 def _add_online_bridge_status(entry: dict, timeout: float = 5.0) -> None:
     if entry.get("status") != "online" or not entry.get("port"):
         return
@@ -493,20 +511,23 @@ def _add_online_bridge_status(entry: dict, timeout: float = 5.0) -> None:
     bundled = get_bundled_version()
     loaded = None
     probe_failed = False
+    probe_error: Exception | None = None
     try:
         loaded = get_loaded_plugin_version(
             UEEditorAPI(port=int(entry["port"])),
             timeout=timeout,
             raise_on_error=True,
         )
-    except Exception:
+    except Exception as exc:
         probe_failed = True
+        probe_error = exc
         loaded = None
 
     entry["bridge_version"] = loaded
     entry["bundled_version"] = bundled
-    if probe_failed:
+    if probe_failed and probe_error is not None:
         entry["plugin_match"] = None
+        _add_failed_health_probe_hint(entry, probe_error)
         return
 
     project_path = entry.get("project_path")

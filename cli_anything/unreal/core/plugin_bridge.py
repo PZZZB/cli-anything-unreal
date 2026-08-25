@@ -810,6 +810,10 @@ def get_loaded_plugin_version(api, timeout: float = 10.0, raise_on_error: bool =
 
     try:
         result = run_python_code(api, script, timeout=timeout, save=False)
+        if result.get("error"):
+            raise RuntimeError(f"Plugin version probe failed: {result['error']}")
+        if "version" not in result:
+            raise RuntimeError("Plugin version probe returned no version field.")
         return result.get("version")
     except Exception:
         if raise_on_error:

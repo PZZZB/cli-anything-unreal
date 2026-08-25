@@ -446,6 +446,35 @@ def require_editor(
             from cli_anything.unreal.core.confirmations import raise_if_editor_blocked
 
             raise_if_editor_blocked(state.session.project_path, include_windows=True)
+        listener_reachable = False
+        try:
+            listener_reachable = bool(api.is_listening(timeout=0.5))
+        except Exception:
+            pass
+        if listener_reachable:
+            listener_pid = None
+            try:
+                listener_pid = UEEditorAPI._get_pid_listening_on_port(
+                    state.session.port,
+                    timeout=0.5,
+                )
+            except Exception:
+                pass
+            raise AppError(
+                "EDITOR_UNREACHABLE",
+                f"Editor HTTP API not responding on port {state.session.port}.",
+                exit_code=4,
+                suggestion=(
+                    "A process is still listening on this port. Wait, then run editor status. "
+                    "If the existing editor remains unresponsive, close or restart that session; "
+                    "do not launch another editor alongside it."
+                ),
+                details={
+                    "port": state.session.port,
+                    "listener_reachable": True,
+                    "listener_pid": listener_pid,
+                },
+            )
         raise AppError(
             "EDITOR_UNREACHABLE",
             f"Editor HTTP API not responding on port {state.session.port}.",

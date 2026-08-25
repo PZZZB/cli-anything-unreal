@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 
 class TestPluginBridge:
@@ -1060,6 +1061,16 @@ class TestPluginBridge:
         with patch("cli_anything.unreal.core.plugin_bridge.run_python_code") as mock_run:
             mock_run.return_value = {"version": None}
             assert get_loaded_plugin_version(mock_api) is None
+
+    def test_get_loaded_plugin_version_raises_transport_error_when_requested(self):
+        """Health probes distinguish transport failure from an unloaded plugin."""
+        from cli_anything.unreal.core.plugin_bridge import get_loaded_plugin_version
+
+        mock_api = MagicMock()
+        with patch("cli_anything.unreal.core.plugin_bridge.run_python_code") as mock_run:
+            mock_run.return_value = {"error": "Read timed out"}
+            with pytest.raises(RuntimeError, match="Read timed out"):
+                get_loaded_plugin_version(mock_api, raise_on_error=True)
 
     def test_check_plugin_version_match(self):
         """check_plugin_version returns match=True when versions agree."""
