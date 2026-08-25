@@ -1827,7 +1827,47 @@ def test_editor_close_force_targets_project_when_other_project_owns_port(mini_pr
     ]
 
 
-def test_editor_close_saves_dirty_packages_automatically(mini_project):
+def test_editor_close_refuses_dirty_packages_by_default(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    api = MagicMock()
+    api.is_alive.return_value = True
+    api.call_function.side_effect = [
+        {"OutDirtyPackages": []},
+        {"OutDirtyPackages": ["/Game/M_Unsaved"]},
+    ]
+    with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", return_value=api), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 1234, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.commands.editor._wait_for_project_editor_exit", return_value={
+             "status": "closed", "method": "process_exit",
+         }):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "close",
+        ])
+
+    assert result.exit_code == 3, result.output
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_DIRTY_PACKAGES"
+    assert data["details"] == {
+        "map_packages": [],
+        "content_packages": ["/Game/M_Unsaved"],
+        "count": 1,
+        "decision": "preserve_and_leave_running",
+    }
+    assert "--save-dirty" in data["suggestion"]
+    assert "--force" in data["suggestion"]
+    api.exec_console.assert_not_called()
+    assert all(
+        call.args[1] != "SaveDirtyPackages"
+        for call in api.call_function.call_args_list
+    )
+
+
+def test_editor_close_save_dirty_is_explicit(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli
 
@@ -1847,15 +1887,30 @@ def test_editor_close_saves_dirty_packages_automatically(mini_project):
          }):
         result = CliRunner().invoke(cli, [
             "--output", "json", "--project", mini_project,
-            "editor", "close",
+            "editor", "close", "--save-dirty",
         ])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)["result"]
     assert data["save_evidence"]["saved_count"] == 1
     assert data["save_evidence"]["content_packages"] == ["/Game/M_Unsaved"]
+    assert data["save_evidence"]["policy"] == "save_then_close"
     api.exec_console.assert_called_once_with("QUIT_EDITOR", timeout=1)
     assert api.call_function.call_args_list[-1].args[1] == "SaveDirtyPackages"
+
+
+def test_editor_close_rejects_conflicting_dirty_policies(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    result = CliRunner().invoke(cli, [
+        "--output", "json", "--project", mini_project,
+        "editor", "close", "--save-dirty", "--force",
+    ])
+
+    assert result.exit_code == 2, result.output
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_CLOSE_OPTION_CONFLICT"
 
 
 def test_editor_close_dirty_transient_map_autosaves_to_game_path():

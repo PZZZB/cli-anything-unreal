@@ -89,7 +89,7 @@ If an online item has `plugin_match: false`, inspect its capability fields. `deg
 ue-cli editor close
 ```
 
-`editor close` does not report `closed` only because the Remote Control API stopped responding. On Windows it also waits for matching same-project `UnrealEditor.exe` processes to exit, and terminates a stale lock holder when needed so immediate `build compile` does not hit locked editor/plugin DLLs.
+`editor close` does not report `closed` only because the Remote Control API stopped responding. It closes a clean editor by default; dirty packages return `EDITOR_DIRTY_PACKAGES` with their paths and leave the editor running. Use `--save-dirty` only when saving every reported dirty package is intended, or `--force` only when discarding them is authorized. On Windows it also waits for matching same-project `UnrealEditor.exe` processes to exit, and terminates a stale lock holder when needed so immediate `build compile` does not hit locked editor/plugin DLLs.
 
 ## Active Confirmation Polling
 

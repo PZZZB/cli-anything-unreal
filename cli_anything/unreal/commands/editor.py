@@ -2129,6 +2129,12 @@ def editor_cancel(state: AppState, task_id):
 
 @editor_group.command("close")
 @click.option(
+    "--save-dirty",
+    is_flag=True,
+    default=False,
+    help="Save all dirty map/content packages before closing.",
+)
+@click.option(
     "--force",
     is_flag=True,
     default=False,
@@ -2136,8 +2142,15 @@ def editor_cancel(state: AppState, task_id):
 )
 @handle_error
 @click.pass_obj
-def editor_close(state: AppState, force: bool):
+def editor_close(state: AppState, save_dirty: bool, force: bool):
     from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+    if save_dirty and force:
+        raise AppError(
+            "EDITOR_CLOSE_OPTION_CONFLICT",
+            "--save-dirty and --force cannot be used together.",
+            exit_code=2,
+        )
 
     ensure_inferred_project(state)
     try:
@@ -2160,6 +2173,7 @@ def editor_close(state: AppState, force: bool):
             api,
             state,
             api_alive=api_alive,
+            save_dirty=save_dirty,
             force=force,
         ),
         state,
@@ -2171,6 +2185,7 @@ def _close_editor_for_project(
     state: AppState,
     *,
     api_alive: bool | None = None,
+    save_dirty: bool = False,
     force: bool = False,
 ) -> dict:
     """Close the targeted editor using the same robust path for all callers."""
@@ -2286,11 +2301,35 @@ def _close_editor_for_project(
             graceful_targets = targets
         target_pids = sorted({int(target["pid"]) for target in targets})
 
-    save_evidence = (
-        {"saved_count": None, "policy": "force"}
-        if force
-        else {**_save_dirty_editor_packages_if_needed(api), "policy": "save_then_close"}
-    )
+    if force:
+        save_evidence = {"saved_count": None, "policy": "force"}
+    elif save_dirty:
+        save_evidence = {
+            **_save_dirty_editor_packages_if_needed(api),
+            "policy": "save_then_close",
+        }
+    else:
+        dirty = _query_dirty_editor_packages(api)
+        if dirty["count"]:
+            raise AppError(
+                "EDITOR_DIRTY_PACKAGES",
+                "Editor has unsaved packages; nothing was saved or closed.",
+                exit_code=3,
+                suggestion=(
+                    "Review the reported packages, then rerun with --save-dirty to save "
+                    "them or --force only when discarding them is authorized."
+                ),
+                details={
+                    **dirty,
+                    "decision": "preserve_and_leave_running",
+                },
+            )
+        save_evidence = {
+            **dirty,
+            "saved_count": 0,
+            "transient_map_saves": [],
+            "policy": "require_clean",
+        }
 
     def close_result(result: dict) -> dict:
         result = dict(result)
