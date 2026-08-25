@@ -116,6 +116,85 @@ static bool IsUnsafeSetMaterialAttributesProperty(const FString& PropertyName)
 		|| Name.Equals(TEXT("Inputs"), ESearchCase::IgnoreCase);
 }
 
+struct FResolvedMaterialExpressionProperty
+{
+	FString RequestedName;
+	FString Value;
+	FProperty* Property = nullptr;
+};
+
+static FString NormalizeReflectedPropertyName(const FString& Name)
+{
+	FString Normalized;
+	for (int32 Index = 0; Index < Name.Len(); ++Index)
+	{
+		const TCHAR Character = Name[Index];
+		if (FChar::IsAlnum(Character))
+		{
+			Normalized.AppendChar(FChar::ToLower(Character));
+		}
+	}
+	return Normalized;
+}
+
+static FProperty* FindMaterialExpressionProperty(
+	UClass* ExpressionClass,
+	const FString& RequestedName,
+	FString& OutResolvedName)
+{
+	if (!ExpressionClass) return nullptr;
+
+	if (FProperty* ExactProperty = FindFProperty<FProperty>(ExpressionClass, FName(*RequestedName)))
+	{
+		OutResolvedName = ExactProperty->GetName();
+		return ExactProperty;
+	}
+
+	const FString NormalizedRequestedName = NormalizeReflectedPropertyName(RequestedName);
+	if (NormalizedRequestedName.IsEmpty()) return nullptr;
+
+	FProperty* BooleanPrefixMatch = nullptr;
+	for (TFieldIterator<FProperty> It(ExpressionClass); It; ++It)
+	{
+		FProperty* Candidate = *It;
+		const FString NormalizedCandidateName = NormalizeReflectedPropertyName(Candidate->GetName());
+		if (NormalizedCandidateName == NormalizedRequestedName)
+		{
+			OutResolvedName = Candidate->GetName();
+			return Candidate;
+		}
+		if (!BooleanPrefixMatch
+			&& CastField<FBoolProperty>(Candidate)
+			&& NormalizedCandidateName.StartsWith(TEXT("b"))
+			&& NormalizedCandidateName.Mid(1) == NormalizedRequestedName)
+		{
+			BooleanPrefixMatch = Candidate;
+		}
+	}
+
+	if (BooleanPrefixMatch)
+	{
+		OutResolvedName = BooleanPrefixMatch->GetName();
+	}
+	return BooleanPrefixMatch;
+}
+
+static FString MaterialNodePropertyError(
+	UMaterial* Material,
+	const FString& ExpressionClass,
+	const TArray<FString>& PropertyErrors,
+	bool bRolledBack)
+{
+	FString Json = TEXT("{\"error\":\"Requested material node properties could not be applied; no asset was saved.\"");
+	Json += TEXT(",\"code\":\"MATERIAL_NODE_PROPERTIES_UNAPPLIED\"");
+	Json += TEXT(",\"material\":\"") + JsonEscape(Material ? Material->GetPathName() : TEXT("")) + TEXT("\"");
+	Json += TEXT(",\"expression_class\":\"") + JsonEscape(ExpressionClass) + TEXT("\"");
+	Json += TEXT(",\"property_errors\":") + JsonStringArray(PropertyErrors);
+	Json += TEXT(",\"node_created\":false,\"saved\":false");
+	Json += bRolledBack ? TEXT(",\"rolled_back\":true}") : TEXT(",\"rolled_back\":false}");
+	return Json;
+}
+
 static int32 CreateOrGetSetMaterialAttributeInput(
 	UMaterialExpressionSetMaterialAttributes* SetAttributes,
 	EMaterialProperty Property)
@@ -639,62 +718,80 @@ FString UCliAnythingBridgeLibrary::AddMaterialExpression(
 		}
 	}
 
+	TArray<FResolvedMaterialExpressionProperty> ResolvedProperties;
+	TArray<FString> PropertyErrors;
+	for (const TPair<FString, FString>& Pair : Properties)
+	{
+		FString ResolvedName;
+		FProperty* Property = FindMaterialExpressionProperty(FoundClass, Pair.Key, ResolvedName);
+		if (!Property)
+		{
+			PropertyErrors.Add(Pair.Key + TEXT(": property not found"));
+			continue;
+		}
+
+		FResolvedMaterialExpressionProperty Resolved;
+		Resolved.RequestedName = Pair.Key;
+		Resolved.Value = Pair.Value;
+		Resolved.Property = Property;
+		ResolvedProperties.Add(Resolved);
+	}
+	if (InputNames.Num() > 0 && !FoundClass->IsChildOf(UMaterialExpressionCustom::StaticClass()))
+	{
+		PropertyErrors.Add(TEXT("inputs: input names require MaterialExpressionCustom"));
+	}
+	if (PropertyErrors.Num() > 0)
+	{
+		return MaterialNodePropertyError(Material, ExpressionClass, PropertyErrors, false);
+	}
+
+	UPackage* MaterialPackage = Material->GetOutermost();
+	const bool bPackageWasDirty = MaterialPackage && MaterialPackage->IsDirty();
 	Material->Modify();
 	UMaterialExpression* Expression = UMaterialEditingLibrary::CreateMaterialExpression(Material, FoundClass, PosX, PosY);
 	if (!Expression) return JsonError(TEXT("CreateMaterialExpression failed: ") + ExpressionClass);
 
 	Expression->Modify();
-	TArray<FString> Warnings;
-	for (const TPair<FString, FString>& Pair : Properties)
+	for (const FResolvedMaterialExpressionProperty& Resolved : ResolvedProperties)
 	{
-		FProperty* Property = FindFProperty<FProperty>(Expression->GetClass(), FName(*Pair.Key));
-		if (!Property)
-		{
-			Warnings.Add(Pair.Key + TEXT(": property not found"));
-			continue;
-		}
-
+		FProperty* Property = Resolved.Property;
 		void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Expression);
 		bool bSet = true;
 		if (FStrProperty* StringProperty = CastField<FStrProperty>(Property))
 		{
-			StringProperty->SetPropertyValue(ValuePtr, Pair.Value);
+			StringProperty->SetPropertyValue(ValuePtr, Resolved.Value);
 		}
 		else if (FNameProperty* NameProperty = CastField<FNameProperty>(Property))
 		{
-			NameProperty->SetPropertyValue(ValuePtr, FName(*Pair.Value));
+			NameProperty->SetPropertyValue(ValuePtr, FName(*Resolved.Value));
 		}
 		else if (FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
 		{
-			if (Pair.Value.Equals(TEXT("true"), ESearchCase::IgnoreCase) || Pair.Value == TEXT("1")) BoolProperty->SetPropertyValue(ValuePtr, true);
-			else if (Pair.Value.Equals(TEXT("false"), ESearchCase::IgnoreCase) || Pair.Value == TEXT("0")) BoolProperty->SetPropertyValue(ValuePtr, false);
+			if (Resolved.Value.Equals(TEXT("true"), ESearchCase::IgnoreCase) || Resolved.Value == TEXT("1")) BoolProperty->SetPropertyValue(ValuePtr, true);
+			else if (Resolved.Value.Equals(TEXT("false"), ESearchCase::IgnoreCase) || Resolved.Value == TEXT("0")) BoolProperty->SetPropertyValue(ValuePtr, false);
 			else bSet = false;
 		}
 		else if (FNumericProperty* NumericProperty = CastField<FNumericProperty>(Property))
 		{
-			if (NumericProperty->IsFloatingPoint()) NumericProperty->SetFloatingPointPropertyValue(ValuePtr, FCString::Atod(*Pair.Value));
-			else if (NumericProperty->IsInteger()) NumericProperty->SetIntPropertyValue(ValuePtr, FCString::Atoi64(*Pair.Value));
+			if (NumericProperty->IsFloatingPoint()) NumericProperty->SetFloatingPointPropertyValue(ValuePtr, FCString::Atod(*Resolved.Value));
+			else if (NumericProperty->IsInteger()) NumericProperty->SetIntPropertyValue(ValuePtr, FCString::Atoi64(*Resolved.Value));
 			else bSet = false;
 		}
 		else
 		{
 #if ENGINE_MAJOR_VERSION >= 5
-			bSet = Property->ImportText_Direct(*Pair.Value, ValuePtr, Expression, PPF_None) != nullptr;
+			bSet = Property->ImportText_Direct(*Resolved.Value, ValuePtr, Expression, PPF_None) != nullptr;
 #else
-			bSet = Property->ImportText(*Pair.Value, ValuePtr, PPF_None, Expression) != nullptr;
+			bSet = Property->ImportText(*Resolved.Value, ValuePtr, PPF_None, Expression) != nullptr;
 #endif
 		}
-		if (!bSet) Warnings.Add(Pair.Key + TEXT("=") + Pair.Value + TEXT(": invalid value"));
+		if (!bSet) PropertyErrors.Add(Resolved.RequestedName + TEXT("=") + Resolved.Value + TEXT(": invalid value"));
 	}
 
 	if (InputNames.Num() > 0)
 	{
 		UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression);
-		if (!Custom)
-		{
-			Warnings.Add(TEXT("input names require MaterialExpressionCustom"));
-		}
-		else
+		if (Custom)
 		{
 			Custom->Inputs.Reset();
 			for (const FString& InputName : InputNames)
@@ -705,12 +802,32 @@ FString UCliAnythingBridgeLibrary::AddMaterialExpression(
 			}
 		}
 	}
+	if (PropertyErrors.Num() > 0)
+	{
+		UMaterialEditingLibrary::DeleteMaterialExpression(Material, Expression);
+		if (MaterialPackage && !bPackageWasDirty)
+		{
+			MaterialPackage->SetDirtyFlag(false);
+		}
+		return MaterialNodePropertyError(Material, ExpressionClass, PropertyErrors, true);
+	}
 
 	Expression->PostEditChange();
 	RecompileEditedMaterial(Material);
 	FString Json = TEXT("{\"status\":\"ok\",\"action\":\"add_node\",\"material\":\"") + JsonEscape(Material->GetPathName()) + TEXT("\"");
 	Json += TEXT(",\"node\":{\"name\":\"") + JsonEscape(Expression->GetName()) + TEXT("\",\"type\":\"") + JsonEscape(Expression->GetClass()->GetName()) + TEXT("\"}");
-	if (Warnings.Num() > 0) Json += TEXT(",\"property_warnings\":") + JsonStringArray(Warnings);
+	if (ResolvedProperties.Num() > 0)
+	{
+		Json += TEXT(",\"applied_properties\":{");
+		for (int32 Index = 0; Index < ResolvedProperties.Num(); ++Index)
+		{
+			if (Index > 0) Json += TEXT(",");
+			const FResolvedMaterialExpressionProperty& Resolved = ResolvedProperties[Index];
+			Json += TEXT("\"") + JsonEscape(Resolved.RequestedName) + TEXT("\":\"")
+				+ JsonEscape(Resolved.Property->GetName()) + TEXT("\"");
+		}
+		Json += TEXT("}");
+	}
 	Json += TEXT("}");
 	return Json;
 }
@@ -1212,7 +1329,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.34");
+	return TEXT("1.35");
 }
 
 FString UCliAnythingBridgeLibrary::ConnectMaterialOutput(UMaterial* Material, const FString& FromNode, const FString& FromOutputName, const FString& PropertyName)

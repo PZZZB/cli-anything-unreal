@@ -109,6 +109,9 @@ ue-cli editor api-discover unreal.MaterialExpressionConstant3Vector
 ue-cli material add-node /Game/M \
     --type MaterialExpressionPanner --set speed_x=0.15
 ```
+Python-style `snake_case` property names resolve to native reflected fields. If any requested
+property cannot be applied, `add-node` returns `MATERIAL_NODE_PROPERTIES_UNAPPLIED`, removes
+the partial node, and does not save the material.
 
 **Any property on existing node**: use `editor run-script` + `get_material_property_input_node`:
 ```python

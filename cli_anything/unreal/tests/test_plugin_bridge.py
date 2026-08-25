@@ -687,7 +687,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.34"
+        assert version == "1.35"
 
     def test_static_mesh_lod_property_reader_uses_native_vertex_paint_data(self):
         """Bridge exposes LOD fields omitted from Unreal reflection."""
@@ -768,6 +768,31 @@ class TestPluginBridge:
         assert add_body.index("MATERIAL_SET_ATTRIBUTES_UNSAFE_PROPERTY") < add_body.index("CreateMaterialExpression")
         assert "CreateOrGetSetMaterialAttributeInput" in connect_body
         assert "set_material_attribute_input" in connect_body
+
+    def test_add_material_expression_resolves_aliases_and_rolls_back_errors(self):
+        """Native add-node honors Python-style aliases and never keeps partial nodes."""
+        from cli_anything.unreal.core.plugin_bridge import _BUNDLED_PLUGIN_DIR
+
+        cpp = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeLibrary.cpp"
+        ).read_text(encoding="utf-8")
+        add_body = cpp.split(
+            "FString UCliAnythingBridgeLibrary::AddMaterialExpression",
+            1,
+        )[1].split(
+            "FString UCliAnythingBridgeLibrary::DeleteMaterialExpression",
+            1,
+        )[0]
+
+        assert "NormalizeReflectedPropertyName" in cpp
+        assert "FindMaterialExpressionProperty" in add_body
+        assert "MATERIAL_NODE_PROPERTIES_UNAPPLIED" in cpp
+        assert "DeleteMaterialExpression(Material, Expression)" in add_body
+        assert "property_warnings" not in add_body
 
     def test_confirmation_broker_hooks_ue4_and_ue5_modal_delegates(self):
         """The out-of-band mailbox must work while Remote Control is blocked."""

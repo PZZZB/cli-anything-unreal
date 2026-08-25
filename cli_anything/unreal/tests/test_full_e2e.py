@@ -1241,6 +1241,65 @@ else:
         assert data["status"] == "success"
         assert data["result"].get("status") == "ok"
 
+    def test_add_node_cli_applies_python_aliases_atomically(
+        self, api, cli_runner, project_path, api_port
+    ):
+        """Scalar aliases apply; an unknown required property creates no node."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+        from cli_anything.unreal.unreal_cli import cli
+
+        parameter_name = "CodexIssue142DepthBias"
+        add_result = cli_runner.invoke(cli, [
+            "--output", "json", "--project", project_path, "--port", str(api_port),
+            "material", "add-node", self.TEST_MATERIAL,
+            "--type", "MaterialExpressionScalarParameter",
+            "--set", f"parameter_name={parameter_name}",
+            "--set", "default_value=1.0",
+        ])
+        assert add_result.exit_code == 0, add_result.output
+        add_data = json.loads(add_result.output)
+        edit = add_data["result"]
+        assert edit.get("status") == "ok", edit
+        assert "property_warnings" not in edit
+        assert edit["applied_properties"] == {
+            "parameter_name": "ParameterName",
+            "default_value": "DefaultValue",
+        }
+
+        node_name = edit["node"]["name"]
+        inspect_script = f'''
+import unreal
+mat = unreal.EditorAssetLibrary.load_asset({self.TEST_MATERIAL!r})
+nodes = [node for node in unreal.ObjectIterator(unreal.MaterialExpression) if node.get_outer() == mat]
+node = next((node for node in nodes if node.get_name() == {node_name!r}), None)
+result = {{
+    "found": node is not None,
+    "parameter_name": str(node.get_editor_property("parameter_name")) if node else None,
+    "default_value": float(node.get_editor_property("default_value")) if node else None,
+    "node_count": len(nodes),
+}}
+'''
+        inspected = run_python_code(api, inspect_script, timeout=60.0, save=False)
+        assert inspected.get("found") is True, inspected
+        assert inspected.get("parameter_name") == parameter_name, inspected
+        assert inspected.get("default_value") == pytest.approx(1.0), inspected
+        before_count = inspected["node_count"]
+
+        rejected = cli_runner.invoke(cli, [
+            "--output", "json", "--project", project_path, "--port", str(api_port),
+            "material", "add-node", self.TEST_MATERIAL,
+            "--type", "MaterialExpressionScalarParameter",
+            "--set", "definitely_missing_property=1",
+        ])
+        assert rejected.exit_code == 3, rejected.output
+        rejected_data = json.loads(rejected.output)
+        assert rejected_data["code"] == "MATERIAL_NODE_PROPERTIES_UNAPPLIED"
+        assert rejected_data["details"]["node_created"] is False
+        assert rejected_data["details"]["saved"] is False
+
+        counted = run_python_code(api, inspect_script, timeout=60.0, save=False)
+        assert counted.get("node_count") == before_count, counted
+
     def test_rename_custom_input_cli(self, api, cli_runner, project_path, api_port):
         """Custom input rename changes the real HLSL variable name."""
         from cli_anything.unreal.core.materials import add_material_node, get_material_info

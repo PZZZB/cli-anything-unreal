@@ -1215,6 +1215,30 @@ class TestMaterialEditing:
         assert result["code"] == "MATERIAL_SAVE_FAILED"
         assert result["edit_result"]["status"] == "ok"
 
+    def test_native_edit_does_not_save_unapplied_node_properties(self):
+        from cli_anything.unreal.core.materials import _call_material_edit_bridge
+
+        api = MagicMock()
+        api.call_function.return_value = {
+            "ReturnValue": json.dumps({
+                "error": "Requested material node properties could not be applied; no asset was saved.",
+                "code": "MATERIAL_NODE_PROPERTIES_UNAPPLIED",
+                "property_errors": ["missing_name: property not found"],
+                "node_created": False,
+                "saved": False,
+            }),
+        }
+
+        result = _call_material_edit_bridge(
+            api,
+            "AddMaterialExpression",
+            "/Game/M_Test",
+        )
+
+        assert result["code"] == "MATERIAL_NODE_PROPERTIES_UNAPPLIED"
+        assert result["saved"] is False
+        assert api.call_function.call_count == 1
+
     @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_add_node(self, mock_exec):
         from cli_anything.unreal.core.materials import add_material_node
@@ -1632,6 +1656,34 @@ class TestMaterialEditing:
             assert data["status"] == "success"
             assert data["result"]["status"] == "ok"
             assert data["result"]["node"]["type"] == "MaterialExpressionConstant"
+
+    @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
+    def test_add_node_cli_rejects_unapplied_properties_without_saving(self, mock_exec):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec.return_value = {
+            "error": "Requested material node properties could not be applied; no asset was saved.",
+            "code": "MATERIAL_NODE_PROPERTIES_UNAPPLIED",
+            "property_errors": ["missing_name: property not found"],
+            "node_created": False,
+            "saved": False,
+        }
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.material.require_editor") as mock_editor:
+            mock_editor.return_value = MagicMock()
+            result = runner.invoke(cli, [
+                "--output", "json", "material", "add-node", "/Game/M_Test",
+                "--type", "MaterialExpressionScalarParameter",
+                "--set", "missing_name=DepthBiasMultiplier",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "MATERIAL_NODE_PROPERTIES_UNAPPLIED"
+        assert data["details"]["saved"] is False
 
     @patch("cli_anything.unreal.core.materials._call_material_edit_bridge")
     def test_rename_custom_input_cli(self, mock_exec):
