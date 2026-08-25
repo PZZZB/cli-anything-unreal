@@ -1191,6 +1191,25 @@ else:
         )
         assert result.get("status") == "ok", result
         assert result.get("saved") is True, result
+        assert result.get("applied") is True, result
+        assert result.get("readback_match") is True, result
+        assert result.get("readback_value") == pytest.approx(0.77), result
+        assert result.get("verification") == "effective_parameter_readback", result
+        assert result.get("set_return_authoritative") is False, result
+
+        cli_set = cli_runner.invoke(cli, [
+            "--output", "json", "--project", project_path, "--port", str(api_port),
+            "material", "set-param", "/Game/E2E_MIParamInst",
+            "--name", "Roughness", "--value", "0.77", "--type", "scalar",
+        ])
+        assert cli_set.exit_code == 0, cli_set.output
+        cli_set_data = json.loads(cli_set.output)
+        cli_set_result = cli_set_data["result"]
+        assert cli_set_result.get("status") == "ok", cli_set_result
+        assert cli_set_result.get("applied") is True, cli_set_result
+        assert cli_set_result.get("readback_match") is True, cli_set_result
+        assert cli_set_result.get("readback_value") == pytest.approx(0.77), cli_set_result
+        assert cli_set_result.get("set_return_authoritative") is False, cli_set_result
 
         value = get_material_param(api, "/Game/E2E_MIParamInst", "Roughness", project_dir=project_dir)
         assert value.get("status") == "ok", value

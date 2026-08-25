@@ -1472,8 +1472,18 @@ class TestMaterialEditing:
         script = mock_run.call_args.args[1]
         assert "_cli_load_material" in script
         assert "set_return" in script
+        assert "set_return_authoritative" in script
+        assert "readback_match" in script
+        assert "applied" in script
+        assert "MATERIAL_PARAM_READBACK_MISMATCH" in script
+        assert "MATERIAL_PARAM_NOT_FOUND" in script
+        assert "get_material_instance_scalar_parameter_value" in script
+        assert "get_material_instance_vector_parameter_value" in script
+        assert "get_material_instance_texture_parameter_value" in script
+        assert "math.isclose" in script
         assert "save_loaded_asset(mat" not in script
         assert "save_dirty_packages(False, True)" not in script
+        compile(script, "<material-set-param-script>", "exec")
 
         from cli_anything.unreal.core.script_runner import SavePolicy
 
@@ -1753,6 +1763,12 @@ class TestMaterialEditing:
             "param": "Roughness",
             "type": "scalar",
             "value": 0.8,
+            "readback_value": 0.800000011920929,
+            "readback_match": True,
+            "applied": True,
+            "verification": "effective_parameter_readback",
+            "set_return": False,
+            "set_return_authoritative": False,
         }
 
         runner = CliRunner()
@@ -1768,6 +1784,50 @@ class TestMaterialEditing:
             data = json.loads(result.output)
             assert data["status"] == "success"
             assert data["result"]["status"] == "ok"
+            assert data["result"]["applied"] is True
+            assert data["result"]["readback_match"] is True
+            assert data["result"]["set_return"] is False
+            assert data["result"]["set_return_authoritative"] is False
+
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_set_param_cli_readback_mismatch_is_top_level_error(self, mock_exec):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        mock_exec.return_value = {
+            "status": "error",
+            "error": "Material parameter readback did not match requested value; asset was not saved.",
+            "code": "MATERIAL_PARAM_READBACK_MISMATCH",
+            "action": "set_param",
+            "param": "Roughness",
+            "type": "scalar",
+            "value": 0.8,
+            "readback_value": 0.5,
+            "readback_match": False,
+            "applied": False,
+            "verification": "effective_parameter_readback",
+            "set_return": False,
+            "set_return_authoritative": False,
+            "saved": False,
+        }
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.material.require_editor") as mock_editor:
+            mock_editor.return_value = MagicMock()
+            result = runner.invoke(cli, [
+                "--output", "json", "material", "set-param", "/Game/MI_Test",
+                "--name", "Roughness",
+                "--value", "0.8",
+                "--type", "scalar",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["status"] == "error"
+        assert data["code"] == "MATERIAL_PARAM_READBACK_MISMATCH"
+        assert data["details"]["readback_match"] is False
+        assert data["details"]["applied"] is False
+        assert data["details"]["saved"] is False
 
     @patch("cli_anything.unreal.core.materials._exec_material_script")
     def test_get_param_cli_error_is_top_level_error(self, mock_exec):

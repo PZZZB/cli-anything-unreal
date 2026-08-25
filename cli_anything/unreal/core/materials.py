@@ -211,6 +211,7 @@ else:
 _SCRIPT_SET_PARAM = '''
 import unreal
 import json
+import math
 
 material_path = "{material_path}"
 material_candidates = {material_path_candidates_json}
@@ -227,27 +228,128 @@ else:
     mel = unreal.MaterialEditingLibrary
     try:
         set_return = None
+        parameter_names = []
         if param_type == "scalar":
-            val = float(param_value_raw)
-            set_return = mel.set_material_instance_scalar_parameter_value(mat, param_name, val)
-            mat.modify()
-            result = {{"status": "ok", "action": "set_param", "material": loaded_asset_path, "param": param_name, "type": "scalar", "value": val, "set_return": set_return}}
+            parameter_names = [str(name) for name in mel.get_scalar_parameter_names(mat)]
         elif param_type == "vector":
-            parts = json.loads(param_value_raw)
-            color = unreal.LinearColor(r=float(parts.get("r", 0)), g=float(parts.get("g", 0)), b=float(parts.get("b", 0)), a=float(parts.get("a", 1)))
-            set_return = mel.set_material_instance_vector_parameter_value(mat, param_name, color)
-            mat.modify()
-            result = {{"status": "ok", "action": "set_param", "material": loaded_asset_path, "param": param_name, "type": "vector", "value": parts, "set_return": set_return}}
+            parameter_names = [str(name) for name in mel.get_vector_parameter_names(mat)]
         elif param_type == "texture":
-            tex = unreal.EditorAssetLibrary.load_asset(param_value_raw)
-            if tex is None:
-                result = {{"error": "Texture not found: " + param_value_raw}}
-            else:
-                set_return = mel.set_material_instance_texture_parameter_value(mat, param_name, tex)
-                mat.modify()
-                result = {{"status": "ok", "action": "set_param", "material": loaded_asset_path, "param": param_name, "type": "texture", "value": param_value_raw, "set_return": set_return}}
+            parameter_names = [str(name) for name in mel.get_texture_parameter_names(mat)]
         else:
             result = {{"error": "Unknown param_type: " + param_type + ". Use scalar, vector, or texture."}}
+
+        resolved_param_name = next(
+            (name for name in parameter_names if name.casefold() == param_name.casefold()),
+            None,
+        )
+        if param_type in ("scalar", "vector", "texture") and resolved_param_name is None:
+            result = {{
+                "error": "Parameter not found: " + param_name,
+                "code": "MATERIAL_PARAM_NOT_FOUND",
+                "action": "set_param",
+                "material": loaded_asset_path,
+                "param": param_name,
+                "type": param_type,
+                "available_parameters": parameter_names,
+                "applied": False,
+                "readback_match": False,
+                "saved": False,
+            }}
+        if param_type == "scalar":
+            if resolved_param_name is not None:
+                val = float(param_value_raw)
+                set_return = mel.set_material_instance_scalar_parameter_value(mat, resolved_param_name, val)
+                readback_value = float(mel.get_material_instance_scalar_parameter_value(mat, resolved_param_name))
+                readback_match = math.isclose(readback_value, val, rel_tol=1e-6, abs_tol=1e-6)
+                result = {{
+                    "status": "ok",
+                    "action": "set_param",
+                    "material": loaded_asset_path,
+                    "param": param_name,
+                    "resolved_param": resolved_param_name,
+                    "type": "scalar",
+                    "value": val,
+                    "readback_value": readback_value,
+                    "readback_match": readback_match,
+                    "applied": readback_match,
+                    "verification": "effective_parameter_readback",
+                    "readback_tolerance": 1e-6,
+                    "set_return": set_return,
+                    "set_return_authoritative": False,
+                }}
+        elif param_type == "vector":
+            if resolved_param_name is not None:
+                parts = json.loads(param_value_raw)
+                value = {{
+                    "r": float(parts.get("r", 0)),
+                    "g": float(parts.get("g", 0)),
+                    "b": float(parts.get("b", 0)),
+                    "a": float(parts.get("a", 1)),
+                }}
+                color = unreal.LinearColor(**value)
+                set_return = mel.set_material_instance_vector_parameter_value(mat, resolved_param_name, color)
+                readback_color = mel.get_material_instance_vector_parameter_value(mat, resolved_param_name)
+                readback_value = {{
+                    "r": float(readback_color.r),
+                    "g": float(readback_color.g),
+                    "b": float(readback_color.b),
+                    "a": float(readback_color.a),
+                }}
+                readback_match = all(
+                    math.isclose(readback_value[channel], value[channel], rel_tol=1e-6, abs_tol=1e-6)
+                    for channel in ("r", "g", "b", "a")
+                )
+                result = {{
+                    "status": "ok",
+                    "action": "set_param",
+                    "material": loaded_asset_path,
+                    "param": param_name,
+                    "resolved_param": resolved_param_name,
+                    "type": "vector",
+                    "value": value,
+                    "readback_value": readback_value,
+                    "readback_match": readback_match,
+                    "applied": readback_match,
+                    "verification": "effective_parameter_readback",
+                    "readback_tolerance": 1e-6,
+                    "set_return": set_return,
+                    "set_return_authoritative": False,
+                }}
+        elif param_type == "texture":
+            if resolved_param_name is not None:
+                tex = unreal.EditorAssetLibrary.load_asset(param_value_raw)
+                if tex is None:
+                    result = {{"error": "Texture not found: " + param_value_raw}}
+                else:
+                    set_return = mel.set_material_instance_texture_parameter_value(mat, resolved_param_name, tex)
+                    readback_texture = mel.get_material_instance_texture_parameter_value(mat, resolved_param_name)
+                    requested_path = tex.get_path_name()
+                    readback_value = readback_texture.get_path_name() if readback_texture is not None else None
+                    readback_match = readback_value == requested_path
+                    result = {{
+                        "status": "ok",
+                        "action": "set_param",
+                        "material": loaded_asset_path,
+                        "param": param_name,
+                        "resolved_param": resolved_param_name,
+                        "type": "texture",
+                        "value": param_value_raw,
+                        "requested_asset": requested_path,
+                        "readback_value": readback_value,
+                        "readback_match": readback_match,
+                        "applied": readback_match,
+                        "verification": "effective_parameter_readback",
+                        "set_return": set_return,
+                        "set_return_authoritative": False,
+                    }}
+
+        if isinstance(result, dict) and result.get("status") == "ok" and not result.get("readback_match"):
+            result["status"] = "error"
+            result["error"] = "Material parameter readback did not match requested value; asset was not saved."
+            result["code"] = "MATERIAL_PARAM_READBACK_MISMATCH"
+            result["saved"] = False
+        elif isinstance(result, dict) and result.get("status") == "ok":
+            mat.modify()
     except Exception as e:
         result = {{"error": "set_param failed: " + str(e)}}
 '''

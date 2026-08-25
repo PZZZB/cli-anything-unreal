@@ -90,6 +90,11 @@ ue-cli material set-param /Game/MI_Water \
 ue-cli material recompile /Game/M_Water
 ```
 
+`set-param` verifies the effective scalar, vector, or texture value after the write. Trust
+`applied` / `readback_match`; Unreal's raw `set_return` remains diagnostic-only and can be
+false after a successful write. A mismatch returns `MATERIAL_PARAM_READBACK_MISMATCH` and
+does not save the asset.
+
 **Connect to material output:** `--to __material_output__` + `--to-input` material property: `BaseColor`, `Metallic`, `Roughness`, `Normal`, `Emissive`, `Opacity`, `WorldPositionOffset`, etc.
 
 ### 5. Setting Node Properties

@@ -201,7 +201,7 @@ All material commands require editor.
 | `material rename-custom-input PATH --node NODE --from OLD --to NEW [--no-update-code]` | Rename Custom node input/HLSL variable |
 | `material connect PATH --from NODE [--from-output PIN] --to NODE --to-input PIN` | Connect nodes |
 | `material disconnect PATH --from NODE [--from-output PIN] --to NODE --to-input PIN` | Disconnect nodes |
-| `material set-param PATH --name N --value V --type scalar\|vector\|texture` | Set MaterialInstance param |
+| `material set-param PATH --name N --value V --type scalar\|vector\|texture` | Set and readback-verify MaterialInstance param (`applied` / `readback_match`) |
 | `material get-param PATH --name N` | Get MaterialInstance param |
 | `material recompile PATH` | Force shader recompile |
 
