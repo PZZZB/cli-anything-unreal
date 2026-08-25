@@ -112,7 +112,7 @@ All asset commands require editor.
 | `asset refs ASSET_PATH` | List referencers |
 | `asset texture-source ASSET_PATH` | Read Texture2D source size/format and basic alpha/value stats through the bridge plugin |
 | `asset duplicate SRC DEST [--force]` | Duplicate asset |
-| `asset rename SRC DEST` | Rename/move asset |
+| `asset rename SRC DEST [--timeout N]` | Rename/move asset. Waits 120 seconds by default. A response timeout is post-checked; confirmed moved state succeeds, otherwise `ASSET_RENAME_TIMEOUT` reports unknown completion plus safe existence checks and must not be retried blindly |
 
 ## build - Build System
 

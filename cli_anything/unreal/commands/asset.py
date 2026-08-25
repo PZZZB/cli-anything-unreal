@@ -1,5 +1,9 @@
 """commands/asset.py — Asset operations commands."""
 
+import shlex
+import subprocess as sp
+import sys
+
 import click
 
 from cli_anything.unreal.commands import (
@@ -162,9 +166,16 @@ def asset_duplicate_cmd(state: AppState, source_path, dest_path, force):
 @asset_group.command("rename")
 @click.argument("source_path")
 @click.argument("dest_path")
+@click.option(
+    "--timeout",
+    type=click.IntRange(min=1),
+    default=120,
+    show_default=True,
+    help="Maximum seconds to wait before verifying an ambiguous rename outcome.",
+)
 @handle_error
 @click.pass_obj
-def asset_rename_cmd(state: AppState, source_path, dest_path):
+def asset_rename_cmd(state: AppState, source_path, dest_path, timeout):
     """Rename/move an asset to a new path.
 
     Fails if destination already exists.
@@ -175,9 +186,31 @@ def asset_rename_cmd(state: AppState, source_path, dest_path):
 
     api = require_editor(state)
     result = asset_rename(api, source_path, dest_path,
-                          project_dir=state.session.project_dir)
+                          project_dir=state.session.project_dir,
+                          timeout=timeout)
+    if result.get("code") == "ASSET_RENAME_TIMEOUT":
+        result["verification_commands"] = {
+            "source": _asset_exists_command(state, source_path),
+            "destination": _asset_exists_command(state, dest_path),
+        }
+        raise AppError(
+            result["code"],
+            result["error"],
+            exit_code=4,
+            suggestion=result.get("suggestion"),
+            details=result,
+        )
     raise_for_legacy_error(result, default_code="ASSET_RENAME_FAILED")
     output(result, state)
+
+
+def _asset_exists_command(state: AppState, asset_path: str) -> str:
+    """Build a verification command pinned to the selected editor."""
+    parts = ["ue-cli", "--output", state.output_mode]
+    if state.session.project_path:
+        parts.extend(["--project", state.session.project_path])
+    parts.extend(["--port", str(state.session.port), "asset", "exists", asset_path])
+    return sp.list2cmdline(parts) if sys.platform == "win32" else shlex.join(parts)
 
 
 @asset_group.command("property")

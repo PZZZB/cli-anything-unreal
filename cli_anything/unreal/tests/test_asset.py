@@ -305,6 +305,47 @@ class TestAssets:
         result = asset_rename(api, "/Game/M_Old", "/Game/M_New")
         assert result["status"] == "ok"
         assert result["renamed"] is True
+        assert mock_exec.call_args.kwargs["timeout"] == 120.0
+
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_rename_timeout_confirmed_by_postcondition(self, mock_exec):
+        from cli_anything.unreal.core.assets import asset_rename
+
+        api = self._mock_api()
+        api.does_asset_exist.side_effect = [False, True]
+        mock_exec.return_value = {
+            "error": "HTTPConnectionPool: Read timed out. (read timeout=15)",
+        }
+
+        result = asset_rename(api, "/Game/M_Old", "/Game/M_New", timeout=15)
+
+        assert result["status"] == "ok"
+        assert result["renamed"] is True
+        assert result["completion_state"] == "confirmed"
+        assert result["confirmed_by"] == "post_timeout_asset_exists"
+        assert result["response_timed_out"] is True
+        assert result["verification"]["outcome"] == "confirmed_success"
+        assert api.does_asset_exist.call_args_list[0].args == ("/Game/M_Old",)
+        assert api.does_asset_exist.call_args_list[1].args == ("/Game/M_New",)
+
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_rename_timeout_stays_unknown_when_postcheck_fails(self, mock_exec):
+        from cli_anything.unreal.core.assets import asset_rename
+
+        api = self._mock_api()
+        api.does_asset_exist.side_effect = RuntimeError("editor still busy")
+        mock_exec.return_value = {
+            "error": "HTTPConnectionPool: Read timed out. (read timeout=2)",
+        }
+
+        result = asset_rename(api, "/Game/M_Old", "/Game/M_New", timeout=2)
+
+        assert result["code"] == "ASSET_RENAME_TIMEOUT"
+        assert result["completion_state"] == "unknown"
+        assert result["retry_safe"] is False
+        assert result["verification"]["outcome"] == "inconclusive"
+        assert result["verification"]["source"]["exists"] is None
+        assert result["verification"]["destination"]["exists"] is None
 
     @patch("cli_anything.unreal.core.assets._exec")
     def test_asset_property_get_uses_loaded_asset(self, mock_exec):
@@ -779,6 +820,37 @@ class TestAssetCLI:
             data = json.loads(result.output)
             assert data["status"] == "success"
             assert data["result"]["status"] == "ok"
+
+    def test_asset_rename_cli_timeout_is_unknown_with_safe_verification_commands(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        api = MagicMock()
+        api.does_asset_exist.side_effect = RuntimeError("editor still busy")
+        with patch("cli_anything.unreal.commands.asset.require_editor", return_value=api), \
+             patch("cli_anything.unreal.core.assets._exec") as mock_exec:
+            mock_exec.return_value = {
+                "error": "HTTPConnectionPool: Read timed out. (read timeout=2)",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "--port", "30021",
+                "asset", "rename", "--timeout", "2",
+                "/Game/M_Old", "/Game/M_New",
+            ])
+
+        assert result.exit_code == 4
+        data = json.loads(result.output)
+        assert data["code"] == "ASSET_RENAME_TIMEOUT"
+        details = data["details"]
+        assert details["completion_state"] == "unknown"
+        assert details["retry_safe"] is False
+        assert details["verification_commands"] == {
+            "source": "ue-cli --output json --port 30021 asset exists /Game/M_Old",
+            "destination": "ue-cli --output json --port 30021 asset exists /Game/M_New",
+        }
+        assert "Do not retry" in data["suggestion"]
 
 
 # ═══════════════════════════════════════════════════════════════════════

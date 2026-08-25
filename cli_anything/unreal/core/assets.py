@@ -518,10 +518,45 @@ def asset_rename(
     dest_path: str,
     *,
     project_dir: str | None = None,
+    timeout: float = 120.0,
 ) -> dict:
     """Rename/move an asset."""
     script = _SCRIPT_RENAME_ASSET.format(source_path=source_path, dest_path=dest_path)
-    result = _exec(api, script, project_dir)
+    result = _exec(api, script, project_dir, timeout=timeout)
+    if _is_transport_timeout_result(result):
+        verification = _verify_asset_rename_postcondition(api, source_path, dest_path)
+        if verification["outcome"] == "confirmed_success":
+            return {
+                "status": "ok",
+                "source": source_path,
+                "destination": dest_path,
+                "renamed": True,
+                "completion_state": "confirmed",
+                "confirmed_by": "post_timeout_asset_exists",
+                "response_timed_out": True,
+                "timeout_seconds": timeout,
+                "transport_error": result.get("error"),
+                "verification": verification,
+            }
+        return {
+            "error": (
+                f"Asset rename timed out after {timeout:g} seconds; "
+                "completion outcome is unknown."
+            ),
+            "code": "ASSET_RENAME_TIMEOUT",
+            "source": source_path,
+            "destination": dest_path,
+            "completion_state": "unknown",
+            "failure_kind": "transport_timeout",
+            "retry_safe": False,
+            "timeout_seconds": timeout,
+            "transport_error": result.get("error"),
+            "verification": verification,
+            "suggestion": (
+                "Run both asset-existence verification commands. Do not retry the rename "
+                "unless the source still exists and the destination does not."
+            ),
+        }
     if result.get("status") == "failed" or result.get("renamed") is False:
         return {
             **result,
@@ -529,6 +564,49 @@ def asset_rename(
             "code": "ASSET_RENAME_FAILED",
         }
     return result
+
+
+def _is_transport_timeout_result(result: dict) -> bool:
+    """Return whether an editor request timed out waiting for its response."""
+    if not isinstance(result, dict) or result.get("error_type"):
+        return False
+    text = " ".join(str(result.get(key, "")) for key in ("error", "traceback")).lower()
+    markers = (
+        "read timed out",
+        "read timeout",
+        "readtimeout",
+        "timed out",
+        "timeouterror",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _verify_asset_rename_postcondition(
+    api: "UEEditorAPI",
+    source_path: str,
+    dest_path: str,
+) -> dict:
+    """Safely probe both paths after an ambiguous mutating request timeout."""
+    checks = {}
+    for label, path in (("source", source_path), ("destination", dest_path)):
+        try:
+            checks[label] = {"path": path, "exists": bool(api.does_asset_exist(path))}
+        except Exception as exc:
+            checks[label] = {"path": path, "exists": None, "error": str(exc)}
+
+    source_exists = checks["source"]["exists"]
+    destination_exists = checks["destination"]["exists"]
+    outcome = (
+        "confirmed_success"
+        if source_exists is False and destination_exists is True
+        else "inconclusive"
+    )
+    return {
+        "method": "asset_exists",
+        "outcome": outcome,
+        **checks,
+    }
+
 
 def get_asset_property(api: "UEEditorAPI", asset_path: str, property_name: str) -> dict:
     """Get a property value on a UAsset or Blueprint class default object."""
