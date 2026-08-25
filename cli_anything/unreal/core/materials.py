@@ -1497,6 +1497,18 @@ else:
                 "bridge_result": raw_result,
             }}
         result.setdefault("material", loaded_asset_path)
+        result.setdefault("requested_asset_class", mat.get_class().get_name())
+        shader_map_material = mat
+        if isinstance(mat, unreal.MaterialInstanceConstant):
+            try:
+                base_material = mat.get_base_material()
+                if base_material is not None:
+                    shader_map_material = base_material
+            except Exception:
+                pass
+        result.setdefault("shader_map_material", shader_map_material.get_path_name())
+        result.setdefault("shader_dump_name", shader_map_material.get_name())
+        result.setdefault("resolved_from_material_instance", shader_map_material != mat)
 '''
 
 
@@ -1596,13 +1608,21 @@ def get_material_hlsl(
                 recompile_result.setdefault("code", "MATERIAL_SHADER_RECOMPILE_FAILED")
                 return recompile_result
 
+            shader_dump_name = str(recompile_result.get("shader_dump_name") or mat_name)
+            shader_debug_group = str(recompile_result.get("shader_debug_group") or "")
+            exact_dump_dir_name = _shader_debug_group_root(shader_debug_group)
+
             # Shader compilation may finish after PostEditChange returns. Keep
             # that grace period short by default and let callers extend it for
             # unusually large materials instead of appearing hung for 2 min.
             wait_timeout = max(0.0, float(wait_timeout))
             deadline = time.monotonic() + wait_timeout
             while True:
-                dump_dir = _find_shader_dump_dir(debug_base, mat_name)
+                dump_dir = _find_shader_dump_dir(
+                    debug_base,
+                    shader_dump_name,
+                    exact_dir_name=exact_dump_dir_name,
+                )
                 if dump_dir:
                     # Verify .usf files exist
                     usf_files = list(dump_dir.rglob("*.usf"))
@@ -1626,7 +1646,18 @@ def get_material_hlsl(
         and any(dump_dir.rglob("*.usf"))
     )
     if not dump_has_usf:
-        search_details = _shader_dump_search_details(debug_base, mat_name)
+        shader_dump_name = (
+            str(recompile_result.get("shader_dump_name") or mat_name)
+            if recompile_result
+            else mat_name
+        )
+        shader_debug_group = (
+            str(recompile_result.get("shader_debug_group") or "")
+            if recompile_result
+            else ""
+        )
+        exact_dump_dir_name = _shader_debug_group_root(shader_debug_group)
+        search_details = _shader_dump_search_details(debug_base, shader_dump_name)
         return {
             "error": f"No shader dump found for '{mat_name}' on platform '{platform_dir_name}'. "
                      f"Waited {wait_timeout:g} seconds after recompilation. "
@@ -1635,15 +1666,49 @@ def get_material_hlsl(
             "available_platforms": _available_shader_dump_platforms(project_dir),
             "recompile": recompile_result,
             "wait_timeout_seconds": wait_timeout,
+            "shader_map_material": (
+                recompile_result.get("shader_map_material") if recompile_result else material_path
+            ),
+            "shader_dump_name": shader_dump_name,
+            "shader_debug_group": shader_debug_group or None,
+            "exact_dump_directory": exact_dump_dir_name or None,
             **search_details,
         }
 
     # ── Step 3: Read shader files ──────────────────────────────────
-    return _read_shader_dump(dump_dir, mat_name, material_path,
-                             platform_dir_name, shader_type, project_dir)
+    result = _read_shader_dump(
+        dump_dir,
+        mat_name,
+        material_path,
+        platform_dir_name,
+        shader_type,
+        project_dir,
+    )
+    if recompile_result:
+        result["shader_map_material"] = recompile_result.get(
+            "shader_map_material",
+            material_path,
+        )
+        result["shader_dump_name"] = recompile_result.get("shader_dump_name", mat_name)
+        result["shader_debug_group"] = recompile_result.get("shader_debug_group") or None
+        result["resolved_from_material_instance"] = bool(
+            recompile_result.get("resolved_from_material_instance", False)
+        )
+    return result
 
 
-def _find_shader_dump_dir(debug_base: Path, mat_name: str) -> Optional[Path]:
+def _shader_debug_group_root(shader_debug_group: str) -> str:
+    """Return ShaderDebugInfo's top-level directory from an engine debug group."""
+    normalized = str(shader_debug_group or "").replace("\\", "/").strip("/")
+    return normalized.split("/", 1)[0] if normalized else ""
+
+
+def _find_shader_dump_dir(
+    debug_base: Path,
+    mat_name: str,
+    *,
+    exact_dir_name: str = "",
+) -> Optional[Path]:
     """Find the shader dump directory for a material.
 
     Dump dirs are named like: MaterialName_hexhash
@@ -1653,8 +1718,11 @@ def _find_shader_dump_dir(debug_base: Path, mat_name: str) -> Optional[Path]:
     """
     if not debug_base.is_dir():
         return None
+    if exact_dir_name:
+        exact_dir = debug_base / exact_dir_name
+        return exact_dir if exact_dir.is_dir() else None
     for d in debug_base.iterdir():
-        if d.is_dir() and d.name.startswith(f"{mat_name}_"):
+        if d.is_dir() and (d.name == mat_name or d.name.startswith(f"{mat_name}_")):
             return d
     return None
 
@@ -1678,7 +1746,7 @@ def _shader_dump_search_details(debug_base: Path, mat_name: str) -> dict:
     candidates = sorted(
         path.name
         for path in directories
-        if path.name.startswith(f"{mat_name}_")
+        if path.name == mat_name or path.name.startswith(f"{mat_name}_")
     )
     details["searched_directory_count"] = len(directories)
     details["candidate_count"] = len(candidates)

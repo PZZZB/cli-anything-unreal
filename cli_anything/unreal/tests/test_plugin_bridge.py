@@ -687,7 +687,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.36"
+        assert version == "1.37"
 
     def test_static_mesh_lod_property_reader_uses_native_vertex_paint_data(self):
         """Bridge exposes LOD fields omitted from Unreal reflection."""
@@ -896,6 +896,13 @@ class TestPluginBridge:
         assert "Material->PostEditChange()" in function
         assert "Package->SetDirtyFlag(bDirtyBefore)" in function
         assert "package_dirty_restored" in function
+        assert "Material->GetMaterialResource(ActivePlatform)" in function
+        assert "Material->GetMaterialResource(GMaxRHIFeatureLevel)" in function
+        assert "MaterialResource->GetFriendlyName()" in function
+        assert "MaterialResource->GetDebugGroupName()" in function
+        assert "shader_map_material" in function
+        assert "shader_dump_name" in function
+        assert "shader_debug_group" in function
 
     def test_bridge_shader_platform_uses_active_editor_preview_on_ue5(self):
         """UE5 shader dumps follow editor preview platform, not host RHI."""

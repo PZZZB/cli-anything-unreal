@@ -1333,7 +1333,7 @@ TArray<FString> UCliAnythingBridgeLibrary::GetRecentEngineErrors(int32 Count)
 
 FString UCliAnythingBridgeLibrary::GetPluginVersion()
 {
-	return TEXT("1.36");
+	return TEXT("1.37");
 }
 
 FString UCliAnythingBridgeLibrary::ConnectMaterialOutput(UMaterial* Material, const FString& FromNode, const FString& FromOutputName, const FString& PropertyName)
@@ -1459,11 +1459,34 @@ FString UCliAnythingBridgeLibrary::RecompileMaterialShadersForDump(UMaterialInte
 	}
 	const bool bDirtyRestored = !Package || Package->IsDirty() == bDirtyBefore;
 
+	UMaterial* BaseMaterial = Material->GetBaseMaterial();
+	const FString ShaderMapMaterial = BaseMaterial ? BaseMaterial->GetPathName() : Material->GetPathName();
+	FString ShaderDumpName = BaseMaterial ? BaseMaterial->GetName() : Material->GetName();
+	FString ShaderDebugGroup;
+#if ENGINE_MAJOR_VERSION >= 5
+	const EShaderPlatform ActivePlatform = GEditor
+		? GEditor->GetActiveShaderPlatform()
+		: GMaxRHIShaderPlatform;
+	FMaterialResource* MaterialResource = Material->GetMaterialResource(ActivePlatform);
+#else
+	FMaterialResource* MaterialResource = Material->GetMaterialResource(GMaxRHIFeatureLevel);
+#endif
+	if (MaterialResource)
+	{
+		ShaderDumpName = MaterialResource->GetFriendlyName();
+#if ENGINE_MAJOR_VERSION >= 5
+		ShaderDebugGroup = MaterialResource->GetDebugGroupName();
+#endif
+	}
+
 	FString Json = TEXT("{\"status\":\"ok\",\"active_platform\":\"")
 		+ JsonEscape(GetActiveShaderPlatform()) + TEXT("\"");
 	Json += TEXT(",\"package_dirty_before\":") + FString(bDirtyBefore ? TEXT("true") : TEXT("false"));
 	Json += TEXT(",\"package_dirty_after_recompile\":") + FString(bDirtyAfterRecompile ? TEXT("true") : TEXT("false"));
 	Json += TEXT(",\"package_dirty_restored\":") + FString(bDirtyRestored ? TEXT("true") : TEXT("false"));
+	Json += TEXT(",\"shader_map_material\":\"") + JsonEscape(ShaderMapMaterial) + TEXT("\"");
+	Json += TEXT(",\"shader_dump_name\":\"") + JsonEscape(ShaderDumpName) + TEXT("\"");
+	Json += TEXT(",\"shader_debug_group\":\"") + JsonEscape(ShaderDebugGroup) + TEXT("\"");
 	Json += TEXT("}");
 	return Json;
 }

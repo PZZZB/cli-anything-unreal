@@ -402,6 +402,111 @@ class TestMaterials:
         mock_api.set_cvar.assert_any_call("r.DumpShaderDebugInfo", "0")
         mock_api.exec_console.assert_not_called()
 
+    @patch("cli_anything.unreal.core.materials.time.sleep")
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_dump_hlsl_material_instance_uses_exact_shader_map_directory(
+        self,
+        mock_exec,
+        mock_sleep,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.materials import get_material_hlsl
+
+        debug_base = tmp_path / "Saved" / "ShaderDebugInfo" / "PCD3D_SM6"
+        wrong_dir = debug_base / "M_Base_WRONG" / "Default" / "FLocalVertexFactory" / "TBasePassPS"
+        exact_dir = debug_base / "M_Base_EXACT" / "Default" / "FLocalVertexFactory" / "TBasePassPS"
+        wrong_dir.mkdir(parents=True)
+        exact_dir.mkdir(parents=True)
+        (wrong_dir / "Wrong.usf").write_text("wrong", encoding="utf-8")
+        (exact_dir / "Exact.usf").write_text(
+            "void CalcPixelMaterialInputs()\n{\n}\n",
+            encoding="utf-8",
+        )
+        mock_exec.side_effect = [
+            {"active_platform": "PCD3D_SM6"},
+            {
+                "status": "ok",
+                "material": "/Game/MI_Test.MI_Test",
+                "requested_asset_class": "MaterialInstanceConstant",
+                "shader_map_material": "/Game/M_Base.M_Base",
+                "shader_dump_name": "M_Base",
+                "shader_debug_group": "M_Base_EXACT/Default",
+                "resolved_from_material_instance": True,
+                "package_dirty_restored": True,
+            },
+        ]
+        mock_api = MagicMock()
+        mock_api.get_cvar.return_value = "0"
+
+        result = get_material_hlsl(
+            mock_api,
+            "/Game/MI_Test",
+            project_dir=str(tmp_path),
+            platform="sm6",
+            wait_timeout=0,
+        )
+
+        assert Path(result["dump_dir"]).name == "M_Base_EXACT"
+        assert result["material"] == "/Game/MI_Test.MI_Test"
+        assert result["shader_map_material"] == "/Game/M_Base.M_Base"
+        assert result["shader_dump_name"] == "M_Base"
+        assert result["shader_debug_group"] == "M_Base_EXACT/Default"
+        assert result["resolved_from_material_instance"] is True
+        assert "CalcPixelMaterialInputs" in result["material_code"]
+        assert mock_sleep.call_args_list == [call(0.5), call(2)]
+
+    @patch("cli_anything.unreal.core.materials.time.sleep")
+    @patch("cli_anything.unreal.core.materials._exec_material_script")
+    def test_dump_hlsl_material_instance_uses_ue4_base_material_directory(
+        self,
+        mock_exec,
+        mock_sleep,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.materials import get_material_hlsl
+
+        dump_dir = (
+            tmp_path
+            / "Saved"
+            / "ShaderDebugInfo"
+            / "PCD3D_SM5"
+            / "M_Base"
+            / "Default"
+            / "FLocalVertexFactory"
+            / "TBasePassPS"
+        )
+        dump_dir.mkdir(parents=True)
+        (dump_dir / "Base.usf").write_text(
+            "void CalcPixelMaterialInputs()\n{\n}\n",
+            encoding="utf-8",
+        )
+        mock_exec.side_effect = [
+            {"active_platform": "PCD3D_SM5"},
+            {
+                "status": "ok",
+                "shader_map_material": "/Game/M_Base.M_Base",
+                "shader_dump_name": "M_Base",
+                "shader_debug_group": "",
+                "resolved_from_material_instance": True,
+                "package_dirty_restored": True,
+            },
+        ]
+        mock_api = MagicMock()
+        mock_api.get_cvar.return_value = "0"
+
+        result = get_material_hlsl(
+            mock_api,
+            "/Game/MI_Test",
+            project_dir=str(tmp_path),
+            platform="sm5",
+            wait_timeout=0,
+        )
+
+        assert Path(result["dump_dir"]).name == "M_Base"
+        assert result["shader_map_material"] == "/Game/M_Base.M_Base"
+        assert result["resolved_from_material_instance"] is True
+        assert mock_sleep.call_args_list == [call(0.5), call(2)]
+
     @patch("cli_anything.unreal.core.materials.time.monotonic")
     @patch("cli_anything.unreal.core.materials.time.sleep")
     @patch("cli_anything.unreal.core.materials._exec_material_script")
