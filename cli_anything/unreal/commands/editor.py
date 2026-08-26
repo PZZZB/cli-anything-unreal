@@ -994,6 +994,7 @@ def _recover_online_launch_result(
             return None
 
     result = dict(online)
+    result["startup_phase"] = "ready"
     result["task_id"] = task_id
     result["command"] = "editor.launch"
     result["launch_task_status"] = current_task.get("status", "unknown")
@@ -1038,7 +1039,18 @@ def editor_status(state: AppState, scan_range, show_all, timeout, project_path, 
             ) from exc
         if task is None:
             raise AppError("TASK_NOT_FOUND", f"Task not found: {task_id}", exit_code=3)
-        if task.get("command") == "editor.launch" and task.get("status") == "timeout":
+        task_status = task.get("status")
+        recoverable_launch = (
+            task.get("command") == "editor.launch"
+            and (
+                task_status == "timeout"
+                or (
+                    task_status == "running"
+                    and task.get("phase") == "waiting_remote_control"
+                )
+            )
+        )
+        if recoverable_launch:
             recovered = _recover_online_launch_result(
                 state,
                 task_id,
@@ -1049,7 +1061,7 @@ def editor_status(state: AppState, scan_range, show_all, timeout, project_path, 
             if recovered is not None:
                 task = transition_task(
                     task_id,
-                    expected_statuses={"timeout"},
+                    expected_statuses={task_status},
                     status="completed",
                     phase="online",
                     result_patch=recovered,

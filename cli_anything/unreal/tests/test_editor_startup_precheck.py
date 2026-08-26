@@ -3045,6 +3045,79 @@ def test_editor_status_reconciles_timed_out_map_launch_when_exact_editor_is_onli
     assert "error" not in persisted
 
 
+def test_editor_status_reconciles_running_wait_when_exact_editor_is_online(
+    mini_project,
+    tmp_path,
+    monkeypatch,
+):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import create_task, load_task, save_task
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    task = create_task("editor.launch", {
+        "project_path": mini_project,
+        "port": 30011,
+    })
+    task.update({
+        "status": "running",
+        "phase": "waiting_remote_control",
+        "pid": 68348,
+        "resolved_port": 30011,
+        "editor_process_identity": {
+            "pid": 68348,
+            "creation_time": 123456,
+            "image_path": "F:/MockEngine/UnrealEditor.exe",
+        },
+        "result": {
+            "status": "waiting_for_remote_control",
+            "startup_phase": "waiting_for_remote_control",
+            "api_reachable": True,
+        },
+    })
+    save_task(task)
+
+    with patch("cli_anything.unreal.commands.editor._scan_editor_status_instances", return_value=[{
+            "status": "online",
+            "pid": 68348,
+            "port": 30011,
+            "project_path": mini_project,
+            "bridge_version": "1.37",
+            "bundled_version": "1.37",
+            "plugin_match": True,
+        }]), \
+             patch(
+                 "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+                 return_value=68348,
+             ), \
+             patch(
+                 "cli_anything.unreal.utils.ue_backend._windows_process_identity",
+                 return_value={
+                     "query_ok": True,
+                     "found": True,
+                     "pid": 68348,
+                     "creation_time": 123456,
+                     "image_path": "F:/MockEngine/UnrealEditor.exe",
+                 },
+             ):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "status", task["task_id"],
+        ])
+
+    assert result.exit_code == 0, result.output
+    progress = json.loads(result.output)["result"]
+    assert progress["status"] == "completed"
+    assert progress["phase"] == "online"
+    assert progress["result"]["startup_phase"] == "ready"
+    assert progress["result"]["launch_task_status"] == "running"
+    assert progress["result"]["recovered_from"] == "launch_task_status"
+    assert progress["result"]["process_identity_verified"] is True
+    persisted = load_task(task["task_id"])
+    assert persisted["status"] == "completed"
+    assert persisted["phase"] == "online"
+
+
 def test_editor_launch_recovery_rejects_online_editor_with_different_pid(mini_project):
     from cli_anything.unreal.commands import AppState
     from cli_anything.unreal.commands.editor import _recover_online_launch_result
