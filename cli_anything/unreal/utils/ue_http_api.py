@@ -510,7 +510,7 @@ class UEEditorAPI:
         path = script_path.replace("\\", "/")
         return self.exec_console(f'py "{path}"')
 
-    def exec_python_ex(self, code: str, *, timeout: int | None = None) -> dict:
+    def exec_python_ex(self, code: str, *, timeout: int | float | None = None) -> dict:
         """Execute Python code via ``PythonScriptLibrary.ExecutePythonCommandEx``.
 
         Unlike :meth:`exec_python`, this captures ``unreal.log()`` output

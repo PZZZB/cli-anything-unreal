@@ -601,6 +601,46 @@ def test_editor_status_bridge_probe_uses_short_timeout(mini_project):
     assert captured["raise_on_error"] is True
 
 
+def test_editor_status_bridge_probe_preserves_subsecond_timeout():
+    from cli_anything.unreal.commands.editor import _add_online_bridge_status
+
+    captured = {}
+
+    class FakeApi:
+        def exec_python_ex(self, _code, *, timeout=None):
+            captured["timeout"] = timeout
+            return {
+                "ReturnValue": True,
+                "CommandResult": "None",
+                "LogOutput": [
+                    {
+                        "Type": "Info",
+                        "Output": '__cli_result__:{"version": "1.37"}',
+                    },
+                ],
+            }
+
+    entry = {
+        "status": "online",
+        "port": 30011,
+        "project_path": None,
+    }
+    with patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI",
+        return_value=FakeApi(),
+    ), patch(
+        "cli_anything.unreal.core.plugin_bridge.get_bundled_version",
+        return_value="1.37",
+    ):
+        _add_online_bridge_status(entry, timeout=0.25)
+
+    assert captured["timeout"] == pytest.approx(0.25)
+    assert entry["status"] == "online"
+    assert entry["bridge_version"] == "1.37"
+    assert entry["plugin_match"] is True
+    assert "health_probe_error" not in entry
+
+
 def test_editor_status_bridge_probes_online_ports_concurrently():
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

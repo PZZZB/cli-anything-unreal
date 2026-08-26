@@ -339,7 +339,7 @@ def _execute(
         marker=_RESULT_MARKER,
     )
 
-    resp = api.exec_python_ex(wrapper, timeout=int(timeout))
+    resp = api.exec_python_ex(wrapper, timeout=timeout)
 
     if "error" in resp:
         return {"error": resp["error"]}

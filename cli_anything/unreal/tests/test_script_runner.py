@@ -124,6 +124,23 @@ class TestScriptRunner:
                                  timeout=5, save=False)
         assert result["actors"] == 99
 
+    def test_run_python_code_preserves_subsecond_timeout(self):
+        """Health probes must not truncate a positive timeout to zero."""
+        from cli_anything.unreal.core.script_runner import run_python_code
+
+        mock_api = MagicMock()
+        self._make_exec_python_ex_mock(mock_api)
+
+        result = run_python_code(
+            mock_api,
+            "result = {'version': '1.37'}",
+            timeout=0.25,
+            save=False,
+        )
+
+        assert result["version"] == "1.37"
+        assert mock_api.exec_python_ex.call_args.kwargs["timeout"] == pytest.approx(0.25)
+
     def test_no_result_variable(self):
         """When user script does NOT define ``result``, a generic ok is returned."""
         from cli_anything.unreal.core.script_runner import run_python_code
