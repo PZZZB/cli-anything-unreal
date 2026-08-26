@@ -121,6 +121,7 @@ Build commands do not require editor.
 Synchronous `build compile` / `build cook` / `build package` stream the live UAT/UBT log to stderr while waiting, similar to UE `Build.bat`. Repeated MSVC command-line warnings show once plus a folded count; the `log_file` retains the complete unmodified output. JSON stdout stays one final payload with `log_file`.
 For non-Win64 platforms, `build compile` calls UE `Build.bat` directly for the project's detected Game target, falling back to the `.uproject` name when no Game `Target.cs` is present.
 For project repair, normal validation, and final completion on Win64, run `build compile` without `--module`. This builds the detected `<Project>Editor` target and its required dependencies. A large compile is expected and correct; do not replace it with a Game, plugin, or other isolated module merely to reduce work.
+The Editor target is inferred from `--project`; do not pass `--target`. If one is supplied, `BUILD_TARGET_INFERRED` includes the accepted replacement command. `--config` and `--configuration` are equivalent.
 After a successful Win64 compile, ue-cli validates the PE files declared by UE's generated Editor target receipt. A missing or malformed DLL/EXE returns `INVALID_BUILD_OUTPUT` with the receipt and affected paths instead of reporting a false success.
 After cancelling a Win64 Editor compile, ue-cli checks every `RuntimeDependencies` path declared by the current Editor target receipt. Missing files return nonzero `BUILD_CANCELLED_OUTPUTS_INCOMPLETE` with counts, examples, and a full `build compile` recovery command.
 Use repeated `--module NAME` only when the user explicitly requests a focused diagnostic. ue-cli still calls `Build.bat` for the detected Editor target, constrained by `-Module=NAME`; this is not final Editor-target validation. Follow it with full `build compile` before launching the editor or reporting build success.
@@ -130,7 +131,7 @@ On Windows, `build compile --platform Win64` refuses to start while an UnrealEdi
 
 | Command | Description |
 |---------|-------------|
-| `build compile [--project PATH] [--config C] [--platform P] [--module NAME]... [--no-wait] [--timeout N]` | Compile C++; Win64 defaults to the full Editor target. Repeated modules are explicit focused diagnostics only |
+| `build compile [--project PATH] [--config/--configuration C] [--platform P] [--module NAME]... [--no-wait] [--timeout N]` | Compile C++; Win64 defaults to the inferred full Editor target. Repeated modules are explicit focused diagnostics only |
 | `build cook [--project PATH] [--platform P] [--package PACKAGE]... [--output-dir DIR] [--ini OVERRIDE]... [--no-wait] [--timeout N]` | Cook content through UAT; package seeds, cook output, and ini overrides map to native UE options |
 | `build package [--project PATH] [--platform P] [--config C] [--output-dir DIR] [--map MAP]... [--cook-flavor F] [--uat-arg=-ARG]... [--no-wait] [--timeout N]` | Reproducible BuildCookRun package pipeline; final result includes `uat_command` |
 | `build stop [--project PATH]` | Cancel project-owned async build tasks, then kill any remaining MSBuild/UBT tree |

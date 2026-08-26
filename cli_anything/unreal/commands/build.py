@@ -373,8 +373,18 @@ def build_group():
 
 @build_group.command("compile")
 @_project_option
-@click.option("--config", "build_config", default="Development", type=click.Choice(["Development", "Shipping", "DebugGame", "Test"]))
+@click.option(
+    "--config",
+    "--configuration",
+    "build_config",
+    default="Development",
+    type=click.Choice(["Development", "Shipping", "DebugGame", "Test"]),
+)
 @click.option("--platform", default="Win64")
+@click.option(
+    "--target",
+    help="Unsupported Editor target override; build compile infers it from --project.",
+)
 @click.option(
     "--module",
     "modules",
@@ -386,9 +396,34 @@ def build_group():
 @click.option("--timeout", type=int, default=None)
 @handle_error
 @click.pass_obj
-def build_compile(state: AppState, project_path, build_config, platform, modules, no_wait, timeout):
+def build_compile(
+    state: AppState,
+    project_path,
+    build_config,
+    platform,
+    target,
+    modules,
+    no_wait,
+    timeout,
+):
     _load_command_project(state, project_path)
     require_project(state)
+    if target:
+        module_options = "".join(f' --module "{module}"' for module in modules)
+        replacement_command = (
+            f'ue-cli --project "{state.session.project_path}" build compile '
+            f"--platform {platform} --config {build_config}{module_options}"
+        )
+        raise AppError(
+            "BUILD_TARGET_INFERRED",
+            "build compile infers the Editor target from --project; --target is not supported.",
+            exit_code=2,
+            suggestion=f"Remove --target. Run: {replacement_command}",
+            details={
+                "provided_target": target,
+                "replacement_command": replacement_command,
+            },
+        )
     if modules and platform.lower() != "win64":
         raise AppError(
             "MODULE_COMPILE_PLATFORM",

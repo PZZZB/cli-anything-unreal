@@ -4372,6 +4372,63 @@ class TestBuildCLI:
         assert captured["command"] == "build.compile"
         assert captured["payload"]["modules"] == ["Renderer", "RHI"]
 
+    def test_build_compile_rejects_explicit_target_with_replacement(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.build.submit_task") as mock_submit:
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "build", "compile",
+                "--project", temp_project["uproject"],
+                "--target", "TestProjectEditor",
+                "--platform", "Win64",
+                "--configuration", "Development",
+            ])
+
+        assert result.exit_code == 2, result.output
+        data = self._parse_json_output(result.output)
+        assert data["code"] == "BUILD_TARGET_INFERRED"
+        assert data["details"]["provided_target"] == "TestProjectEditor"
+        replacement = data["details"]["replacement_command"]
+        assert f'--project "{temp_project["uproject"]}"' in replacement
+        assert "build compile --platform Win64 --config Development" in replacement
+        assert replacement in data["suggestion"]
+        mock_submit.assert_not_called()
+
+    def test_build_compile_accepts_configuration_alias(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        captured = {}
+
+        def fake_submit_task(command, payload):
+            captured["command"] = command
+            captured["payload"] = payload
+            return {"task_id": "compile-task"}
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.build.find_running_editors",
+            return_value=[],
+        ), patch(
+            "cli_anything.unreal.commands.build.submit_task",
+            side_effect=fake_submit_task,
+        ):
+            result = runner.invoke(cli, [
+                "--output", "json",
+                "--project", temp_project["uproject"],
+                "build", "compile",
+                "--platform", "Win64",
+                "--configuration", "Shipping",
+                "--no-wait",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert captured["command"] == "build.compile"
+        assert captured["payload"]["build_config"] == "Shipping"
+
     def test_build_compile_surfaces_invalid_build_output_failure(
         self, temp_project
     ):
