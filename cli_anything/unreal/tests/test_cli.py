@@ -76,6 +76,22 @@ class TestCLI:
         assert scan.call_args.args[1] == "30110-30112"
         assert scan.call_args.kwargs == {"timeout": 2.0}
 
+    def test_root_close_alias_reuses_editor_close(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = CliRunner().invoke(cli, [
+            "--output", "json",
+            "close",
+            "--save-dirty",
+            "--force",
+        ])
+
+        assert result.exit_code == 2, result.output
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_CLOSE_OPTION_CONFLICT"
+        assert data["message"] == "--save-dirty and --force cannot be used together."
+
     def test_task_wait_returns_completed_task(self):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -223,6 +239,7 @@ class TestCLI:
         assert result.exit_code == 0
         names = {item["name"] for item in json.loads(result.output)}
         assert {"umg create", "umg add-widget", "umg tree"}.issubset(names)
+        assert "close" in names
         assert "preflight" in names
         assert "status" in names
         assert "editor open-level" in names
