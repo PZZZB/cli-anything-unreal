@@ -3511,6 +3511,7 @@ def editor_enable_remote(state: AppState):
         state.session.project_dir,
         engine_root=state.session.engine_root,
         editor_binary_prefix=get_editor_binary_prefix(state.session.engine_root),
+        uproject_path=state.session.project_path,
     )
     raise_for_legacy_error(
         result,

@@ -1618,11 +1618,62 @@ def _find_plugin_descriptor(
     return None
 
 
+def _source_plugin_recovery(
+    loadability: dict,
+    *,
+    uproject_path: str | None,
+    engine_root: str | None,
+    editor_binary_prefix: str,
+) -> dict | None:
+    """Return a copy-pasteable UBT recovery for an uncompiled source plugin."""
+    if (
+        loadability.get("reason") != "source_only_modules_uncompiled"
+        or not uproject_path
+        or not engine_root
+        or not loadability.get("descriptor")
+    ):
+        return None
+
+    build_script = Path(engine_root) / "Engine" / "Build" / "BatchFiles" / "Build.bat"
+    if not build_script.is_file():
+        return None
+
+    descriptor = loadability["descriptor"]
+    build_command = (
+        f'& "{build_script}" {editor_binary_prefix} Win64 Development '
+        f'-Project="{uproject_path}" -Plugin="{descriptor}" '
+        "-NoUBTMakefiles -NoHotReload -WaitMutex"
+    )
+    return {
+        "kind": "compile_source_plugin",
+        "shell": "powershell",
+        "build_command": build_command,
+        "setup_command": f'ue-cli --project "{uproject_path}" editor enable-remote',
+        "retry_command": f'ue-cli --project "{uproject_path}" editor launch',
+    }
+
+
+def _plugin_unavailable_suggestion(plugin_name: str, loadability: dict) -> str:
+    recovery = loadability.get("recovery")
+    if recovery:
+        return (
+            f"Close editors using this project. Run in {recovery['shell']}: "
+            f"{recovery['build_command']} Then run: {recovery['setup_command']} "
+            "Finally retry the original editor launch command."
+        )
+    return (
+        f"Install or compile the engine {plugin_name} plugin first. "
+        "ue-cli editor automation requires RemoteControl, "
+        "PythonScriptPlugin, and EditorScriptingUtilities."
+    )
+
+
 def _check_plugin_loadable(
     project_dir: str,
     plugin_name: str,
     engine_root: str | None = None,
     editor_binary_prefix: str = "UnrealEditor",
+    uproject_path: str | None = None,
 ) -> dict:
     """Check if enabling a plugin is likely to load or compile cleanly."""
     descriptor = _find_plugin_descriptor(project_dir, plugin_name, engine_root)
@@ -1683,7 +1734,7 @@ def _check_plugin_loadable(
             })
 
     if source_only:
-        return {
+        result = {
             "available": False,
             "plugin": plugin_name,
             "descriptor": str(descriptor),
@@ -1695,6 +1746,15 @@ def _check_plugin_loadable(
                 "Automatic setup will not enable it because the editor cannot load uncompiled plugin modules."
             ),
         }
+        recovery = _source_plugin_recovery(
+            result,
+            uproject_path=uproject_path,
+            engine_root=engine_root,
+            editor_binary_prefix=editor_binary_prefix,
+        )
+        if recovery:
+            result["recovery"] = recovery
+        return result
 
     if missing:
         return {
@@ -1720,6 +1780,7 @@ def ensure_remote_control_config(
     project_dir: str,
     engine_root: str | None = None,
     editor_binary_prefix: str | None = None,
+    uproject_path: str | None = None,
 ) -> dict:
     """Ensure the project has Remote Control configured for CLI use.
 
@@ -1734,6 +1795,7 @@ def ensure_remote_control_config(
 
     Args:
         project_dir: Path to project root directory.
+        uproject_path: Exact project file used in source-plugin recovery commands.
 
     Returns:
         {"status": "ok"|"created"|"updated", "file": str, "changes": [...]}
@@ -1751,6 +1813,7 @@ def ensure_remote_control_config(
                 plugin_name,
                 engine_root=engine_root,
                 editor_binary_prefix=editor_binary_prefix,
+                uproject_path=uproject_path,
             )
             if not loadable.get("available", False):
                 return {
@@ -1762,11 +1825,7 @@ def ensure_remote_control_config(
                         "no project files were modified."
                     ),
                     "details": loadable,
-                    "suggestion": (
-                        f"Install or compile the engine {plugin_name} plugin first. "
-                        "ue-cli editor automation requires RemoteControl, "
-                        "PythonScriptPlugin, and EditorScriptingUtilities."
-                    ),
+                    "suggestion": _plugin_unavailable_suggestion(plugin_name, loadable),
                 }
 
     if not config_dir.is_dir():
@@ -2334,6 +2393,7 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
             plugin_name,
             engine_root=engine_root,
             editor_binary_prefix=editor_binary_prefix,
+            uproject_path=uproject_path,
         )
         for plugin_name in _EDITOR_AUTOMATION_PLUGINS
     }
@@ -2368,11 +2428,7 @@ def preflight_check(uproject_path: str, engine_root: str | None = None) -> dict:
                 "preflight did not modify .uproject or DefaultRemoteControl.ini."
             ),
             "details": unavailable_check,
-            "suggestion": (
-                f"Install or compile the engine {plugin_name} plugin first. "
-                "ue-cli editor automation requires RemoteControl, "
-                "PythonScriptPlugin, and EditorScriptingUtilities."
-            ),
+            "suggestion": _plugin_unavailable_suggestion(plugin_name, unavailable_check),
         }
     elif not rc_check["configured"]:
         rc_check["suggestion"] = (

@@ -86,11 +86,27 @@ def _summarize_startup_precheck(check: dict) -> dict:
     warnings = check.get("engine", {}).get("warnings", []) + check.get("project", {}).get("warnings", [])
     for issue in check.get("bridge_plugin", {}).get("issues", []):
         warnings.append(issue)
-    return {
+    remote_control = check.get("remote_control", {})
+    recovery = None
+    if not remote_control.get("configured", True):
+        fix_result = remote_control.get("fix_result", {})
+        remote_error = fix_result.get("error")
+        if remote_error and remote_error not in errors:
+            errors.append(remote_error)
+        elif not remote_error:
+            for issue in remote_control.get("issues", []):
+                if issue not in errors:
+                    errors.append(issue)
+        recovery = fix_result.get("details", {}).get("recovery")
+
+    result = {
         "ready": check.get("ready", False),
         "errors": errors,
         "warnings": warnings,
     }
+    if recovery:
+        result["remote_control_recovery"] = recovery
+    return result
 
 def _same_project_path(left: str | None, right: str | None) -> bool:
     if not left or not right:

@@ -69,6 +69,8 @@ First launch may:
 - deploy `Plugins/CliAnythingBridge`;
 - compile only the `CliAnythingBridge` Editor module when its binary is missing or stale, then repair and validate its `UnrealEditor.modules` metadata. A recovered targeted build reports `compile_result.status: ok` with `output_recovered: true`; its transient failure remains diagnostic history under `initial_output_validation`. Bridge upgrades preserve the previous plugin until validation passes and restore it with structured rollback details if deployment or compilation fails. If the remaining Editor target output is incomplete, launch stops with a structured full-build reason and recovery command instead of starting a full project build automatically.
 
+For a source engine whose required Epic automation plugin has source but no Editor DLLs, launch stays read-only at the unsafe step and returns `remote_control_recovery`. Run its exact PowerShell `build_command`, then `setup_command`, then retry the original launch. The generated UBT command uses `-Plugin=` so the disabled source plugin can be compiled before ue-cli enables it.
+
 Commit or back up the project before first launch if these project-file changes need review.
 
 `editor launch` returns `online` when ready. Slow startup may return a `launching` payload with a `task_id`; poll that task:

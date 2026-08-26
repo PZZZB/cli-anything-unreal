@@ -5277,3 +5277,33 @@ def test_summarize_startup_precheck_includes_bridge_plugin_issues():
     result = _summarize_startup_precheck(check)
     assert "CliAnythingBridge plugin not enabled in .uproject" in result["warnings"]
     assert not any(warning.startswith("Fixed:") for warning in result["warnings"])
+
+
+def test_summarize_startup_precheck_surfaces_remote_control_recovery():
+    from cli_anything.unreal.core.editor_lifecycle import _summarize_startup_precheck
+
+    recovery = {
+        "kind": "compile_source_plugin",
+        "shell": "powershell",
+        "build_command": '& "F:\\UE\\Engine\\Build\\BatchFiles\\Build.bat" UnrealEditor Win64 Development',
+        "setup_command": 'ue-cli --project "F:\\Game\\Game.uproject" editor enable-remote',
+        "retry_command": 'ue-cli --project "F:\\Game\\Game.uproject" editor launch',
+    }
+    check = {
+        "ready": False,
+        "engine": {"errors": [], "warnings": []},
+        "project": {"errors": [], "warnings": []},
+        "remote_control": {
+            "configured": False,
+            "issues": ["RemoteControl unavailable"],
+            "fix_result": {
+                "error": "RemoteControl plugin is not available/loadable for this engine.",
+                "details": {"recovery": recovery},
+            },
+        },
+    }
+
+    result = _summarize_startup_precheck(check)
+
+    assert result["errors"] == ["RemoteControl plugin is not available/loadable for this engine."]
+    assert result["remote_control_recovery"] == recovery

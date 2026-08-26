@@ -1699,6 +1699,10 @@ def test_preflight_does_not_enable_ue4_source_only_remote_control(tmp_path):
         json.dumps({"MajorVersion": 4, "MinorVersion": 26, "PatchVersion": 1}),
         encoding="utf-8",
     )
+    batch_dir = build_dir / "BatchFiles"
+    batch_dir.mkdir()
+    build_script = batch_dir / "Build.bat"
+    build_script.write_text("@echo off\n", encoding="utf-8")
     plugin_dir = engine_root / "Engine" / "Plugins" / "VirtualProduction" / "RemoteControl"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / "RemoteControl.uplugin").write_text(
@@ -1727,8 +1731,62 @@ def test_preflight_does_not_enable_ue4_source_only_remote_control(tmp_path):
     assert result["remote_control"]["auto_fixed"] is False
     assert result["remote_control"]["fix_result"]["status"] == "unavailable"
     assert result["remote_control"]["fix_result"]["details"]["reason"] == "source_only_modules_uncompiled"
+    recovery = result["remote_control"]["fix_result"]["details"]["recovery"]
+    assert recovery == {
+        "kind": "compile_source_plugin",
+        "shell": "powershell",
+        "build_command": (
+            f'& "{build_script}" UE4Editor Win64 Development '
+            f'-Project="{uproject}" -Plugin="{plugin_dir / "RemoteControl.uplugin"}" '
+            "-NoUBTMakefiles -NoHotReload -WaitMutex"
+        ),
+        "setup_command": f'ue-cli --project "{uproject}" editor enable-remote',
+        "retry_command": f'ue-cli --project "{uproject}" editor launch',
+    }
+    assert recovery["build_command"] in result["remote_control"]["fix_result"]["suggestion"]
     assert not any("enable-remote" in issue for issue in result["remote_control"]["issues"])
     assert not (project_dir / "Config" / "DefaultRemoteControl.ini").exists()
+
+
+def test_plugin_loadability_source_only_has_ue5_recovery_command(tmp_path):
+    from cli_anything.unreal.utils.ue_backend import _check_plugin_loadable
+
+    project_dir = tmp_path / "Game"
+    project_dir.mkdir()
+    uproject = project_dir / "Game.uproject"
+    uproject.write_text(json.dumps({"FileVersion": 3}), encoding="utf-8")
+    engine_root = tmp_path / "UE5Engine"
+    build_script = engine_root / "Engine" / "Build" / "BatchFiles" / "Build.bat"
+    build_script.parent.mkdir(parents=True)
+    build_script.write_text("@echo off\n", encoding="utf-8")
+    plugin_dir = engine_root / "Engine" / "Plugins" / "VirtualProduction" / "RemoteControl"
+    source_dir = plugin_dir / "Source" / "RemoteControl"
+    source_dir.mkdir(parents=True)
+    descriptor = plugin_dir / "RemoteControl.uplugin"
+    descriptor.write_text(
+        json.dumps({
+            "FileVersion": 3,
+            "Modules": [{"Name": "RemoteControl", "Type": "Runtime"}],
+        }),
+        encoding="utf-8",
+    )
+    (source_dir / "RemoteControl.Build.cs").write_text("// source only", encoding="utf-8")
+
+    result = _check_plugin_loadable(
+        str(project_dir),
+        "RemoteControl",
+        engine_root=str(engine_root),
+        editor_binary_prefix="UnrealEditor",
+        uproject_path=str(uproject),
+    )
+
+    assert result["available"] is False
+    assert result["reason"] == "source_only_modules_uncompiled"
+    assert result["recovery"]["build_command"] == (
+        f'& "{build_script}" UnrealEditor Win64 Development '
+        f'-Project="{uproject}" -Plugin="{descriptor}" '
+        "-NoUBTMakefiles -NoHotReload -WaitMutex"
+    )
 
 
 def test_preflight_rejects_already_enabled_but_unavailable_remote_control(tmp_path):

@@ -1870,6 +1870,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             state.session.project_dir,
             engine_root=state.session.engine_root,
             editor_binary_prefix=launch_binary_prefix,
+            uproject_path=state.session.project_path,
         )
         preflight = preflight_check(state.session.project_path, state.session.engine_root)
 
