@@ -732,9 +732,14 @@ def _terminate_windows_process_result(pid: int, *, wait_timeout_ms: int = 3000) 
         return result
 
 
+def _taskkill_access_denied(result: dict) -> bool:
+    text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
+    return any(token in text for token in ("access is denied", "拒绝访问", "存取被拒"))
+
+
 def _classify_kill_result(result: dict) -> dict:
     text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
-    access_denied = any(token in text for token in ("access is denied", "拒绝访问", "存取被拒"))
+    access_denied = _taskkill_access_denied(result)
     already_exited = any(token in text for token in ("not found", "not running", "没有找到", "找不到", "未找到"))
     reported_missing = already_exited or "no running instance" in text
     taskkill_succeeded = result.get("returncode") == 0 and not access_denied
@@ -843,7 +848,7 @@ def _kill_process_tree_result(pid: int) -> dict:
         result["process_exists_after_taskkill"] = _windows_process_exists(pid)
         process_exists = result["process_exists_after_taskkill"]
         confirmation_attempts = 0
-        if proc.returncode == 0 and process_exists is True:
+        if process_exists is True and not _taskkill_access_denied(result):
             for _ in range(5):
                 confirmation_attempts += 1
                 time.sleep(0.2)

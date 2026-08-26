@@ -703,7 +703,8 @@ def test_kill_process_tree_result_prefers_taskkill_missing_pid_over_stale_exists
          patch(
              "cli_anything.unreal.utils.ue_backend._windows_process_exists",
              return_value=True,
-         ):
+         ), \
+         patch("cli_anything.unreal.utils.ue_backend.time.sleep"):
         result = _kill_process_tree_result(35788)
 
     assert result["ok"] is True
@@ -711,6 +712,45 @@ def test_kill_process_tree_result_prefers_taskkill_missing_pid_over_stale_exists
     assert result["pid_state_race"] is True
     assert result["method"] == "taskkill_already_exited"
     assert result["process_exists_after_taskkill"] is True
+
+
+def test_kill_process_tree_result_accepts_parent_exit_after_child_error():
+    from cli_anything.unreal.utils import ue_backend
+    from cli_anything.unreal.utils.ue_backend import _kill_process_tree_result
+
+    proc = subprocess.CompletedProcess(
+        ["taskkill", "/F", "/T", "/PID", "55656"],
+        255,
+        stdout=b"SUCCESS: The process with PID 55656 has been terminated.",
+        stderr=(
+            b"ERROR: The process with PID 46812 (child process of PID 55656) "
+            b"could not be terminated. Reason: The operation attempted is not supported."
+        ),
+    )
+
+    with patch.object(ue_backend.sys, "platform", "win32"), \
+         patch(
+             "cli_anything.unreal.utils.ue_backend.subprocess.run",
+             return_value=proc,
+         ), \
+         patch(
+             "cli_anything.unreal.utils.ue_backend._windows_process_exists",
+             side_effect=[True, False],
+         ) as process_exists, \
+         patch("cli_anything.unreal.utils.ue_backend.time.sleep") as sleep:
+        result = _kill_process_tree_result(55656)
+
+    assert result["ok"] is True
+    assert result["pid"] == 55656
+    assert result["returncode"] == 255
+    assert result["method"] == "taskkill_already_exited"
+    assert result["process_exists_after_taskkill"] is False
+    assert result["post_taskkill_confirmation_attempts"] == 1
+    assert result["post_taskkill_confirmation_seconds"] == 0.2
+    assert "PID 46812" in result["stderr"]
+    assert "not supported" in result["stderr"]
+    assert process_exists.call_count == 2
+    sleep.assert_called_once_with(0.2)
 
 
 def test_kill_process_tree_result_accepts_success_after_confirmation_race():
