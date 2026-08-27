@@ -11,7 +11,6 @@ from pathlib import Path
 from cli_anything.unreal.core.tasks import (
     FINAL_TASK_STATUSES,
     TaskLockTimeout,
-    iter_task_snapshots,
     iter_tasks,
     load_task_snapshot,
 )
@@ -96,20 +95,19 @@ def _active_launch_task_for_project(
         tasks = iter_tasks(timeout=timeout)
     except TaskLockTimeout as exc:
         locked_snapshot = load_task_snapshot(exc.task_id)
-        snapshots = [locked_snapshot] if locked_snapshot is not None else []
-        snapshots.extend(
-            task for task in iter_task_snapshots()
-            if task.get("task_id") != exc.task_id
-        )
-        for task in snapshots:
-            if _is_active_launch_task_for_project(task, project_path, pid, now=now):
-                task = dict(task)
-                task["_task_state_snapshot"] = {
-                    "source": "last_published_snapshot",
-                    "task_id": exc.task_id,
-                    "lock_timeout_seconds": exc.timeout,
-                }
-                return task
+        if _is_active_launch_task_for_project(
+            locked_snapshot,
+            project_path,
+            pid,
+            now=now,
+        ):
+            task = dict(locked_snapshot)
+            task["_task_state_snapshot"] = {
+                "source": "last_published_snapshot",
+                "task_id": exc.task_id,
+                "lock_timeout_seconds": exc.timeout,
+            }
+            return task
         raise
     for task in tasks:
         if _is_active_launch_task_for_project(task, project_path, pid, now=now):

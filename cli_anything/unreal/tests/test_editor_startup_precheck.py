@@ -873,6 +873,10 @@ def test_root_status_rejects_cached_launch_state_for_different_process(
          ]), \
          patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011), \
          patch(
+             "cli_anything.unreal.core.tasks.load_task_snapshot",
+             side_effect=AssertionError("deadline fallback rescanned unrelated task snapshots"),
+         ) as unrelated_snapshot_read, \
+         patch(
              "cli_anything.unreal.core.editor_lifecycle.iter_tasks",
              side_effect=TaskLockTimeout(task["task_id"], 0.2),
          ):
@@ -886,6 +890,7 @@ def test_root_status_rejects_cached_launch_state_for_different_process(
     assert data["code"] == "EDITOR_STATUS_TIMEOUT"
     assert data["details"]["blocking_phase"] == "task_discovery"
     assert data["details"]["task_id"] == task["task_id"]
+    unrelated_snapshot_read.assert_not_called()
 
 
 def test_editor_status_scans_running_project_config_ports_outside_default_range(mini_project):
