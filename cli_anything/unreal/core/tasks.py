@@ -479,6 +479,32 @@ def load_task(task_id: str, timeout: float | None = None) -> dict | None:
         return _load_task_unlocked(task_id)
 
 
+def load_task_snapshot(task_id: str) -> dict | None:
+    """Read the last fully published task record without waiting for its lock.
+
+    Task writers publish through an atomic replace, so a direct reader sees the
+    previous or next complete JSON document. This is intentionally a stale,
+    best-effort read for status reporting only; callers must not mutate task
+    state from this snapshot.
+    """
+    try:
+        text = _task_path(task_id).read_text(encoding="utf-8")
+        return json.loads(text)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def iter_task_snapshots() -> list[dict]:
+    """Return last-published task snapshots without waiting for task locks."""
+    tasks = []
+    for path in _task_root().glob("*.json"):
+        task = load_task_snapshot(path.stem)
+        if task is not None:
+            tasks.append(task)
+    tasks.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+    return tasks
+
+
 def _write_task_unlocked(task: dict) -> dict:
     task["updated_at"] = time.time()
     path = _task_path(task["task_id"])

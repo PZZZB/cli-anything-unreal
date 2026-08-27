@@ -806,6 +806,88 @@ def test_editor_status_marks_offline_process_as_launching_when_task_active(mini_
     assert "editor launch" not in item["suggestion"]
 
 
+def test_root_status_retains_cached_launch_state_when_task_discovery_times_out(
+    mini_project,
+    tmp_path,
+    monkeypatch,
+):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import TaskLockTimeout, create_task, save_task
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    task = create_task("editor.launch", {"project_path": mini_project, "port": 30011})
+    task["status"] = "running"
+    task["phase"] = "waiting_remote_control"
+    task["pid"] = 16044
+    save_task(task)
+
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 16044, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011), \
+         patch(
+             "cli_anything.unreal.core.editor_lifecycle.iter_tasks",
+             side_effect=TaskLockTimeout(task["task_id"], 0.2),
+         ):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "status", "--timeout", "0.2",
+        ])
+
+    assert result.exit_code == 0, result.output
+    item = json.loads(result.output)["result"][0]
+    assert item["status"] == "launching"
+    assert item["pid"] == 16044
+    assert item["task_id"] == task["task_id"]
+    assert item["launch_task_status"] == "running"
+    assert item["task_state_source"] == "last_published_snapshot"
+    assert item["task_state_may_be_stale"] is True
+    assert item["task_discovery_timeout"] == {
+        "blocking_phase": "task_discovery",
+        "task_id": task["task_id"],
+        "timeout_seconds": 0.2,
+    }
+    assert "last published launch state was retained" in item["message"]
+
+
+def test_root_status_rejects_cached_launch_state_for_different_process(
+    mini_project,
+    tmp_path,
+    monkeypatch,
+):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import TaskLockTimeout, create_task, save_task
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    task = create_task("editor.launch", {"project_path": mini_project, "port": 30011})
+    task["status"] = "running"
+    task["pid"] = 99999
+    save_task(task)
+
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 16044, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011), \
+         patch(
+             "cli_anything.unreal.core.editor_lifecycle.iter_tasks",
+             side_effect=TaskLockTimeout(task["task_id"], 0.2),
+         ):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "status", "--timeout", "0.2",
+        ])
+
+    assert result.exit_code == 4, result.output
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_STATUS_TIMEOUT"
+    assert data["details"]["blocking_phase"] == "task_discovery"
+    assert data["details"]["task_id"] == task["task_id"]
+
+
 def test_editor_status_scans_running_project_config_ports_outside_default_range(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

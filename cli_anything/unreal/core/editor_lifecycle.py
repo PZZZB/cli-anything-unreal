@@ -8,7 +8,13 @@ import sys
 import time
 from pathlib import Path
 
-from cli_anything.unreal.core.tasks import FINAL_TASK_STATUSES, iter_tasks
+from cli_anything.unreal.core.tasks import (
+    FINAL_TASK_STATUSES,
+    TaskLockTimeout,
+    iter_task_snapshots,
+    iter_tasks,
+    load_task_snapshot,
+)
 
 
 _FATAL_LOG_PATTERNS = [
@@ -50,6 +56,33 @@ _PLUGIN_LOAD_MODULE_PATTERN = re.compile(
 )
 
 
+def _is_active_launch_task_for_project(
+    task: dict | None,
+    project_path: str,
+    pid: int | None,
+    *,
+    now: float,
+) -> bool:
+    if not task or task.get("command") != "editor.launch":
+        return False
+    if task.get("status") in FINAL_TASK_STATUSES:
+        return False
+    if now - float(task.get("updated_at") or task.get("created_at") or 0) > 7200:
+        return False
+    payload = task.get("payload") or {}
+    if not _same_project_path(payload.get("project_path"), project_path):
+        return False
+    task_pid = task.get("pid") or (task.get("result") or {}).get("pid")
+    if pid is not None and task_pid is None:
+        return False
+    if pid is not None and task_pid is not None:
+        try:
+            return int(task_pid) == int(pid)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def _active_launch_task_for_project(
     project_path: str | None,
     pid: int | None = None,
@@ -59,26 +92,28 @@ def _active_launch_task_for_project(
     if not project_path:
         return None
     now = time.time()
-    for task in iter_tasks(timeout=timeout):
-        if task.get("command") != "editor.launch":
-            continue
-        if task.get("status") in FINAL_TASK_STATUSES:
-            continue
-        if now - float(task.get("updated_at") or task.get("created_at") or 0) > 7200:
-            continue
-        payload = task.get("payload") or {}
-        if not _same_project_path(payload.get("project_path"), project_path):
-            continue
-        task_pid = task.get("pid") or (task.get("result") or {}).get("pid")
-        if pid is not None and task_pid is not None:
-            try:
-                if int(task_pid) != int(pid):
-                    continue
-            except (TypeError, ValueError):
-                continue
-        if pid is not None and task_pid is None:
-            continue
-        return task
+    try:
+        tasks = iter_tasks(timeout=timeout)
+    except TaskLockTimeout as exc:
+        locked_snapshot = load_task_snapshot(exc.task_id)
+        snapshots = [locked_snapshot] if locked_snapshot is not None else []
+        snapshots.extend(
+            task for task in iter_task_snapshots()
+            if task.get("task_id") != exc.task_id
+        )
+        for task in snapshots:
+            if _is_active_launch_task_for_project(task, project_path, pid, now=now):
+                task = dict(task)
+                task["_task_state_snapshot"] = {
+                    "source": "last_published_snapshot",
+                    "task_id": exc.task_id,
+                    "lock_timeout_seconds": exc.timeout,
+                }
+                return task
+        raise
+    for task in tasks:
+        if _is_active_launch_task_for_project(task, project_path, pid, now=now):
+            return task
     return None
 
 def _summarize_startup_precheck(check: dict) -> dict:

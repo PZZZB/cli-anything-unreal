@@ -74,7 +74,7 @@ def _editor_status_timeout_error(
         "EDITOR_STATUS_TIMEOUT",
         f"Editor status exceeded its {timeout:g}s deadline during {phase}.",
         exit_code=4,
-        suggestion="Retry with editor status --timeout <seconds> to allow more time.",
+        suggestion="Retry with status --timeout <seconds> or editor status --timeout <seconds> to allow more time.",
         details=details,
     )
 
@@ -465,6 +465,19 @@ def _add_launching_recovery_hint(entry: dict, task: dict) -> None:
     project_path = entry.get("project_path")
     if project_path and task.get("task_id"):
         entry["next_command"] = f'ue-cli --project "{project_path}" editor status {task["task_id"]}'
+    snapshot = task.get("_task_state_snapshot")
+    if snapshot:
+        entry["task_state_source"] = snapshot["source"]
+        entry["task_state_may_be_stale"] = True
+        entry["task_discovery_timeout"] = {
+            "blocking_phase": "task_discovery",
+            "task_id": snapshot["task_id"],
+            "timeout_seconds": snapshot["lock_timeout_seconds"],
+        }
+        entry["message"] = (
+            "UnrealEditor is still running and Remote Control is not reachable; "
+            "task discovery timed out, so the last published launch state was retained."
+        )
 
 
 def _add_offline_recovery_hint(entry: dict, observation: dict | None = None) -> None:
@@ -844,7 +857,10 @@ def _scan_editor_status_instances(
         instances.append(entry)
 
     instances = _deduplicate_editor_status_instances(instances)
-    if include_bridge_status:
+    if include_bridge_status and any(
+        entry.get("status") == "online" and entry.get("port")
+        for entry in instances
+    ):
         bridge_timeout = remaining_timeout("bridge_status")
         _add_online_bridge_statuses(
             instances,
