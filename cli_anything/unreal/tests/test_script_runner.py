@@ -2367,6 +2367,76 @@ result = {'status': 'live_editor_ok'}
         )
         assert result["status"] == "executed"
 
+    def test_editor_exec_continues_when_ue4_lacks_automation_framerate_property(self):
+        from types import SimpleNamespace
+
+        from cli_anything.unreal.commands.editor import _exec_console_with_log_capture
+
+        commands = []
+
+        class UE4AutomationSettings:
+            def set_editor_property(self, name, value):
+                raise Exception(
+                    "Object: Failed to find property 'DefaultInteractiveFramerate' "
+                    "for attribute 'DefaultInteractiveFramerate' on "
+                    "'AutomationTestSettings'"
+                )
+
+        def configure_unreal(fake_unreal):
+            fake_unreal.EditorLevelLibrary = SimpleNamespace(
+                get_editor_world=lambda: None,
+            )
+            fake_unreal.SystemLibrary = SimpleNamespace(
+                execute_console_command=lambda world, command: commands.append(command),
+            )
+            fake_unreal.load_class = lambda outer, path: object()
+            fake_unreal.get_default_object = lambda settings_class: UE4AutomationSettings()
+            fake_unreal.log_warning = lambda message: None
+
+        api = MagicMock()
+        self._make_exec_python_ex_mock(api, configure_unreal=configure_unreal)
+
+        result = _exec_console_with_log_capture(
+            api,
+            "Automation RunTests System.Core.HAL.Platform Verification",
+        )
+
+        assert result["status"] == "executed"
+        assert commands == ["Automation RunTests System.Core.HAL.Platform Verification"]
+
+    def test_editor_exec_preserves_other_automation_setup_failures(self):
+        from types import SimpleNamespace
+
+        from cli_anything.unreal.commands.editor import _exec_console_with_log_capture
+
+        commands = []
+
+        class BrokenAutomationSettings:
+            def set_editor_property(self, name, value):
+                raise RuntimeError("unexpected settings write failure")
+
+        def configure_unreal(fake_unreal):
+            fake_unreal.EditorLevelLibrary = SimpleNamespace(
+                get_editor_world=lambda: None,
+            )
+            fake_unreal.SystemLibrary = SimpleNamespace(
+                execute_console_command=lambda world, command: commands.append(command),
+            )
+            fake_unreal.load_class = lambda outer, path: object()
+            fake_unreal.get_default_object = lambda settings_class: BrokenAutomationSettings()
+            fake_unreal.log_warning = lambda message: None
+
+        api = MagicMock()
+        self._make_exec_python_ex_mock(api, configure_unreal=configure_unreal)
+
+        result = _exec_console_with_log_capture(
+            api,
+            "Automation RunTests System.Core.HAL.Platform Verification",
+        )
+
+        assert result["error"] == "Python console execution failed"
+        assert commands == []
+
     def test_editor_exec_bounds_unmarked_remote_log_output(self):
         """Historical Remote Control output cannot flood one CLI response."""
         from click.testing import CliRunner
@@ -2713,6 +2783,80 @@ result = {'status': 'live_editor_ok'}
         assert any("Result={Success}" in item["Output"] for item in data["log_output"])
         assert any("Queue Empty" in item["Output"] for item in data["log_output"])
 
+    def test_editor_exec_automation_uses_long_default_log_wait(self, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.commands.editor import (
+            DEFAULT_AUTOMATION_LOG_WAIT_SECONDS,
+        )
+        from cli_anything.unreal.unreal_cli import cli
+
+        log_file = tmp_path / "RXGame.log"
+        log_file.write_text("before\n", encoding="utf-8")
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.editor.require_editor",
+            return_value=MagicMock(),
+        ), patch(
+            "cli_anything.unreal.commands.editor._resolve_editor_log_file",
+            return_value=log_file,
+        ), patch(
+            "cli_anything.unreal.commands.editor._exec_console_with_log_capture",
+            return_value={"status": "executed", "log_output": []},
+        ), patch(
+            "cli_anything.unreal.commands.editor._read_log_delta",
+            return_value="Automation Test Queue Empty 1 tests performed.",
+        ) as read_log:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec",
+                "Automation RunTests SDOC.Unit",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["result"]
+        assert data["log_wait_seconds"] == DEFAULT_AUTOMATION_LOG_WAIT_SECONDS
+        assert read_log.call_args.kwargs["wait_seconds"] == (
+            DEFAULT_AUTOMATION_LOG_WAIT_SECONDS
+        )
+
+    def test_editor_exec_non_automation_keeps_short_default_log_wait(self, tmp_path):
+        from click.testing import CliRunner
+        from cli_anything.unreal.commands.editor import (
+            DEFAULT_EDITOR_EXEC_LOG_WAIT_SECONDS,
+        )
+        from cli_anything.unreal.unreal_cli import cli
+
+        log_file = tmp_path / "RXGame.log"
+        log_file.write_text("before\n", encoding="utf-8")
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.editor.require_editor",
+            return_value=MagicMock(),
+        ), patch(
+            "cli_anything.unreal.commands.editor._resolve_editor_log_file",
+            return_value=log_file,
+        ), patch(
+            "cli_anything.unreal.commands.editor._exec_console_with_log_capture",
+            return_value={
+                "status": "executed",
+                "log_output": [],
+                "_log_begin_marker": "begin",
+                "_log_end_marker": "end",
+            },
+        ), patch(
+            "cli_anything.unreal.commands.editor._read_log_delta",
+            return_value="",
+        ) as read_log:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "stat fps",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert read_log.call_args.kwargs["wait_seconds"] == (
+            DEFAULT_EDITOR_EXEC_LOG_WAIT_SECONDS
+        )
+
     def test_editor_exec_log_wait_scans_past_capture_limit(self, tmp_path):
         from cli_anything.unreal.commands.editor import (
             EDITOR_LOG_CAPTURE_LIMIT_BYTES,
@@ -2770,6 +2914,7 @@ result = {'status': 'live_editor_ok'}
         data = response["details"]
         assert data["automation_completed"] is False
         assert data["log_capture_status"] == "timeout"
+        assert data["log_wait_seconds"] == 0
         assert data["log_file"] == str(log_file)
         assert "Get-Content -LiteralPath" in data["next_command"]
         assert "longer wait" in data["suggestion"]

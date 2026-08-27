@@ -47,6 +47,8 @@ REMOTE_UNREACHABLE_CACHE_TTL_SECONDS = 7200
 EDITOR_LOG_CAPTURE_LIMIT_BYTES = 2 * 1024 * 1024
 EDITOR_LOG_READ_CHUNK_BYTES = 64 * 1024
 EDITOR_EXEC_INLINE_LOG_LIMIT_BYTES = 16 * 1024
+DEFAULT_EDITOR_EXEC_LOG_WAIT_SECONDS = 1.0
+DEFAULT_AUTOMATION_LOG_WAIT_SECONDS = 300.0
 EDITOR_CLOSE_PROCESS_GRACE_SECONDS = 10
 
 _AUTOMATION_INLINE_LOG_PATTERN = re.compile(
@@ -2447,7 +2449,19 @@ def _exec_console_with_log_capture(api, command: str, timeout: int = 15) -> dict
     if _settings_class is None:
         raise RuntimeError("AutomationTestSettings class is unavailable")
     _settings = unreal.get_default_object(_settings_class)
-    _settings.set_editor_property("DefaultInteractiveFramerate", 1.0)
+    try:
+        _settings.set_editor_property("DefaultInteractiveFramerate", 1.0)
+    except Exception as _settings_error:
+        _settings_error_text = str(_settings_error)
+        if (
+            "Failed to find property" not in _settings_error_text
+            or "DefaultInteractiveFramerate" not in _settings_error_text
+        ):
+            raise
+        unreal.log_warning(
+            "ue-cli: DefaultInteractiveFramerate is unavailable; continuing "
+            "without the automation FPS override."
+        )
 """
     script = f"""
 import unreal
@@ -2915,9 +2929,12 @@ def editor_live_coding_compile(state: AppState, timeout: int, log_wait: float):
 )
 @click.option(
     "--log-wait",
-    default=1.0,
-    type=float,
-    help="Max seconds to collect project Output Log lines; cannot observe separate-process logs.",
+    default=None,
+    type=click.FloatRange(min=0.0),
+    help=(
+        "Max seconds to collect project Output Log lines. Defaults to 300 for "
+        "Automation RunTests and 1 for other commands; cannot observe separate-process logs."
+    ),
 )
 @click.argument("command")
 @handle_error
@@ -2929,6 +2946,16 @@ def editor_exec(state: AppState, timeout, log_wait, command):
     For Python execution, use ``editor run-script -c "code"`` for one-liners
     or ``editor run-script -`` for stdin.
     """
+    automation_run = bool(
+        re.match(r"^\s*Automation\s+RunTests(?:\s|$)", command, re.IGNORECASE)
+    )
+    if log_wait is None:
+        log_wait = (
+            DEFAULT_AUTOMATION_LOG_WAIT_SECONDS
+            if automation_run
+            else DEFAULT_EDITOR_EXEC_LOG_WAIT_SECONDS
+        )
+
     api = require_editor(state)
     live_coding_compile = _is_live_coding_compile(command)
     log_file = _resolve_editor_log_file(state)
@@ -2976,9 +3003,6 @@ def editor_exec(state: AppState, timeout, log_wait, command):
                     "Check editor Output Log for results.",
         }
 
-    automation_run = bool(
-        re.match(r"^\s*Automation\s+RunTests(?:\s|$)", command, re.IGNORECASE)
-    )
     omitted_line_count = 0
     if automation_run:
         immediate_output = list(result.get("log_output") or [])
