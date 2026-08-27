@@ -3262,7 +3262,7 @@ def _unsafe_run_script_operation(code: str) -> dict | None:
 
     operation = _unsafe_top_level_call(code)
     if operation:
-        return {
+        details = {
             "operation": operation,
             "reason": "known_world_teardown_crash",
             "safe_workflow": [
@@ -3272,6 +3272,17 @@ def _unsafe_run_script_operation(code: str) -> dict | None:
                 "ue-cli --project <Project.uproject> editor save-level",
             ],
         }
+        if operation == "EditorLevelLibrary.load_level":
+            details["duplicate_world_workflow"] = [
+                "ue-cli --project <Project.uproject> editor run-script <duplicate_and_save_only.py>",
+                "ue-cli --project <Project.uproject> editor close",
+                "ue-cli --project <Project.uproject> editor launch --map /Game/Path/Level",
+                "ue-cli --project <Project.uproject> editor run-script <actor_setup.py>",
+            ]
+            details["duplicate_world_requirement"] = (
+                "duplicate_and_save_only.py must save the duplicated World without calling a map-load API."
+            )
+        return details
     for match in re.finditer(r"open\s*\(\s*r?[\"']([^\"']+\.py)[\"']", code):
         source_path = Path(match.group(1))
         if not source_path.is_file():
@@ -3294,21 +3305,29 @@ def _unsafe_top_level_call(code: str) -> str | None:
         tree = ast.parse(code)
     except SyntaxError:
         patterns = (
-            r"\bEditorLoadingAndSavingUtils\s*\.\s*new_blank_map\s*\(",
-            r"\bEditorLoadingAndSavingUtils\s*\.\s*load_map\s*\(",
-            r"\bnew_blank_map\s*\(",
-            r"\bload_map\s*\(",
+            (r"\bEditorLevelLibrary\s*\.\s*load_level\s*\(", "EditorLevelLibrary.load_level"),
+            (r"\bload_level\s*\(", "EditorLevelLibrary.load_level"),
+            (r"\bEditorLoadingAndSavingUtils\s*\.\s*load_map\s*\(", "EditorLoadingAndSavingUtils.load_map"),
+            (r"\bload_map\s*\(", "EditorLoadingAndSavingUtils.load_map"),
+            (r"\bEditorLoadingAndSavingUtils\s*\.\s*new_blank_map\s*\(", "EditorLoadingAndSavingUtils.new_blank_map"),
+            (r"\bnew_blank_map\s*\(", "EditorLoadingAndSavingUtils.new_blank_map"),
         )
-        if any(re.search(pattern, code) for pattern in patterns):
-            return (
-                "EditorLoadingAndSavingUtils.load_map"
-                if re.search(r"\b(?:EditorLoadingAndSavingUtils\s*\.\s*)?load_map\s*\(", code)
-                else "EditorLoadingAndSavingUtils.new_blank_map"
-            )
+        for pattern, operation in patterns:
+            if re.search(pattern, code):
+                return operation
         return None
+
+    function_defs = {
+        statement.name: statement
+        for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
 
     class Visitor(ast.NodeVisitor):
         found: str | None = None
+
+        def __init__(self):
+            self._visiting_functions: set[str] = set()
 
         def visit_FunctionDef(self, node):  # noqa: N802
             return
@@ -3327,9 +3346,23 @@ def _unsafe_top_level_call(code: str) -> str | None:
             if name in {"load_map", "EditorLoadingAndSavingUtils.load_map", "unreal.EditorLoadingAndSavingUtils.load_map"}:
                 self.found = "EditorLoadingAndSavingUtils.load_map"
                 return
+            if name in {"load_level", "EditorLevelLibrary.load_level", "unreal.EditorLevelLibrary.load_level"}:
+                self.found = "EditorLevelLibrary.load_level"
+                return
             if name in {"new_blank_map", "EditorLoadingAndSavingUtils.new_blank_map", "unreal.EditorLoadingAndSavingUtils.new_blank_map"}:
                 self.found = "EditorLoadingAndSavingUtils.new_blank_map"
                 return
+            if name in function_defs and name not in self._visiting_functions:
+                self._visiting_functions.add(name)
+                try:
+                    for statement in function_defs[name].body:
+                        if self.found:
+                            return
+                        self.visit(statement)
+                finally:
+                    self._visiting_functions.discard(name)
+                if self.found:
+                    return
             self.generic_visit(node)
 
     visitor = Visitor()
@@ -3350,15 +3383,22 @@ def _call_name(node: ast.AST) -> str:
 
 
 def _raise_unsafe_run_script_operation(unsafe: dict) -> None:
+    suggestion = (
+        "Use editor new-level or editor open-level for map transitions, then run a separate script "
+        "for actor/content setup and save with editor save-level."
+    )
+    if unsafe["operation"] == "EditorLevelLibrary.load_level":
+        suggestion = (
+            "For an ordinary transition, use editor open-level outside run-script. If the script duplicated "
+            "the active World, duplicate and save it without loading it, run editor close, then start a fresh "
+            "editor with editor launch --map before continuing setup."
+        )
     raise AppError(
         "UNSAFE_RUN_SCRIPT_OPERATION",
         f"{unsafe['operation']} is blocked in editor run-script because it can crash unattended editor sessions.",
         exit_code=2,
         details=unsafe,
-        suggestion=(
-            "Use editor new-level or editor open-level for map transitions, then run a separate script "
-            "for actor/content setup and save with editor save-level."
-        ),
+        suggestion=suggestion,
     )
 
 

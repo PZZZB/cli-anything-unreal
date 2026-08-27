@@ -2157,7 +2157,48 @@ class TestScriptRunner:
         mock_editor.assert_not_called()
         mock_run.assert_not_called()
 
-    def test_editor_run_script_allows_load_map_inside_unused_helper(self):
+    def test_editor_run_script_blocks_duplicate_then_load_level(self):
+        """Reloading a duplicated active World can retain it and terminate the editor."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        code = """
+import unreal
+
+def main():
+    source = unreal.EditorLevelLibrary.get_editor_world().get_outermost().get_name()
+    destination = '/Game/Test/L_Duplicate'
+    unreal.EditorAssetLibrary.duplicate_asset(source, destination)
+    unreal.EditorLevelLibrary.load_level(destination)
+
+if __name__ == '__main__':
+    main()
+"""
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script", "-",
+            ], input=code)
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "UNSAFE_RUN_SCRIPT_OPERATION"
+        assert data["details"]["operation"] == "EditorLevelLibrary.load_level"
+        assert data["details"]["reason"] == "known_world_teardown_crash"
+        assert "editor open-level" in data["suggestion"]
+        assert "editor close" in data["suggestion"]
+        assert "editor launch --map" in data["suggestion"]
+        duplicate_workflow = data["details"]["duplicate_world_workflow"]
+        assert any("duplicate_and_save_only.py" in step for step in duplicate_workflow)
+        assert any("editor close" in step for step in duplicate_workflow)
+        assert any("editor launch --map" in step for step in duplicate_workflow)
+        assert "without calling a map-load API" in data["details"]["duplicate_world_requirement"]
+        mock_editor.assert_not_called()
+        mock_run.assert_not_called()
+
+    def test_editor_run_script_allows_map_loads_inside_unused_helpers(self):
         """Reusable helpers may define offline load_map paths without executing them."""
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli
@@ -2167,6 +2208,9 @@ import unreal
 
 def commandlet_only_load():
     return unreal.EditorLoadingAndSavingUtils.load_map('/Game/Test/L_Test')
+
+def live_editor_only_load():
+    return unreal.EditorLevelLibrary.load_level('/Game/Test/L_Test')
 
 result = {'status': 'live_editor_ok'}
 """

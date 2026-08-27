@@ -224,4 +224,4 @@ ue-cli editor save-level
 
 Existing level path -> command refuses to avoid modal. Use `asset delete` first or choose different path.
 
-**Known limitation:** creating/loading levels inside `editor run-script` can crash due UE PythonScriptPlugin retained UObject refs (`World Memory Leaks` assert / connection reset). Use `editor new-level` or `editor open-level` for map transitions, then run separate actor/content setup scripts.
+**Known limitation:** creating/loading levels inside `editor run-script` can crash due retained Python or project subsystem UObject refs (`World Memory Leaks` assert / connection reset). `editor run-script` blocks known top-level transitions, including `EditorLevelLibrary.load_level`. Use `editor new-level` or `editor open-level` for ordinary transitions. After duplicating the active World, save it without loading it, close the editor, then use `editor launch --map /Game/Path/Level` for a fresh lifetime before continuing setup.
