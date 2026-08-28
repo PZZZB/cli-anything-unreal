@@ -71,9 +71,10 @@ source = "{source_path}"
 dest = "{dest_path}"
 
 EAL = unreal.EditorAssetLibrary
+source_asset = unreal.load_asset(source)
 
 _proceed = True
-if not EAL.does_asset_exist(source):
+if source_asset is None:
     result = {{"error": "Source asset not found: " + source}}
     _proceed = False
 elif EAL.does_asset_exist(dest):
@@ -84,12 +85,38 @@ elif EAL.does_asset_exist(dest):
         _proceed = False
 
 if _proceed:
-    success = EAL.duplicate_asset(source, dest)
+    dest_asset_path = dest.strip().split(":", 1)[0]
+    dest_leaf = dest_asset_path.rsplit("/", 1)[-1]
+    if "." in dest_leaf:
+        dest_asset_path = dest_asset_path.rsplit(".", 1)[0]
+
+    if isinstance(source_asset, unreal.World):
+        dest_package_path, dest_asset_name = dest_asset_path.rsplit("/", 1)
+        duplicated_asset = unreal.AssetToolsHelpers.get_asset_tools().duplicate_asset(
+            dest_asset_name, dest_package_path, source_asset
+        )
+    else:
+        duplicated_asset = EAL.duplicate_asset(source, dest)
+
+    duplicated = duplicated_asset is not None
+    saved = False
+    save_method = None
+    if duplicated:
+        if isinstance(duplicated_asset, unreal.World):
+            save_method = "save_map"
+            saved = unreal.EditorLoadingAndSavingUtils.save_map(
+                duplicated_asset, dest_asset_path
+            )
+        else:
+            save_method = "save_loaded_asset"
+            saved = EAL.save_loaded_asset(duplicated_asset, only_if_is_dirty=False)
     result = {{
-        "status": "ok" if success else "failed",
+        "status": "ok" if duplicated and saved else "failed",
         "source": source,
         "destination": dest,
-        "duplicated": success,
+        "duplicated": duplicated,
+        "saved": saved,
+        "save_method": save_method,
     }}
 '''
 

@@ -271,12 +271,35 @@ class TestAssets:
         api.does_asset_exist.return_value = False
         mock_exec.return_value = {
             "status": "ok", "source": "/Game/M_Src",
-            "destination": "/Game/M_Dst", "duplicated": True,
+            "destination": "/Game/M_Dst", "duplicated": True, "saved": True,
         }
 
         result = asset_duplicate(api, "/Game/M_Src", "/Game/M_Dst")
         assert result["status"] == "ok"
         assert result["duplicated"] is True
+        assert result["saved"] is True
+        script = mock_exec.call_args.args[1]
+        assert "unreal.AssetToolsHelpers.get_asset_tools().duplicate_asset(" in script
+        assert "unreal.EditorLoadingAndSavingUtils.save_map(" in script
+        assert "EAL.save_loaded_asset(duplicated_asset, only_if_is_dirty=False)" in script
+
+    @patch("cli_anything.unreal.core.assets._exec")
+    def test_asset_duplicate_save_failed(self, mock_exec):
+        from cli_anything.unreal.core.assets import asset_duplicate
+
+        api = self._mock_api()
+        api.does_asset_exist.return_value = False
+        mock_exec.return_value = {
+            "status": "failed", "source": "/Game/M_Src",
+            "destination": "/Game/M_Dst", "duplicated": True, "saved": False,
+        }
+
+        result = asset_duplicate(api, "/Game/M_Src", "/Game/M_Dst")
+
+        assert result["code"] == "ASSET_DUPLICATE_FAILED"
+        assert result["duplicated"] is True
+        assert result["saved"] is False
+        assert "error" in result
 
     @patch("cli_anything.unreal.core.assets._exec")
     def test_asset_duplicate_force(self, mock_exec):
@@ -286,7 +309,7 @@ class TestAssets:
         api.does_asset_exist.return_value = True
         mock_exec.return_value = {
             "status": "ok", "source": "/Game/M_Src",
-            "destination": "/Game/M_Dst", "duplicated": True,
+            "destination": "/Game/M_Dst", "duplicated": True, "saved": True,
         }
 
         result = asset_duplicate(api, "/Game/M_Src", "/Game/M_Dst", force=True)

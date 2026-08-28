@@ -202,6 +202,7 @@ ue-cli --output json --project "$Project" editor live-coding-compile --timeout 6
 ```
 
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
+`asset duplicate` saves the duplicated package before reporting success, including World assets stored as `.umap`. A duplicate that cannot be saved returns nonzero `ASSET_DUPLICATE_FAILED` with `saved=false` instead of reporting a transient in-memory success.
 `asset rename` waits up to 120 seconds by default for reference-heavy moves; override this with `--timeout <seconds>`. If the HTTP response times out, ue-cli safely checks source and destination existence. A conclusive moved state returns confirmed success. An inconclusive check returns nonzero `ASSET_RENAME_TIMEOUT`, `completion_state=unknown`, `retry_safe=false`, plus source/destination verification commands; do not retry until those checks prove the source still exists and destination does not.
 `editor api-discover` cross-checks reflected functions against the live UE Python wrapper. Detailed function items report `python_callable`, plus `python_name` and `python_path` when a matching binding exists. Filtered summaries list reflection-only entries in `python_unavailable_functions`; class-level `python_exposed` does not imply every reflected function is callable.
 Bridge 1.34 lets `scene property` read StaticMeshComponent instance-paint fields through `LODData[N].PaintedVertices` and `LODData[N].OverrideVertexColors`. Those fields are native, non-reflected data; writes remain unsupported.

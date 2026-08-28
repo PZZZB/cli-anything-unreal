@@ -111,7 +111,7 @@ All asset commands require editor.
 | `asset delete ASSET_PATH [--force]` | Delete with ref detection. Accepts package paths like `/Game/A` and full object paths like `/Game/A.A`; package paths are normalized before deletion |
 | `asset refs ASSET_PATH` | List referencers |
 | `asset texture-source ASSET_PATH` | Read Texture2D source size/format and basic alpha/value stats through the bridge plugin |
-| `asset duplicate SRC DEST [--force]` | Duplicate asset |
+| `asset duplicate SRC DEST [--force]` | Duplicate and explicitly save the destination package before success; save failure returns `ASSET_DUPLICATE_FAILED` |
 | `asset rename SRC DEST [--timeout N]` | Rename/move asset. Waits 120 seconds by default. A response timeout is post-checked; confirmed moved state succeeds, otherwise `ASSET_RENAME_TIMEOUT` reports unknown completion plus safe existence checks and must not be retried blindly |
 
 ## build - Build System
