@@ -4376,7 +4376,7 @@ def test_wait_for_api_requires_spawned_process_to_own_port(tmp_path):
     ), patch(
         "cli_anything.unreal.core.editor_lifecycle._diagnose_api_unreachable",
         return_value={},
-    ), patch(
+    ) as diagnose, patch(
         "cli_anything.unreal.core.editor_lifecycle._check_log_errors_incremental",
         return_value=(None, 0),
     ), patch(
@@ -4396,6 +4396,12 @@ def test_wait_for_api_requires_spawned_process_to_own_port(tmp_path):
     assert result["status"] == "timeout"
     assert any(item["startup_phase"] == "waiting_for_port_owner" for item in progress)
     assert any(item.get("port_owner_pid") == 9999 for item in progress)
+    diagnose.assert_called_once_with(
+        log_file,
+        30010,
+        since_offset=0,
+        expected_process_id=4242,
+    )
 
 
 def test_wait_for_api_accepts_verified_spawned_process_owner(tmp_path):
@@ -4457,11 +4463,53 @@ def test_wait_for_api_timeout_reports_listening_port_with_http_server_log_hints(
     assert result["status"] == "timeout"
     assert result["failure_kind"] == "api_route_unhealthy"
     assert result["port_listening"] is True
+    assert result["tcp_connect_succeeded"] is True
     assert result["api_route_healthy"] is False
     assert "likely_cause" not in result
     assert result["http_server_restart_status"] == "completed"
     assert any("All listeners started" in hint for hint in result["log_hints"])
     assert "restart completed" in result["suggestion"]
+
+
+def test_api_unreachable_distinguishes_os_listener_from_failed_tcp_connect(tmp_path):
+    from cli_anything.unreal.core.editor_lifecycle import _diagnose_api_unreachable
+
+    log_file = tmp_path / "RXGame.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                "LogHttpListener: Created new HttpListener on 127.0.0.1:30011",
+                "LogHttpServerModule: All listeners started",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "cli_anything.unreal.core.editor_lifecycle.sys.platform",
+        "win32",
+    ), patch(
+        "cli_anything.unreal.core.editor_lifecycle._tcp_port_accepts_connection",
+        return_value=False,
+    ), patch(
+        "cli_anything.unreal.utils.ue_http_api.UEEditorAPI._get_pid_listening_on_port",
+        return_value=4242,
+    ):
+        result = _diagnose_api_unreachable(
+            log_file,
+            30011,
+            expected_process_id=4242,
+        )
+
+    assert result["port_listening"] is True
+    assert result["tcp_connect_succeeded"] is False
+    assert result["api_route_healthy"] is False
+    assert result["listener_pid"] == 4242
+    assert result["listener_owned_by_editor"] is True
+    assert result["failure_kind"] == "api_listener_unresponsive"
+    assert result["likely_cause"] == "tcp_listener_not_accepting_connections"
+    assert "LISTENING under PID 4242" in result["cause_hint"]
+    assert "starting, busy, or stalled" in result["cause_hint"]
 
 
 def test_api_unreachable_diagnostics_find_http_server_hints_outside_log_tail(tmp_path):

@@ -818,13 +818,42 @@ def _extract_remote_control_health_hints_from_log(
         return {}
     return _remote_control_health_from_lines(matched, limit=limit, target_port=target_port)
 
-def _diagnose_api_unreachable(log_file: Path, port: int, *, since_offset: int | None = None) -> dict:
-    port_listening = _tcp_port_accepts_connection(port)
+def _diagnose_api_unreachable(
+    log_file: Path,
+    port: int,
+    *,
+    since_offset: int | None = None,
+    expected_process_id: int | None = None,
+) -> dict:
+    tcp_connect_succeeded = _tcp_port_accepts_connection(port)
+    listener_pid = None
+    if sys.platform == "win32":
+        from cli_anything.unreal.utils.ue_http_api import UEEditorAPI
+
+        try:
+            listener_pid = UEEditorAPI._get_pid_listening_on_port(port)
+        except (OSError, TypeError, ValueError):
+            listener_pid = None
+    port_listening = tcp_connect_succeeded or listener_pid is not None
+    if port_listening and not tcp_connect_succeeded:
+        failure_kind = "api_listener_unresponsive"
+    elif tcp_connect_succeeded:
+        failure_kind = "api_route_unhealthy"
+    else:
+        failure_kind = "api_not_listening"
     result = {
         "port_listening": port_listening,
+        "tcp_connect_succeeded": tcp_connect_succeeded,
         "api_route_healthy": False,
-        "failure_kind": "api_route_unhealthy" if port_listening else "api_not_listening",
+        "failure_kind": failure_kind,
     }
+    if listener_pid is not None:
+        result["listener_pid"] = int(listener_pid)
+        if expected_process_id is not None:
+            try:
+                result["listener_owned_by_editor"] = int(listener_pid) == int(expected_process_id)
+            except (TypeError, ValueError):
+                pass
     hints = _extract_remote_control_health_hints_from_log(
         log_file,
         since_offset=since_offset,
@@ -836,7 +865,18 @@ def _diagnose_api_unreachable(log_file: Path, port: int, *, since_offset: int | 
             target_port=port,
         )
     result.update(hints)
-    if port_listening and result.get("http_server_restart_status") == "completed" and not result.get("likely_cause"):
+    if port_listening and not tcp_connect_succeeded:
+        result["likely_cause"] = "tcp_listener_not_accepting_connections"
+        owner = f" under PID {listener_pid}" if listener_pid is not None else ""
+        result["cause_hint"] = (
+            f"The OS TCP table reports port {port} LISTENING{owner}, but an active TCP connection attempt failed. "
+            "The editor or its HTTP server may still be starting, busy, or stalled."
+        )
+        result["suggestion"] = (
+            "Keep the existing editor process; inspect its responsiveness and startup log, then retry editor status. "
+            "Restart it only if startup remains stalled and unsaved work is safe."
+        )
+    elif port_listening and result.get("http_server_restart_status") == "completed" and not result.get("likely_cause"):
         result["suggestion"] = (
             f"Remote Control port is listening on {port}, but the HTTP route did not answer. "
             "The HttpServer listener restart completed without bind errors, so do not restart the editor from this signal alone; "
@@ -1095,7 +1135,12 @@ def _wait_for_api(proc, poll_port, timeout, log_file, state, on_progress=None) -
         log_error = _check_log_errors(log_file)
     if log_error:
         result["error"] += f" Log hint: {log_error}"
-    diagnostics = _diagnose_api_unreachable(log_file, poll_port, since_offset=startup_log_offset)
+    diagnostics = _diagnose_api_unreachable(
+        log_file,
+        poll_port,
+        since_offset=startup_log_offset,
+        expected_process_id=getattr(proc, "pid", None),
+    )
     result.update(diagnostics)
     if active_restore_blocker is not None:
         result.update({
