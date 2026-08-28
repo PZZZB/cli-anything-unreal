@@ -4,7 +4,7 @@ import ast
 import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -1454,6 +1454,158 @@ class TestCLI:
         assert result.exit_code == 3, result.output
         assert json.loads(result.output)["code"] == "EDITOR_PROJECT_NOT_RUNNING"
         open_level.assert_not_called()
+
+    def test_run_script_retries_transient_missing_listener_process(
+        self,
+        temp_project,
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        project_path = str(Path(temp_project["uproject"]).resolve())
+
+        class FakeAPI:
+            def __init__(self, port):
+                self.port = port
+                self.project_path = None
+
+            def is_alive(self):
+                return True
+
+            @staticmethod
+            def _get_pid_listening_on_port(_port):
+                return 32096
+
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", FakeAPI), \
+             patch(
+                 "cli_anything.unreal.utils.ue_backend.find_running_editors",
+                 side_effect=[[], [{"pid": 32096, "project": project_path}]],
+             ) as find_editors, \
+             patch("cli_anything.unreal.commands.time.sleep") as sleep, \
+             patch(
+                 "cli_anything.unreal.core.editor_lifecycle.capture_editor_disconnect_context",
+                 return_value={},
+             ), \
+             patch("cli_anything.unreal.core.editor_lifecycle.close_editor_disconnect_context"), \
+             patch(
+                 "cli_anything.unreal.core.script_runner.run_python_code",
+                 return_value={"status": "ok"},
+             ) as run_python:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "--project", project_path,
+                "--port", "30012",
+                "editor", "run-script", "-c", "result = {'status': 'ok'}",
+                "--timeout", "60", "--no-save",
+            ])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["result"] == {"status": "ok"}
+        assert find_editors.call_args_list == [
+            call(),
+            call(timeout=2.0),
+        ]
+        sleep.assert_called_once_with(0.1)
+        run_python.assert_called_once()
+
+    def test_run_script_fails_closed_after_process_discovery_retries(
+        self,
+        temp_project,
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        project_path = str(Path(temp_project["uproject"]).resolve())
+
+        class FakeAPI:
+            def __init__(self, port):
+                self.port = port
+                self.project_path = None
+
+            def is_alive(self):
+                return True
+
+            @staticmethod
+            def _get_pid_listening_on_port(_port):
+                return 32096
+
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", FakeAPI), \
+             patch(
+                 "cli_anything.unreal.utils.ue_backend.find_running_editors",
+                 side_effect=[[], [], []],
+             ) as find_editors, \
+             patch("cli_anything.unreal.commands.time.sleep") as sleep, \
+             patch(
+                 "cli_anything.unreal.core.script_runner.run_python_code",
+             ) as run_python:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "--project", project_path,
+                "--port", "30012",
+                "editor", "run-script", "-c", "result = {'status': 'ok'}",
+                "--timeout", "60", "--no-save",
+            ])
+
+        assert result.exit_code == 3, result.output
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_PROJECT_VERIFICATION_FAILED"
+        assert data["details"]["listener_pid"] == 32096
+        assert data["details"]["verification_attempts"] == 3
+        assert find_editors.call_args_list == [
+            call(),
+            call(timeout=2.0),
+            call(timeout=2.0),
+        ]
+        assert sleep.call_args_list == [call(0.1), call(0.2)]
+        run_python.assert_not_called()
+
+    def test_run_script_rechecks_listener_pid_during_process_discovery_retry(
+        self,
+        temp_project,
+    ):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        project_path = str(Path(temp_project["uproject"]).resolve())
+        other_project = str(Path(temp_project["dir"]).with_name("Other") / "Other.uproject")
+
+        class FakeAPI:
+            listener_pids = iter([32096, 44500])
+
+            def __init__(self, port):
+                self.port = port
+                self.project_path = None
+
+            def is_alive(self):
+                return True
+
+            @staticmethod
+            def _get_pid_listening_on_port(_port):
+                return next(FakeAPI.listener_pids)
+
+        with patch("cli_anything.unreal.utils.ue_http_api.UEEditorAPI", FakeAPI), \
+             patch(
+                 "cli_anything.unreal.utils.ue_backend.find_running_editors",
+                 side_effect=[
+                     [],
+                     [{"pid": 44500, "project": other_project}],
+                 ],
+             ), \
+             patch("cli_anything.unreal.commands.time.sleep"), \
+             patch(
+                 "cli_anything.unreal.core.script_runner.run_python_code",
+             ) as run_python:
+            result = CliRunner().invoke(cli, [
+                "--output", "json", "--project", project_path,
+                "--port", "30012",
+                "editor", "run-script", "-c", "result = {'status': 'ok'}",
+                "--timeout", "60", "--no-save",
+            ])
+
+        assert result.exit_code == 3, result.output
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_PROJECT_NOT_RUNNING"
+        assert data["details"]["listener_pid"] == 44500
+        assert data["details"]["listener_project"] == other_project
+        run_python.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════════════

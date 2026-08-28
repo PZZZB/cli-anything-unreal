@@ -21,6 +21,10 @@ from cli_anything.unreal.utils.repl_skin import ReplSkin
 AppError = UeCliError
 
 
+_PROJECT_VERIFICATION_RETRY_DELAYS = (0.1, 0.2)
+_PROJECT_VERIFICATION_RETRY_TIMEOUT = 2.0
+
+
 class AppState:
     """Holds mutable session state shared across Click commands."""
 
@@ -311,16 +315,72 @@ def _guard_editor_project(state: AppState, api_cls) -> dict | None:
         (editor for editor in running if int(editor.get("pid", 0)) == listening_pid),
         None,
     )
+    verification_attempts = 1
+    retry_errors: list[str] = []
     if owner is None:
+        for delay in _PROJECT_VERIFICATION_RETRY_DELAYS:
+            time.sleep(delay)
+            verification_attempts += 1
+            try:
+                running = find_running_editors(
+                    timeout=_PROJECT_VERIFICATION_RETRY_TIMEOUT,
+                )
+            except Exception as exc:
+                retry_errors.append(str(exc))
+                continue
+            try:
+                retry_listening_pid = api_cls._get_pid_listening_on_port(
+                    state.session.port,
+                )
+                listening_pid = (
+                    int(retry_listening_pid)
+                    if retry_listening_pid is not None
+                    else None
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                retry_errors.append(str(exc))
+                continue
+            if listening_pid is None:
+                continue
+            owner = next(
+                (
+                    editor
+                    for editor in running
+                    if int(editor.get("pid", 0)) == listening_pid
+                ),
+                None,
+            )
+            if owner is not None:
+                break
+
+    if owner is None and listening_pid is None:
+        details = {
+            **_project_mismatch_details(state, running),
+            "verification_attempts": verification_attempts,
+        }
+        if retry_errors:
+            details["retry_errors"] = retry_errors
+        raise AppError(
+            "EDITOR_PROJECT_VERIFICATION_FAILED",
+            f"Editor port {state.session.port} is reachable, but its owning process is unknown.",
+            exit_code=3,
+            suggestion="Retry after port ownership can be verified; no editor request was sent.",
+            details=details,
+        )
+    if owner is None:
+        details = {
+            **_project_mismatch_details(state, running),
+            "listener_pid": listening_pid,
+            "verification_attempts": verification_attempts,
+        }
+        if retry_errors:
+            details["retry_errors"] = retry_errors
         raise AppError(
             "EDITOR_PROJECT_VERIFICATION_FAILED",
             f"Port {state.session.port} belongs to PID {listening_pid}, but that process could not be verified as Unreal Editor.",
             exit_code=3,
             suggestion="Retry after process discovery is available; no editor request was sent.",
-            details={
-                **_project_mismatch_details(state, running),
-                "listener_pid": listening_pid,
-            },
+            details=details,
         )
     if not _same_project_path(owner.get("project", ""), state.session.project_path):
         raise AppError(
