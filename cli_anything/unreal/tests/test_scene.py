@@ -537,17 +537,114 @@ class TestScene:
         api = self._mock_api()
         api.call_function.return_value = {"ReturnValue": True}
         with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
-            mock_run.return_value = {
-                "status": "ok",
-                "package": "/Game/Maps/L_Test",
-                "world": "/Game/Maps/L_Test.L_Test",
-            }
+            mock_run.side_effect = [
+                {
+                    "status": "ok",
+                    "target_package": "/Game/Maps/L_Test",
+                    "target_object_path": "/Game/Maps/L_Test.L_Test",
+                    "target_loaded": False,
+                    "target_class": None,
+                    "target_world_loaded": False,
+                    "active_world": {"package": "/Game/Maps/L_Source"},
+                },
+                {
+                    "status": "ok",
+                    "package": "/Game/Maps/L_Test",
+                    "world": "/Game/Maps/L_Test.L_Test",
+                },
+            ]
 
             result = open_level(api, "/Game/Maps/L_Test", verify_timeout=0)
 
         assert result["status"] == "ok"
         assert result["success"] is True
         assert result["active_world"]["package"] == "/Game/Maps/L_Test"
+        api.call_function.assert_called_once_with(
+            "/Script/LevelEditor.Default__LevelEditorSubsystem",
+            "LoadLevel",
+            {"AssetPath": "/Game/Maps/L_Test"},
+        )
+
+    def test_open_level_blocks_loaded_non_active_world_before_dispatch(self):
+        from cli_anything.unreal.core.scene import open_level
+
+        api = self._mock_api()
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.return_value = {
+                "status": "ok",
+                "target_package": "/Game/Maps/L_Duplicate",
+                "target_object_path": "/Game/Maps/L_Duplicate.L_Duplicate",
+                "target_loaded": True,
+                "target_class": "World",
+                "target_world_loaded": True,
+                "active_world": {
+                    "package": "/Game/Maps/L_Source",
+                    "world": "/Game/Maps/L_Source.L_Source",
+                },
+            }
+
+            result = open_level(api, "/Game/Maps/L_Duplicate", verify_timeout=0)
+
+        assert result["code"] == "EDITOR_OPEN_LEVEL_UNSAFE_LOADED_WORLD"
+        assert result["failure_kind"] == "unsafe_loaded_world_transition"
+        assert result["dispatch_state"] == "blocked_unsafe"
+        assert result["target_world"] == {
+            "package": "/Game/Maps/L_Duplicate",
+            "object_path": "/Game/Maps/L_Duplicate.L_Duplicate",
+            "class": "World",
+            "loaded": True,
+        }
+        assert result["safe_workflow"][-1].endswith(
+            "editor launch --map /Game/Maps/L_Duplicate"
+        )
+        script = mock_run.call_args.args[1]
+        assert "unreal.find_object(None, _target_object_path)" in script
+        mock_run.assert_called_once_with(api, script, save=False)
+        api.call_function.assert_not_called()
+
+    def test_open_level_skips_dispatch_when_target_is_already_active(self):
+        from cli_anything.unreal.core.scene import open_level
+
+        api = self._mock_api()
+        active_world = {
+            "package": "/Game/Maps/L_Test",
+            "world": "/Game/Maps/L_Test.L_Test",
+            "name": "L_Test",
+        }
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value={
+                "status": "ok",
+                "target_package": "/Game/Maps/L_Test",
+                "target_object_path": "/Game/Maps/L_Test.L_Test",
+                "target_loaded": True,
+                "target_class": "World",
+                "target_world_loaded": True,
+                "active_world": active_world,
+            },
+        ):
+            result = open_level(api, "/Game/Maps/L_Test", verify_timeout=0)
+
+        assert result["status"] == "ok"
+        assert result["already_active"] is True
+        assert result["dispatch_state"] == "skipped_already_active"
+        assert result["active_world"] == active_world
+        api.call_function.assert_not_called()
+
+    def test_open_level_blocks_when_safety_preflight_fails(self):
+        from cli_anything.unreal.core.scene import open_level
+
+        api = self._mock_api()
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value={"error": "Remote Control request timed out"},
+        ):
+            result = open_level(api, "/Game/Maps/L_Test", verify_timeout=0)
+
+        assert result["code"] == "EDITOR_OPEN_LEVEL_SAFETY_CHECK_FAILED"
+        assert result["dispatch_state"] == "not_started"
+        assert result["safety_check"]["error"] == "Remote Control request timed out"
+        api.call_function.assert_not_called()
 
     def test_open_level_fails_when_active_world_stays_untitled(self):
         from cli_anything.unreal.core.scene import open_level
@@ -555,11 +652,22 @@ class TestScene:
         api = self._mock_api()
         api.call_function.return_value = {"ReturnValue": True}
         with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
-            mock_run.return_value = {
-                "status": "ok",
-                "package": "/Temp/Untitled_3",
-                "world": "/Temp/Untitled_3.Untitled",
-            }
+            mock_run.side_effect = [
+                {
+                    "status": "ok",
+                    "target_package": "/Game/Maps/L_Test",
+                    "target_object_path": "/Game/Maps/L_Test.L_Test",
+                    "target_loaded": False,
+                    "target_class": None,
+                    "target_world_loaded": False,
+                    "active_world": {"package": "/Temp/Untitled_3"},
+                },
+                {
+                    "status": "ok",
+                    "package": "/Temp/Untitled_3",
+                    "world": "/Temp/Untitled_3.Untitled",
+                },
+            ]
 
             result = open_level(api, "/Game/Maps/L_Test", verify_timeout=0)
 

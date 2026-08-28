@@ -654,6 +654,46 @@ else:
     return run_python_code(api, script, timeout=timeout, save=False)
 
 
+def _open_level_preflight(api, path: str) -> dict:
+    """Inspect active and already-loaded Worlds without loading the target."""
+    from cli_anything.unreal.core.script_runner import run_python_code
+
+    target_package = _level_package_path(path)
+    target_name = target_package.rsplit("/", 1)[-1]
+    target_object_path = f"{target_package}.{target_name}"
+    script = f'''\
+import unreal
+
+_target_package = {target_package!r}
+_target_object_path = {target_object_path!r}
+_world = unreal.EditorLevelLibrary.get_editor_world()
+if _world is None:
+    result = {{"error": "No editor world is active."}}
+else:
+    _outermost = _world.get_outermost()
+    _active_world = {{
+        "status": "ok",
+        "world": _world.get_path_name(),
+        "package": _outermost.get_name() if _outermost else "",
+        "name": _world.get_name(),
+    }}
+    _target = unreal.find_object(None, _target_object_path)
+    _target_class = _target.get_class().get_name() if _target is not None else None
+    result = {{
+        "status": "ok",
+        "target_package": _target_package,
+        "target_object_path": _target_object_path,
+        "target_loaded": _target is not None,
+        "target_class": _target_class,
+        "target_world_loaded": _target_class == "World",
+        "active_world": _active_world,
+    }}
+    _target = None
+    _world = None
+'''
+    return run_python_code(api, script, save=False)
+
+
 def _verify_current_level(api, expected_path: str, *, verify_timeout: float = 5.0) -> dict:
     expected_package = _level_package_path(expected_path)
     deadline = time.monotonic() + max(0.0, float(verify_timeout))
@@ -760,7 +800,63 @@ def open_level(api, path: str, *, verify_timeout: float = 5.0) -> dict:
 
     This avoids running world-transition APIs from PythonScriptPlugin, which
     can retain references across map loads and crash unattended editor sessions.
+    A loaded, non-active target World is rejected before dispatch because
+    ``LoadLevel`` can fatally fail while collecting that package.
     """
+    target_package = _level_package_path(path)
+    preflight = _open_level_preflight(api, path)
+    if preflight.get("error"):
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_OPEN_LEVEL_SAFETY_CHECK_FAILED",
+            "path": path,
+            "error": "Could not verify that the level transition is safe before dispatch.",
+            "dispatch_state": "not_started",
+            "safety_check": preflight,
+            "suggestion": "Run editor status and retry only after the editor is responsive.",
+        }
+
+    active_world = preflight.get("active_world") or {}
+    if active_world.get("package") == target_package:
+        return {
+            "status": "ok",
+            "success": True,
+            "path": path,
+            "active_world": active_world,
+            "already_active": True,
+            "dispatch_state": "skipped_already_active",
+        }
+
+    if preflight.get("target_world_loaded"):
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_OPEN_LEVEL_UNSAFE_LOADED_WORLD",
+            "path": path,
+            "error": (
+                "Target World is already loaded outside the active editor world; "
+                "in-process LoadLevel can fatally fail during world garbage collection."
+            ),
+            "failure_kind": "unsafe_loaded_world_transition",
+            "dispatch_state": "blocked_unsafe",
+            "active_world": active_world,
+            "target_world": {
+                "package": preflight.get("target_package"),
+                "object_path": preflight.get("target_object_path"),
+                "class": preflight.get("target_class"),
+                "loaded": True,
+            },
+            "safe_workflow": [
+                "ue-cli --project <Project.uproject> editor close",
+                f"ue-cli --project <Project.uproject> editor launch --map {target_package}",
+            ],
+            "suggestion": (
+                "Close the current editor without loading the target, then start a fresh editor "
+                f"directly on {target_package} with editor launch --map."
+            ),
+        }
+
     result = api.call_function(
         _LEVEL_EDITOR_SUBSYSTEM,
         "LoadLevel",

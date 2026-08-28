@@ -2136,6 +2136,40 @@ class TestScriptRunner:
         assert data["code"] == "EDITOR_OPEN_LEVEL_FAILED"
         assert data["details"]["active_world"]["package"] == "/Temp/Untitled_3"
 
+    def test_editor_open_level_loaded_world_guard_is_top_level_error(self):
+        """Unsafe loaded target Worlds should be rejected before LoadLevel dispatch."""
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.open_level") as mock_open_level:
+            mock_editor.return_value = MagicMock()
+            mock_open_level.return_value = {
+                "status": "failed",
+                "success": False,
+                "code": "EDITOR_OPEN_LEVEL_UNSAFE_LOADED_WORLD",
+                "path": "/Game/Test/L_Duplicate",
+                "error": "Target World is already loaded outside the active editor world.",
+                "failure_kind": "unsafe_loaded_world_transition",
+                "dispatch_state": "blocked_unsafe",
+                "safe_workflow": [
+                    "ue-cli --project <Project.uproject> editor close",
+                    "ue-cli --project <Project.uproject> editor launch --map /Game/Test/L_Duplicate",
+                ],
+                "suggestion": "Close the current editor, then launch directly on the target map.",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "open-level", "/Game/Test/L_Duplicate",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_OPEN_LEVEL_UNSAFE_LOADED_WORLD"
+        assert data["details"]["dispatch_state"] == "blocked_unsafe"
+        assert "launch directly" in data["suggestion"]
+
     def test_editor_run_script_blocks_load_map_inline_code(self):
         """Known-crashy map loading APIs should be blocked before contacting the editor."""
         from click.testing import CliRunner
