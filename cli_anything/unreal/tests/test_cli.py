@@ -92,6 +92,23 @@ class TestCLI:
         assert data["code"] == "EDITOR_CLOSE_OPTION_CONFLICT"
         assert data["message"] == "--save-dirty and --force cannot be used together."
 
+    def test_editor_start_alias_reuses_editor_launch(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.commands.editor import editor_group
+        from cli_anything.unreal.unreal_cli import cli
+
+        assert editor_group.commands["start"] is editor_group.commands["launch"]
+
+        result = CliRunner().invoke(cli, ["editor", "start", "--help"])
+
+        assert result.exit_code == 0, result.output
+        assert "Launch the controlled editor." in result.output
+        assert "--no-wait" in result.output
+
+        command_list = CliRunner().invoke(cli, ["--list-commands"])
+        assert command_list.exit_code == 0, command_list.output
+        assert "editor start" in command_list.output
+
     def test_task_wait_returns_completed_task(self):
         from click.testing import CliRunner
         from cli_anything.unreal.unreal_cli import cli

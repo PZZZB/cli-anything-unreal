@@ -2136,6 +2136,9 @@ def editor_launch(
     )
 
 
+editor_group.add_command(editor_launch, "start")
+
+
 @editor_group.command("cancel")
 @click.argument("task_id")
 @handle_error

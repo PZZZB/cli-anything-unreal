@@ -62,6 +62,8 @@ Start the controlled editor:
 ue-cli --output json --project "$Project" editor launch
 ```
 
+`editor start` is an exact alias for `editor launch` and accepts the same options.
+
 First launch may:
 
 - enable `RemoteControl`, `PythonScriptPlugin`, `EditorScriptingUtilities`, and `CliAnythingBridge` in the `.uproject`;
