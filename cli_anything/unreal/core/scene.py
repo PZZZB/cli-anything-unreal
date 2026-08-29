@@ -681,6 +681,8 @@ else:
     _target_class = _target.get_class().get_name() if _target is not None else None
     result = {{
         "status": "ok",
+        "engine_version": unreal.SystemLibrary.get_engine_version(),
+        "load_level_supported": hasattr(unreal, "LevelEditorSubsystem"),
         "target_package": _target_package,
         "target_object_path": _target_object_path,
         "target_loaded": _target is not None,
@@ -875,6 +877,31 @@ def open_level(
             "suggestion": (
                 "Close the current editor without loading the target, then start a fresh editor "
                 f"directly on {target_package} with editor launch --map."
+            ),
+        }
+
+    if preflight.get("load_level_supported") is False:
+        engine_version = preflight.get("engine_version")
+        version_suffix = f" in Unreal Engine {engine_version}" if engine_version else ""
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_OPEN_LEVEL_UNSUPPORTED",
+            "path": path,
+            "error": (
+                "LevelEditorSubsystem.LoadLevel is unavailable"
+                f"{version_suffix}; in-process editor open-level is unsupported."
+            ),
+            "failure_kind": "unsupported_engine_version",
+            "dispatch_state": "not_started",
+            "engine_version": engine_version,
+            "safe_workflow": [
+                "ue-cli --project <Project.uproject> editor close",
+                f"ue-cli --project <Project.uproject> editor launch --map {target_package}",
+            ],
+            "suggestion": (
+                "Close the current editor, then start a fresh editor directly on the target map "
+                f"with editor launch --map {target_package}."
             ),
         }
 

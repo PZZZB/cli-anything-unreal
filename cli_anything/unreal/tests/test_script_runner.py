@@ -2214,6 +2214,47 @@ class TestScriptRunner:
         assert data["details"]["dispatch_state"] == "blocked_unsafe"
         assert "launch directly" in data["suggestion"]
 
+    def test_editor_open_level_unsupported_engine_is_structured_rejection(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.open_level") as mock_open_level:
+            mock_editor.return_value = MagicMock()
+            mock_open_level.return_value = {
+                "status": "failed",
+                "success": False,
+                "code": "EDITOR_OPEN_LEVEL_UNSUPPORTED",
+                "path": "/Game/Test/L_Target",
+                "error": "LevelEditorSubsystem.LoadLevel is unavailable in Unreal Engine 4.26.2.",
+                "failure_kind": "unsupported_engine_version",
+                "dispatch_state": "not_started",
+                "engine_version": "4.26.2-15973114+++UE4+Release-4.26",
+                "safe_workflow": [
+                    "ue-cli --project <Project.uproject> editor close",
+                    "ue-cli --project <Project.uproject> editor launch --map /Game/Test/L_Target",
+                ],
+                "suggestion": "Close the editor, then launch directly on the target map.",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "open-level",
+                "/Game/Test/L_Target", "--timeout", "120",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_OPEN_LEVEL_UNSUPPORTED"
+        assert data["details"]["failure_kind"] == "unsupported_engine_version"
+        assert data["details"]["dispatch_state"] == "not_started"
+        assert "launch directly" in data["suggestion"]
+        mock_open_level.assert_called_once_with(
+            mock_editor.return_value,
+            "/Game/Test/L_Target",
+            timeout=120,
+        )
+
     def test_editor_run_script_blocks_load_map_inline_code(self):
         """Known-crashy map loading APIs should be blocked before contacting the editor."""
         from click.testing import CliRunner

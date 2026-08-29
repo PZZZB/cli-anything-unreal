@@ -3274,7 +3274,11 @@ def _raise_editor_script_timeout(
 
 def _raise_level_command_failed(result: dict, operation: str, code: str) -> None:
     resolved_code = str(result.get("code") or code)
-    exit_code = 2 if result.get("dispatch_state") == "blocked_unsafe" else 3
+    expected_rejection = (
+        result.get("dispatch_state") == "blocked_unsafe"
+        or result.get("failure_kind") == "unsupported_engine_version"
+    )
+    exit_code = 2 if expected_rejection else 3
     raise AppError(
         resolved_code,
         str(result.get("error") or f"{operation} failed."),

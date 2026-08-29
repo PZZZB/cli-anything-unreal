@@ -653,6 +653,40 @@ class TestScene:
         mock_run.assert_called_once_with(api, script, save=False)
         api.call_function.assert_not_called()
 
+    def test_open_level_reports_unsupported_subsystem_before_dispatch(self):
+        from cli_anything.unreal.core.scene import open_level
+
+        api = self._mock_api()
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value={
+                "status": "ok",
+                "engine_version": "4.26.2-15973114+++UE4+Release-4.26",
+                "load_level_supported": False,
+                "target_package": "/Game/Maps/L_Target",
+                "target_object_path": "/Game/Maps/L_Target.L_Target",
+                "target_loaded": False,
+                "target_class": None,
+                "target_world_loaded": False,
+                "active_world": {
+                    "package": "/Game/Maps/L_Source",
+                    "world": "/Game/Maps/L_Source.L_Source",
+                },
+            },
+        ) as mock_run:
+            result = open_level(api, "/Game/Maps/L_Target", timeout=120)
+
+        assert result["code"] == "EDITOR_OPEN_LEVEL_UNSUPPORTED"
+        assert result["failure_kind"] == "unsupported_engine_version"
+        assert result["dispatch_state"] == "not_started"
+        assert result["engine_version"].startswith("4.26.2")
+        assert result["safe_workflow"][-1].endswith(
+            "editor launch --map /Game/Maps/L_Target"
+        )
+        script = mock_run.call_args.args[1]
+        assert 'hasattr(unreal, "LevelEditorSubsystem")' in script
+        api.call_function.assert_not_called()
+
     def test_open_level_skips_dispatch_when_target_is_already_active(self):
         from cli_anything.unreal.core.scene import open_level
 
