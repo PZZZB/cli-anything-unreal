@@ -736,6 +736,21 @@ def _level_transition_recovered(api, path: str, original_error: dict, *, verify_
     }
 
 
+def _is_transport_timeout_result(result: dict) -> bool:
+    """Return whether an editor request timed out waiting for its response."""
+    if not isinstance(result, dict) or result.get("error_type"):
+        return False
+    text = " ".join(str(result.get(key, "")) for key in ("error", "traceback")).lower()
+    markers = (
+        "read timed out",
+        "read timeout",
+        "readtimeout",
+        "timed out",
+        "timeouterror",
+    )
+    return any(marker in text for marker in markers)
+
+
 def new_level(api, path: str, template: str | None = None, *, verify_timeout: float = 5.0) -> dict:
     """Create and open a new level via Remote Control.
 
@@ -795,7 +810,13 @@ def new_level(api, path: str, template: str | None = None, *, verify_timeout: fl
     }
 
 
-def open_level(api, path: str, *, verify_timeout: float = 5.0) -> dict:
+def open_level(
+    api,
+    path: str,
+    *,
+    timeout: float | None = None,
+    verify_timeout: float = 5.0,
+) -> dict:
     """Open an existing level via LevelEditorSubsystem.LoadLevel.
 
     This avoids running world-transition APIs from PythonScriptPlugin, which
@@ -857,14 +878,49 @@ def open_level(api, path: str, *, verify_timeout: float = 5.0) -> dict:
             ),
         }
 
+    request_options = {"timeout": timeout} if timeout is not None else {}
     result = api.call_function(
         _LEVEL_EDITOR_SUBSYSTEM,
         "LoadLevel",
         {"AssetPath": path},
+        **request_options,
     )
 
     if "error" in result:
         recovered = _level_transition_recovered(api, path, result, verify_timeout=verify_timeout)
+        if recovered and recovered.get("status") == "ok":
+            return recovered
+        if _is_transport_timeout_result(result):
+            effective_timeout = timeout
+            if effective_timeout is None:
+                effective_timeout = getattr(api, "timeout", None)
+            timeout_label = (
+                f" after {effective_timeout:g} seconds"
+                if isinstance(effective_timeout, (int, float))
+                else ""
+            )
+            timeout_result = dict(recovered or {})
+            timeout_result.update({
+                "status": "failed",
+                "success": False,
+                "code": "EDITOR_OPEN_LEVEL_TIMEOUT",
+                "path": path,
+                "error": (
+                    f"Level transition timed out{timeout_label}; completion remains unknown."
+                ),
+                "failure_kind": "transport_timeout",
+                "dispatch_state": "sent_completion_unknown",
+                "completion_state": "unknown",
+                "retry_safe": False,
+                "transition_error": result,
+                "suggestion": (
+                    "Do not retry or launch another editor while the existing process may still be loading. "
+                    "Wait, run editor status with a suitable --timeout, then verify the active world."
+                ),
+            })
+            if isinstance(effective_timeout, (int, float)):
+                timeout_result["timeout_seconds"] = effective_timeout
+            return timeout_result
         if recovered:
             return recovered
         return result

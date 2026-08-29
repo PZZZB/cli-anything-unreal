@@ -2081,13 +2081,57 @@ class TestScriptRunner:
             }
 
             result = runner.invoke(cli, [
-                "--output", "json", "editor", "open-level", "/Game/Test/L_Test",
+                "--output", "json", "editor", "open-level",
+                "/Game/Test/L_Test", "--timeout", "240",
             ])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["result"]["status"] == "ok"
-        mock_open_level.assert_called_once()
+        mock_open_level.assert_called_once_with(
+            mock_editor.return_value,
+            "/Game/Test/L_Test",
+            timeout=240,
+        )
+
+    def test_editor_open_level_timeout_is_top_level_unknown_error(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.open_level") as mock_open_level:
+            mock_editor.return_value = MagicMock()
+            mock_open_level.return_value = {
+                "status": "failed",
+                "success": False,
+                "code": "EDITOR_OPEN_LEVEL_TIMEOUT",
+                "path": "/Game/Test/L_Heavy",
+                "error": "Level transition timed out after 45 seconds; completion remains unknown.",
+                "failure_kind": "transport_timeout",
+                "dispatch_state": "sent_completion_unknown",
+                "completion_state": "unknown",
+                "retry_safe": False,
+                "timeout_seconds": 45,
+                "suggestion": "Do not retry while the existing process may still be loading.",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "open-level",
+                "/Game/Test/L_Heavy", "--timeout", "45",
+            ])
+
+        assert result.exit_code == 3
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_OPEN_LEVEL_TIMEOUT"
+        assert data["details"]["completion_state"] == "unknown"
+        assert data["details"]["retry_safe"] is False
+        assert "Do not retry" in data["suggestion"]
+        mock_open_level.assert_called_once_with(
+            mock_editor.return_value,
+            "/Game/Test/L_Heavy",
+            timeout=45,
+        )
 
     def test_editor_open_level_rejects_unrooted_name_before_contacting_editor(self):
         from click.testing import CliRunner

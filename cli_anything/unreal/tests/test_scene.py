@@ -554,7 +554,12 @@ class TestScene:
                 },
             ]
 
-            result = open_level(api, "/Game/Maps/L_Test", verify_timeout=0)
+            result = open_level(
+                api,
+                "/Game/Maps/L_Test",
+                timeout=90,
+                verify_timeout=0,
+            )
 
         assert result["status"] == "ok"
         assert result["success"] is True
@@ -563,6 +568,52 @@ class TestScene:
             "/Script/LevelEditor.Default__LevelEditorSubsystem",
             "LoadLevel",
             {"AssetPath": "/Game/Maps/L_Test"},
+            timeout=90,
+        )
+
+    def test_open_level_timeout_reports_unknown_completion(self):
+        from cli_anything.unreal.core.scene import open_level
+
+        api = self._mock_api()
+        timeout_error = {
+            "error": "HTTPConnectionPool: Read timed out. (read timeout=45)",
+        }
+        api.call_function.return_value = timeout_error
+        with patch("cli_anything.unreal.core.script_runner.run_python_code") as mock_run:
+            mock_run.side_effect = [
+                {
+                    "status": "ok",
+                    "target_package": "/Game/Maps/L_Heavy",
+                    "target_object_path": "/Game/Maps/L_Heavy.L_Heavy",
+                    "target_loaded": False,
+                    "target_class": None,
+                    "target_world_loaded": False,
+                    "active_world": {"package": "/Game/Maps/L_Source"},
+                },
+                timeout_error,
+            ]
+
+            result = open_level(
+                api,
+                "/Game/Maps/L_Heavy",
+                timeout=45,
+                verify_timeout=0,
+            )
+
+        assert result["code"] == "EDITOR_OPEN_LEVEL_TIMEOUT"
+        assert result["failure_kind"] == "transport_timeout"
+        assert result["dispatch_state"] == "sent_completion_unknown"
+        assert result["completion_state"] == "unknown"
+        assert result["retry_safe"] is False
+        assert result["timeout_seconds"] == 45
+        assert result["transition_error"] == timeout_error
+        assert result["active_world_verification"]["status"] == "failed"
+        assert "Do not retry" in result["suggestion"]
+        api.call_function.assert_called_once_with(
+            "/Script/LevelEditor.Default__LevelEditorSubsystem",
+            "LoadLevel",
+            {"AssetPath": "/Game/Maps/L_Heavy"},
+            timeout=45,
         )
 
     def test_open_level_blocks_loaded_non_active_world_before_dispatch(self):

@@ -3980,14 +3980,21 @@ def editor_new_level(state: AppState, level_path, template):
 
 @editor_group.command("open-level")
 @click.argument("level_path")
+@click.option(
+    "--timeout",
+    default=300,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Max seconds to wait for the synchronous LoadLevel request.",
+)
 @handle_error
 @click.pass_obj
-def editor_open_level(state: AppState, level_path):
+def editor_open_level(state: AppState, level_path, timeout):
     """Open an existing level using a rooted package path such as /Game/Maps/MyMap."""
     from cli_anything.unreal.core.scene import open_level
     level_path = _require_rooted_level_path(level_path)
     api = require_editor(state)
-    result = open_level(api, level_path)
+    result = open_level(api, level_path, timeout=timeout)
     if _is_transport_disconnect_result(result):
         _raise_editor_connection_lost(result, "editor open-level")
     if isinstance(result, dict) and (result.get("error") or result.get("status") == "failed"):
