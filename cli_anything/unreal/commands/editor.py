@@ -26,6 +26,7 @@ from cli_anything.unreal.commands import (
 )
 from cli_anything.unreal.core.tasks import (
     FINAL_TASK_STATUSES,
+    TaskDiscoveryTimeout,
     TaskLockTimeout,
     TaskWorkerSpawnError,
     cancel_task,
@@ -816,7 +817,7 @@ def _scan_editor_status_instances(
                     pid,
                     timeout=remaining_timeout("task_discovery"),
                 )
-            except TaskLockTimeout as exc:
+            except (TaskDiscoveryTimeout, TaskLockTimeout) as exc:
                 raise _editor_status_timeout_error(
                     state,
                     timeout,

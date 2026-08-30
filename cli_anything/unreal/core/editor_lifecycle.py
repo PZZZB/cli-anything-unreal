@@ -10,9 +10,10 @@ from pathlib import Path
 
 from cli_anything.unreal.core.tasks import (
     FINAL_TASK_STATUSES,
+    TaskDiscoveryTimeout,
     TaskLockTimeout,
-    iter_tasks,
-    load_task_snapshot,
+    iter_task_snapshots,
+    load_task,
 )
 
 
@@ -91,27 +92,51 @@ def _active_launch_task_for_project(
     if not project_path:
         return None
     now = time.time()
-    try:
-        tasks = iter_tasks(timeout=timeout)
-    except TaskLockTimeout as exc:
-        locked_snapshot = load_task_snapshot(exc.task_id)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def remaining_timeout(task_id: str | None = None) -> float | None:
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TaskDiscoveryTimeout(task_id, timeout)
+        return remaining
+
+    snapshots = iter_task_snapshots(timeout=remaining_timeout())
+    candidates = [
+        task
+        for task in snapshots
         if _is_active_launch_task_for_project(
-            locked_snapshot,
+            task,
             project_path,
             pid,
             now=now,
-        ):
-            task = dict(locked_snapshot)
+        )
+    ]
+    for snapshot in candidates:
+        task_id = snapshot.get("task_id")
+        if not task_id:
+            continue
+        try:
+            current = load_task(
+                task_id,
+                timeout=remaining_timeout(task_id),
+            )
+        except TaskLockTimeout as exc:
+            task = dict(snapshot)
             task["_task_state_snapshot"] = {
                 "source": "last_published_snapshot",
                 "task_id": exc.task_id,
                 "lock_timeout_seconds": exc.timeout,
             }
             return task
-        raise
-    for task in tasks:
-        if _is_active_launch_task_for_project(task, project_path, pid, now=now):
-            return task
+        if _is_active_launch_task_for_project(
+            current,
+            project_path,
+            pid,
+            now=now,
+        ):
+            return current
     return None
 
 def _summarize_startup_precheck(check: dict) -> dict:

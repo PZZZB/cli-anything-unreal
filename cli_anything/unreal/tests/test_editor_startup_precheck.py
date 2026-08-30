@@ -828,7 +828,7 @@ def test_root_status_retains_cached_launch_state_when_task_discovery_times_out(
          ]), \
          patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011), \
          patch(
-             "cli_anything.unreal.core.editor_lifecycle.iter_tasks",
+             "cli_anything.unreal.core.editor_lifecycle.load_task",
              side_effect=TaskLockTimeout(task["task_id"], 0.2),
          ):
         result = CliRunner().invoke(cli, [
@@ -852,13 +852,13 @@ def test_root_status_retains_cached_launch_state_when_task_discovery_times_out(
     assert "last published launch state was retained" in item["message"]
 
 
-def test_root_status_rejects_cached_launch_state_for_different_process(
+def test_root_status_ignores_launch_snapshot_for_different_process(
     mini_project,
     tmp_path,
     monkeypatch,
 ):
     from click.testing import CliRunner
-    from cli_anything.unreal.core.tasks import TaskLockTimeout, create_task, save_task
+    from cli_anything.unreal.core.tasks import create_task, save_task
     from cli_anything.unreal.unreal_cli import cli
 
     monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
@@ -873,12 +873,93 @@ def test_root_status_rejects_cached_launch_state_for_different_process(
          ]), \
          patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011), \
          patch(
-             "cli_anything.unreal.core.tasks.load_task_snapshot",
-             side_effect=AssertionError("deadline fallback rescanned unrelated task snapshots"),
-         ) as unrelated_snapshot_read, \
+             "cli_anything.unreal.core.editor_lifecycle.load_task",
+             side_effect=AssertionError("mismatched task must not be locked"),
+         ) as mismatched_task_read:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "status", "--timeout", "0.2",
+        ])
+
+    assert result.exit_code == 0, result.output
+    item = json.loads(result.output)["result"][0]
+    assert item["status"] == "unreachable"
+    assert "task_id" not in item
+    mismatched_task_read.assert_not_called()
+
+
+def test_root_status_skips_unrelated_locked_task_before_active_launch(
+    mini_project,
+    tmp_path,
+    monkeypatch,
+):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import TaskLockTimeout, create_task, save_task
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    unrelated = create_task("build.compile", {
+        "project_path": str(tmp_path / "Other.uproject"),
+    })
+    unrelated["status"] = "running"
+    save_task(unrelated)
+    launch = create_task("editor.launch", {
+        "project_path": mini_project,
+        "port": 30011,
+    })
+    launch["status"] = "running"
+    launch["phase"] = "waiting_remote_control"
+    launch["pid"] = 16044
+    save_task(launch)
+
+    def load_matching_task(task_id, timeout=None):
+        assert task_id == launch["task_id"]
+        return launch
+
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 16044, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011), \
          patch(
-             "cli_anything.unreal.core.editor_lifecycle.iter_tasks",
-             side_effect=TaskLockTimeout(task["task_id"], 0.2),
+             "cli_anything.unreal.core.tasks.load_task",
+             side_effect=TaskLockTimeout(unrelated["task_id"], 0.2),
+         ) as unrelated_task_read, \
+         patch(
+             "cli_anything.unreal.core.editor_lifecycle.load_task",
+             side_effect=load_matching_task,
+         ) as task_read:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "status", "--timeout", "0.2",
+        ])
+
+    assert result.exit_code == 0, result.output
+    item = json.loads(result.output)["result"][0]
+    assert item["status"] == "launching"
+    assert item["task_id"] == launch["task_id"]
+    unrelated_task_read.assert_not_called()
+    task_read.assert_called_once()
+
+
+def test_root_status_reports_snapshot_discovery_deadline(
+    mini_project,
+    tmp_path,
+    monkeypatch,
+):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import TaskDiscoveryTimeout
+    from cli_anything.unreal.unreal_cli import cli
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+         patch("cli_anything.unreal.utils.ue_backend.find_running_editors", return_value=[
+             {"pid": 16044, "project": mini_project},
+         ]), \
+         patch("cli_anything.unreal.utils.ue_backend.read_rc_port", return_value=30011), \
+         patch(
+             "cli_anything.unreal.core.editor_lifecycle.iter_task_snapshots",
+             side_effect=TaskDiscoveryTimeout("t-scan", 0.2),
          ):
         result = CliRunner().invoke(cli, [
             "--output", "json", "--project", mini_project,
@@ -889,8 +970,23 @@ def test_root_status_rejects_cached_launch_state_for_different_process(
     data = json.loads(result.output)
     assert data["code"] == "EDITOR_STATUS_TIMEOUT"
     assert data["details"]["blocking_phase"] == "task_discovery"
-    assert data["details"]["task_id"] == task["task_id"]
-    unrelated_snapshot_read.assert_not_called()
+    assert data["details"]["task_id"] == "t-scan"
+
+
+def test_task_snapshot_scan_honors_deadline(tmp_path, monkeypatch):
+    from cli_anything.unreal.core import tasks
+
+    monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+    task = tasks.create_task("editor.launch", {
+        "project_path": str(tmp_path / "Mini.uproject"),
+    })
+
+    with patch.object(tasks.time, "monotonic", side_effect=[100.0, 100.0, 100.3]):
+        with pytest.raises(tasks.TaskDiscoveryTimeout) as exc_info:
+            tasks.iter_task_snapshots(timeout=0.2)
+
+    assert exc_info.value.task_id == task["task_id"]
+    assert exc_info.value.timeout == 0.2
 
 
 def test_editor_status_scans_running_project_config_ports_outside_default_range(mini_project):

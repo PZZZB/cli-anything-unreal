@@ -53,6 +53,18 @@ class TaskLockTimeout(TimeoutError):
         )
 
 
+class TaskDiscoveryTimeout(TimeoutError):
+    """Raised when a bounded scan cannot read all published task snapshots."""
+
+    def __init__(self, task_id: str | None, timeout: float):
+        self.task_id = task_id
+        self.timeout = timeout
+        location = f" near {task_id}" if task_id else ""
+        super().__init__(
+            f"Timed out after {timeout:g}s scanning task snapshots{location}"
+        )
+
+
 class TaskWorkerSpawnError(RuntimeError):
     """Raised when no background task worker process can be created."""
 
@@ -500,11 +512,16 @@ def load_task_snapshot(task_id: str) -> dict | None:
         return None
 
 
-def iter_task_snapshots() -> list[dict]:
+def iter_task_snapshots(timeout: float | None = None) -> list[dict]:
     """Return last-published task snapshots without waiting for task locks."""
+    deadline = time.monotonic() + timeout if timeout is not None else None
     tasks = []
     for path in _task_root().glob("*.json"):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TaskDiscoveryTimeout(path.stem, timeout)
         task = load_task_snapshot(path.stem)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TaskDiscoveryTimeout(path.stem, timeout)
         if task is not None:
             tasks.append(task)
     tasks.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
