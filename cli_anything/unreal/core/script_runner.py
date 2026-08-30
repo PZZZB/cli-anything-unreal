@@ -34,6 +34,7 @@ Script convention
 from __future__ import annotations
 
 import json
+import uuid
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
@@ -69,6 +70,7 @@ _WRAPPER_TEMPLATE = '''\
 import json as _cli_json, traceback as _cli_tb, unreal as _cli_unreal
 import sys as _cli_sys, io as _cli_io
 
+{observation_begin_block}\
 _cli_error = None
 _cli_traceback = None
 _cli_captured_stdout = ""
@@ -157,6 +159,7 @@ for _cli_name in (
         del globals()[_cli_name]
     except Exception:
         pass
+{observation_end_block}\
 '''
 
 _ALL_DIRTY_SAVE_BLOCK = """\
@@ -223,6 +226,7 @@ def run_python_script(
     *,
     save_policy: SavePolicy | str | None = None,
     target_packages: Iterable[str] | None = None,
+    log_observation: bool = False,
 ) -> dict:
     """Execute a Python script file in the editor with automatic result capture.
 
@@ -262,6 +266,7 @@ def run_python_script(
         save_policy=save_policy,
         target_packages=target_packages,
         source_path=str(resolved_path),
+        log_observation=log_observation,
     )
 
 
@@ -274,6 +279,7 @@ def run_python_code(
     *,
     save_policy: SavePolicy | str | None = None,
     target_packages: Iterable[str] | None = None,
+    log_observation: bool = False,
 ) -> dict:
     """Execute a Python code string in the editor with automatic result capture.
 
@@ -306,6 +312,7 @@ def run_python_code(
         save=save,
         save_policy=save_policy,
         target_packages=target_packages,
+        log_observation=log_observation,
     )
 
 
@@ -320,6 +327,7 @@ def _execute(
     save_policy: SavePolicy | str | None = None,
     target_packages: Iterable[str] | None = None,
     source_path: str | None = None,
+    log_observation: bool = False,
 ) -> dict:
     """Core execution logic shared by *run_python_script* and *run_python_code*.
 
@@ -342,6 +350,27 @@ def _execute(
     resolved_save_policy = _resolve_save_policy(save=save, save_policy=save_policy)
     normalized_targets = _normalize_target_packages(target_packages)
     save_block = _build_save_block(resolved_save_policy, normalized_targets)
+    observation_begin = None
+    observation_end = None
+    observation_begin_block = ""
+    observation_end_block = ""
+    if log_observation:
+        observation_id = uuid.uuid4().hex
+        observation_begin = f"__ue_cli_run_script_begin__:{observation_id}"
+        observation_end = f"__ue_cli_run_script_end__:{observation_id}"
+        observation_begin_block = (
+            f"_cli_observation_begin = {json.dumps(observation_begin)}\n"
+            f"_cli_observation_end = {json.dumps(observation_end)}\n"
+            "_cli_unreal.log(_cli_observation_begin)\n"
+        )
+        observation_end_block = (
+            "_cli_unreal.log(_cli_observation_end)\n"
+            "try:\n"
+            "    del _cli_observation_begin\n"
+            "    del _cli_observation_end\n"
+            "except Exception:\n"
+            "    pass\n"
+        )
 
     wrapper = _WRAPPER_TEMPLATE.format(
         user_code_literal=json.dumps(code),
@@ -351,12 +380,21 @@ def _execute(
         script_dir_literal=repr(script_dir),
         save_block=save_block,
         marker=_RESULT_MARKER,
+        observation_begin_block=observation_begin_block,
+        observation_end_block=observation_end_block,
     )
 
     resp = api.exec_python_ex(wrapper, timeout=timeout)
 
     if "error" in resp:
-        return {"error": resp["error"]}
+        failure = {"error": resp["error"]}
+        if observation_begin and observation_end:
+            failure.update({
+                "_log_begin_marker": observation_begin,
+                "_log_end_marker": observation_end,
+                "_log_result_marker": _RESULT_MARKER,
+            })
+        return failure
 
     if not resp.get("ReturnValue", False):
         return {

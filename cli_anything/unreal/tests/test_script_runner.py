@@ -2013,6 +2013,134 @@ class TestScriptRunner:
         assert data["details"]["retry_timeout_seconds"] == 60
         assert "retry_command" not in data["details"]
 
+    def test_editor_run_script_timeout_returns_pollable_observation_task(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A begun timed-out script completes through log polling without replay."""
+        import re
+
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        task_dir = tmp_path / "tasks"
+        log_file = tmp_path / "Test574.log"
+        log_file.write_text("before\n", encoding="utf-8")
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(task_dir))
+        markers = {}
+
+        def fake_exec_python_ex(wrapper, *, timeout=None):
+            markers["begin"] = re.search(
+                r'_cli_observation_begin = "([^"]+)"',
+                wrapper,
+            ).group(1)
+            markers["end"] = re.search(
+                r'_cli_observation_end = "([^"]+)"',
+                wrapper,
+            ).group(1)
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"LogPython: {markers['begin']}\n")
+            return {
+                "error": "HTTPConnectionPool: Read timed out. (read timeout=1)",
+            }
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch(
+                 "cli_anything.unreal.commands.editor._resolve_editor_log_file",
+                 return_value=log_file,
+             ):
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.side_effect = fake_exec_python_ex
+            mock_editor.return_value = mock_api
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "run-script", "--timeout", "1",
+                "--no-save", "-",
+            ], input="result = {'done': True}\n")
+
+        assert result.exit_code == 4
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_SCRIPT_IN_PROGRESS"
+        assert data["details"]["delivery_state"] == "confirmed"
+        assert data["details"]["completion_state"] == "running"
+        task_id = data["details"]["task_id"]
+        assert data["details"]["next_command"] == f"ue-cli task status {task_id}"
+        assert data["details"]["phase"] == "executing"
+        assert mock_api.exec_python_ex.call_count == 1
+
+        cancel_result = runner.invoke(cli, ["task", "cancel", task_id])
+        assert cancel_result.exit_code == 4
+        assert json.loads(cancel_result.output)["code"] == "TASK_CANCEL_UNSUPPORTED"
+
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(
+                'LogPython: __cli_result__:{"stdout":"","done":true}\n'
+            )
+            handle.write(f"LogPython: {markers['end']}\n")
+
+        status_result = runner.invoke(cli, ["task", "status", task_id])
+        assert status_result.exit_code == 0
+        status = json.loads(status_result.output)
+        assert status["command"] == "editor.run-script"
+        assert status["status"] == "completed"
+        assert status["phase"] == "exited"
+        assert status["result"]["delivery_state"] == "confirmed"
+        assert status["result"]["completion_state"] == "completed"
+        assert status["result"]["source_kind"] == "stdin"
+        assert status["result"]["no_save"] is True
+        assert status["result"]["script_result"] == {
+            "stdout": "",
+            "done": True,
+        }
+        assert mock_api.exec_python_ex.call_count == 1
+
+    def test_editor_run_script_observation_reports_late_python_exception(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A caught exception after timeout becomes a terminal task failure."""
+        from cli_anything.unreal.core.editor_exec import (
+            create_editor_run_script_observation,
+        )
+        from cli_anything.unreal.core.tasks import reconcile_task_state
+
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(tmp_path / "tasks"))
+        log_file = tmp_path / "Test574.log"
+        begin = "__ue_cli_run_script_begin__:late_error"
+        end = "__ue_cli_run_script_end__:late_error"
+        log_file.write_text(f"LogPython: {begin}\n", encoding="utf-8")
+
+        task = create_editor_run_script_observation(
+            project_path=None,
+            log_file=log_file,
+            log_start=0,
+            begin_marker=begin,
+            end_marker=end,
+            result_marker="__cli_result__:",
+            source_kind="inline",
+            source_path=None,
+            no_save=True,
+        )
+        assert task["status"] == "running"
+
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(
+                'LogPython: __cli_result__:{"stdout":"","error":"sentinel",'
+                '"error_type":"RuntimeError","traceback":"RuntimeError: sentinel"}\n'
+            )
+            handle.write(f"LogPython: {end}\n")
+
+        terminal = reconcile_task_state(task["task_id"])
+        assert terminal["status"] == "failed"
+        assert terminal["phase"] == "exited"
+        assert terminal["error"] == {
+            "code": "SCRIPT_EXECUTION_FAILED",
+            "message": "sentinel",
+        }
+        assert terminal["result"]["script_result"]["error_type"] == "RuntimeError"
+
     def test_editor_run_script_file_timeout_includes_exact_retry_command(self, tmp_path):
         """File-backed timeouts should return a safe, copyable retry command."""
         from click.testing import CliRunner

@@ -147,9 +147,14 @@ ue-cli editor run-script query.py --no-save
 ```
 
 For long scripts that save or modify many assets, pass a larger `--timeout`
-(for example `--timeout 300`). `EDITOR_SCRIPT_TIMEOUT` means the CLI stopped
-waiting for the HTTP response; the editor completion state is unknown, so run
-`editor status` and inspect the project Output Log before retrying.
+(for example `--timeout 300`). If the project log is usable, a timeout returns
+a read-only observation `task_id`; poll `task status` or `task wait` without
+resending the script. `executing` means delivery is confirmed but Unreal's game
+thread is still inside the wrapper. Without a usable log, `EDITOR_SCRIPT_TIMEOUT`
+keeps completion unknown, so run `editor status` and inspect the Output Log.
+`--no-save` only disables ue-cli's post-script save. Script calls and Unreal APIs
+can still save; `EditorLevelLibrary.new_level('/Temp/Name')`, for example, may
+write `Saved/Name.umap`.
 
 ### Safe Static Mesh UV Access
 

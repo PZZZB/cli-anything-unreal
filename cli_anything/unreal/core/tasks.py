@@ -17,6 +17,11 @@ from pathlib import Path
 FINAL_TASK_STATUSES = {"completed", "failed", "timeout", "cancelled"}
 BUILD_TASK_COMMANDS = {"build.compile", "build.cook", "build.package"}
 EDITOR_EXEC_TASK_COMMAND = "editor.exec"
+EDITOR_RUN_SCRIPT_TASK_COMMAND = "editor.run-script"
+EDITOR_OBSERVATION_TASK_COMMANDS = {
+    EDITOR_EXEC_TASK_COMMAND,
+    EDITOR_RUN_SCRIPT_TASK_COMMAND,
+}
 EDITOR_LAUNCH_SPAWN_GRACE_SECONDS = 30
 _WINDOWS_TASK_IO_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
 _WINDOWS_PROCESS_IDENTITY_QUERY_TIMEOUT_SECONDS = 3
@@ -772,12 +777,12 @@ def _probe_task_process(task: dict, role: str) -> dict:
 def reconcile_task_state(task_id: str) -> dict | None:
     """Reconcile supported persisted tasks from process or log evidence."""
     task = load_task(task_id)
-    if task is not None and task.get("command") == EDITOR_EXEC_TASK_COMMAND:
+    if task is not None and task.get("command") in EDITOR_OBSERVATION_TASK_COMMANDS:
         from cli_anything.unreal.core.editor_exec import (
-            reconcile_editor_exec_observation,
+            reconcile_editor_observation,
         )
 
-        return reconcile_editor_exec_observation(task_id, task)
+        return reconcile_editor_observation(task_id, task)
     if (
         task is None
         or task.get("command") not in BUILD_TASK_COMMANDS
@@ -1196,7 +1201,7 @@ def wait_for_task(task_id: str, timeout: int | None) -> dict | None:
                         task.get("command") in BUILD_TASK_COMMANDS
                         and task.get("worker_pid")
                     )
-                    or task.get("command") == EDITOR_EXEC_TASK_COMMAND
+                    or task.get("command") in EDITOR_OBSERVATION_TASK_COMMANDS
                 )
                 and task.get("status") not in FINAL_TASK_STATUSES
             ):
@@ -1226,7 +1231,7 @@ def cancel_task(task_id: str) -> dict | None:
 
     command = task.get("command")
     payload = task.get("payload", {})
-    if command == EDITOR_EXEC_TASK_COMMAND:
+    if command in EDITOR_OBSERVATION_TASK_COMMANDS:
         task = dict(task)
         task["error"] = {
             "code": "TASK_CANCEL_UNSUPPORTED",

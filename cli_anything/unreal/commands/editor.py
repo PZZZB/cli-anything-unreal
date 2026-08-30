@@ -3334,15 +3334,49 @@ def _raise_editor_script_timeout(
     *,
     retry_timeout: int,
     retry_command: str | None,
+    observation_task: dict | None = None,
 ) -> None:
     details = dict(result)
     details["failure_kind"] = "transport_timeout"
     details["operation"] = operation
     details["timeout_seconds"] = timeout
-    details["completion_state"] = "unknown"
+    observed_result = dict((observation_task or {}).get("result") or {})
+    details["delivery_state"] = observed_result.get("delivery_state", "unknown")
+    details["completion_state"] = observed_result.get("completion_state", "unknown")
     details["retry_timeout_seconds"] = retry_timeout
     if retry_command:
         details["retry_command"] = retry_command
+
+    if observation_task:
+        task_id = observation_task["task_id"]
+        details.update({
+            "task_id": task_id,
+            "task_status": observation_task.get("status"),
+            "phase": observation_task.get("phase"),
+            "next_command": f"ue-cli task status {task_id}",
+            "wait_command": f"ue-cli task wait {task_id} --timeout {max(timeout, 60)}",
+            "suggested_poll_interval_seconds": observation_task.get(
+                "suggested_poll_interval_seconds",
+                5,
+            ),
+            "log_file": observed_result.get("log_file"),
+        })
+
+    if (
+        observation_task
+        and details["delivery_state"] == "confirmed"
+        and details["completion_state"] == "running"
+    ):
+        raise AppError(
+            "EDITOR_SCRIPT_IN_PROGRESS",
+            "Editor script delivery is confirmed and execution is still running.",
+            exit_code=4,
+            details=details,
+            suggestion=(
+                f"Poll `{details['next_command']}` or wait with `{details['wait_command']}`. "
+                "Do not resend the script while this observation remains non-terminal."
+            ),
+        )
 
     retry_guidance = (
         f"After verifying it is safe to repeat, retry with: {retry_command}"
@@ -3358,8 +3392,12 @@ def _raise_editor_script_timeout(
         exit_code=3,
         details=details,
         suggestion=(
-            "Run editor status and inspect the project Output Log because the previous script may still "
-            f"complete in-editor after the HTTP timeout. {retry_guidance}"
+            (
+                f"Poll `{details['next_command']}` without redispatching the script."
+                if observation_task
+                else "Run editor status and inspect the project Output Log because the previous script may still "
+                f"complete in-editor after the HTTP timeout. {retry_guidance}"
+            )
         ),
     )
 
@@ -3597,6 +3635,11 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
             _raise_unsafe_run_script_operation(unsafe)
 
     api = require_editor(state)
+    log_file = _resolve_editor_log_file(state)
+    try:
+        log_start = log_file.stat().st_size if log_file else 0
+    except OSError:
+        log_start = 0
     from cli_anything.unreal.core.editor_lifecycle import (
         capture_editor_disconnect_context,
         close_editor_disconnect_context,
@@ -3611,6 +3654,7 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
                 project_dir=state.session.project_dir,
                 timeout=timeout,
                 save=not no_save,
+                log_observation=True,
             )
         else:
             result = run_python_script(
@@ -3618,7 +3662,11 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
                 project_dir=state.session.project_dir,
                 timeout=timeout,
                 save=not no_save,
+                log_observation=True,
             )
+        log_begin_marker = result.pop("_log_begin_marker", None) if isinstance(result, dict) else None
+        log_end_marker = result.pop("_log_end_marker", None) if isinstance(result, dict) else None
+        log_result_marker = result.pop("_log_result_marker", None) if isinstance(result, dict) else None
         if isinstance(result, dict) and result.get("error"):
             if _is_transport_disconnect_result(result):
                 diagnostics = collect_editor_disconnect_diagnostics(disconnect_context)
@@ -3635,12 +3683,64 @@ def editor_run_script(state: AppState, script_path, code, timeout, no_save):
                     timeout=retry_timeout,
                     no_save=no_save,
                 )
+                observation_task = None
+                if log_begin_marker and log_end_marker and log_result_marker and log_file:
+                    from cli_anything.unreal.core.editor_exec import (
+                        create_editor_run_script_observation,
+                    )
+
+                    source_kind = (
+                        "inline"
+                        if code is not None
+                        else "stdin"
+                        if stdin_code is not None
+                        else "file"
+                    )
+                    source_path = (
+                        str(Path(script_path).resolve())
+                        if source_kind == "file" and script_path
+                        else None
+                    )
+                    observation_task = create_editor_run_script_observation(
+                        project_path=state.session.project_path,
+                        log_file=log_file,
+                        log_start=log_start,
+                        begin_marker=log_begin_marker,
+                        end_marker=log_end_marker,
+                        result_marker=log_result_marker,
+                        source_kind=source_kind,
+                        source_path=source_path,
+                        no_save=no_save,
+                    )
+                    if observation_task.get("status") == "completed":
+                        observed = dict(observation_task.get("result") or {})
+                        script_result = dict(observed.get("script_result") or {})
+                        script_result.update({
+                            "task_id": observation_task["task_id"],
+                            "capture_mode": "editor_log_file",
+                            "transport_timeout_recovered": True,
+                            "timeout_seconds": timeout,
+                        })
+                        output(script_result, state)
+                        return
+                    if observation_task.get("status") == "failed":
+                        task_error = dict(observation_task.get("error") or {})
+                        raise AppError(
+                            str(task_error.get("code") or "SCRIPT_EXECUTION_FAILED"),
+                            str(task_error.get("message") or "Editor script failed after its HTTP response timed out."),
+                            exit_code=3,
+                            details=task_progress(observation_task),
+                            suggestion=(
+                                "Fix the captured script error before retrying; the script was not redispatched."
+                            ),
+                        )
                 _raise_editor_script_timeout(
                     result,
                     "editor run-script",
                     timeout,
                     retry_timeout=retry_timeout,
                     retry_command=retry_command,
+                    observation_task=observation_task,
                 )
             raise AppError(
                 "SCRIPT_EXECUTION_FAILED",
