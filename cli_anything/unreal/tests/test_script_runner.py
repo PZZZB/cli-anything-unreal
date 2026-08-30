@@ -2766,6 +2766,130 @@ result = {'status': 'live_editor_ok'}
         mock_api.exec_python_ex.assert_called_once()
         mock_api.exec_console.assert_not_called()
 
+    def test_editor_exec_timeout_returns_pollable_observation_task(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A begun timed-out command gets a task that completes from log markers."""
+        import re
+
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        task_dir = tmp_path / "tasks"
+        log_file = tmp_path / "Test574.log"
+        log_file.write_text("before\n", encoding="utf-8")
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(task_dir))
+        markers = {}
+
+        def fake_exec_python_ex(script, *, timeout=None):
+            markers["begin"] = re.search(r'_begin = "([^"]+)"', script).group(1)
+            markers["end"] = re.search(r'_end = "([^"]+)"', script).group(1)
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"LogPython: {markers['begin']}\n")
+            return {
+                "error": "HTTPConnectionPool: Read timed out. (read timeout=1)",
+            }
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch(
+                 "cli_anything.unreal.commands.editor._resolve_editor_log_file",
+                 return_value=log_file,
+             ):
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.side_effect = fake_exec_python_ex
+            mock_editor.return_value = mock_api
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "--timeout", "1",
+                "MutationCommand",
+            ])
+
+        assert result.exit_code == 4
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_EXEC_IN_PROGRESS"
+        assert data["details"]["delivery_state"] == "confirmed"
+        assert data["details"]["completion_state"] == "running"
+        task_id = data["details"]["task_id"]
+        assert data["details"]["next_command"] == f"ue-cli task status {task_id}"
+        mock_api.exec_python_ex.assert_called_once()
+        mock_api.exec_console.assert_not_called()
+
+        cancel_result = runner.invoke(cli, ["task", "cancel", task_id])
+        assert cancel_result.exit_code == 4
+        assert json.loads(cancel_result.output)["code"] == "TASK_CANCEL_UNSUPPORTED"
+
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write("LogTemp: command finished\n")
+            handle.write(f"LogPython: {markers['end']}\n")
+
+        status_result = runner.invoke(cli, ["task", "status", task_id])
+        assert status_result.exit_code == 0
+        status = json.loads(status_result.output)
+        assert status["status"] == "completed"
+        assert status["result"]["delivery_state"] == "confirmed"
+        assert status["result"]["completion_state"] == "completed"
+        assert "command finished" in status["result"]["log_text"]
+        assert "error" not in status
+
+    def test_editor_exec_observation_reports_late_python_exception(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A Python exception after transport timeout becomes a terminal task failure."""
+        import re
+
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        task_dir = tmp_path / "tasks"
+        log_file = tmp_path / "Test574.log"
+        log_file.write_text("before\n", encoding="utf-8")
+        monkeypatch.setenv("UE_CLI_TASK_DIR", str(task_dir))
+        markers = {}
+
+        def fake_exec_python_ex(script, *, timeout=None):
+            markers["begin"] = re.search(r'_begin = "([^"]+)"', script).group(1)
+            markers["end"] = re.search(r'_end = "([^"]+)"', script).group(1)
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"LogPython: {markers['begin']}\n")
+            return {
+                "error": "HTTPConnectionPool: Read timed out. (read timeout=1)",
+            }
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch(
+                 "cli_anything.unreal.commands.editor._resolve_editor_log_file",
+                 return_value=log_file,
+             ):
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.side_effect = fake_exec_python_ex
+            mock_editor.return_value = mock_api
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "--timeout", "1",
+                "py D:/RXGame/Content/Python/long_scene.py",
+            ])
+
+        assert result.exit_code == 4
+        task_id = json.loads(result.output)["details"]["task_id"]
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write("LogPython: Error: RuntimeError: sentinel\n")
+            handle.write(f"LogPython: {markers['end']}\n")
+
+        status_result = runner.invoke(cli, ["task", "status", task_id])
+        assert status_result.exit_code == 0
+        status = json.loads(status_result.output)
+        assert status["status"] == "failed"
+        assert status["error"]["code"] == "PYTHON_EXEC_FAILED"
+        assert "RuntimeError: sentinel" in status["result"]["python_error"]
+
+        wait_result = runner.invoke(cli, ["task", "wait", task_id, "--timeout", "1"])
+        assert wait_result.exit_code == 3
+        assert json.loads(wait_result.output)["status"] == "failed"
+
     def test_editor_exec_does_not_retry_after_python_dispatch_failure(self):
         """A failed Python wrapper may have partial effects and must not be resent."""
         from click.testing import CliRunner

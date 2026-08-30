@@ -2488,7 +2488,12 @@ finally:
 """
     result = api.exec_python_ex(script, timeout=timeout)
     if result.get("error") or result.get("ReturnValue") is False:
-        return {"error": result.get("error") or "Python console execution failed", "raw": result}
+        return {
+            "error": result.get("error") or "Python console execution failed",
+            "raw": result,
+            "_log_begin_marker": begin,
+            "_log_end_marker": end,
+        }
 
     captured: list[dict] = []
     inside = False
@@ -2590,30 +2595,69 @@ def _raise_editor_exec_failure(
     *,
     dispatch_mode: str,
     fallback_attempted: bool,
+    observation_task: dict | None = None,
 ) -> None:
     """Report failed or ambiguous dispatch without repeating the command."""
     request_failure = _editor_exec_request_failure(result)
     delivery_unknown = request_failure is not None
+    observed_result = dict((observation_task or {}).get("result") or {})
+    delivery_state = observed_result.get("delivery_state") or (
+        "unknown" if delivery_unknown else "attempted"
+    )
+    completion_state = observed_result.get("completion_state") or (
+        "unknown" if delivery_unknown else "failed"
+    )
     details = {
-        "status": "unknown" if delivery_unknown else "failed",
+        "status": (
+            str(observation_task.get("status"))
+            if observation_task
+            else ("unknown" if delivery_unknown else "failed")
+        ),
         "command": command,
         "dispatch_mode": dispatch_mode,
-        "delivery_state": "unknown" if delivery_unknown else "attempted",
+        "delivery_state": delivery_state,
+        "completion_state": completion_state,
         "fallback_attempted": fallback_attempted,
         "timeout_seconds": timeout,
         "error": result.get("error") or "Console command execution failed",
     }
     if request_failure:
         details["request_error"] = request_failure
+    if observation_task:
+        task_id = observation_task["task_id"]
+        details.update({
+            "task_id": task_id,
+            "task_status": observation_task.get("status"),
+            "next_command": f"ue-cli task status {task_id}",
+            "wait_command": f"ue-cli task wait {task_id} --timeout {max(timeout, 60)}",
+            "suggested_poll_interval_seconds": observation_task.get(
+                "suggested_poll_interval_seconds",
+                5,
+            ),
+        })
 
     if delivery_unknown:
+        if delivery_state == "confirmed" and completion_state == "running":
+            raise AppError(
+                "EDITOR_EXEC_IN_PROGRESS",
+                "Editor command delivery is confirmed and execution is still running.",
+                exit_code=4,
+                suggestion=(
+                    f"Poll `{details['next_command']}`. Do not resend the command."
+                ),
+                details=details,
+            )
         raise AppError(
             "EDITOR_EXEC_DELIVERY_UNKNOWN",
             "Editor command delivery or completion is unknown; ue-cli did not retry it.",
             exit_code=3,
             suggestion=(
-                "Inspect the editor state and project log before deciding whether to retry. "
-                "The command may already have run, especially if it is non-idempotent."
+                (
+                    f"Poll `{details['next_command']}` without redispatching the command."
+                    if observation_task
+                    else "Inspect the editor state and project log before deciding whether to retry. "
+                    "The command may already have run, especially if it is non-idempotent."
+                )
             ),
             details=details,
         )
@@ -2927,7 +2971,8 @@ def editor_live_coding_compile(state: AppState, timeout: int, log_wait: float):
 @click.option(
     "--timeout",
     default=15,
-    type=int,
+    show_default=True,
+    type=click.IntRange(min=1),
     help="Max seconds to wait for synchronous command dispatch and captured output.",
 )
 @click.option(
@@ -2968,16 +3013,63 @@ def editor_exec(state: AppState, timeout, log_wait, command):
     log_begin_marker = result.pop("_log_begin_marker", None)
     log_end_marker = result.pop("_log_end_marker", None)
     if result.get("error"):
-        log_begin_marker = None
-        log_end_marker = None
         if not _can_safely_fallback_editor_exec(result):
+            observation_task = None
+            if (
+                _editor_exec_request_failure(result)
+                and log_begin_marker
+                and log_end_marker
+                and log_file
+            ):
+                from cli_anything.unreal.core.editor_exec import (
+                    create_editor_exec_observation,
+                )
+
+                observation_task = create_editor_exec_observation(
+                    command=command,
+                    project_path=state.session.project_path,
+                    log_file=log_file,
+                    log_start=log_start,
+                    begin_marker=log_begin_marker,
+                    end_marker=log_end_marker,
+                )
+                if observation_task.get("status") == "completed":
+                    observed = dict(observation_task.get("result") or {})
+                    observed.update({
+                        "task_id": observation_task["task_id"],
+                        "capture_mode": "editor_log_file",
+                        "transport_timeout_recovered": True,
+                        "timeout_seconds": timeout,
+                    })
+                    output(observed, state)
+                    return
+                if observation_task.get("status") == "failed":
+                    observed = dict(observation_task.get("result") or {})
+                    observed["task_id"] = observation_task["task_id"]
+                    task_error = observation_task.get("error") or {}
+                    raise AppError(
+                        str(task_error.get("code") or "EDITOR_EXEC_FAILED"),
+                        str(
+                            task_error.get("message")
+                            or "Editor command failed after its transport response timed out."
+                        ),
+                        exit_code=3,
+                        suggestion=(
+                            "Fix the captured command error before retrying; the command "
+                            "was not redispatched."
+                        ),
+                        details=observed,
+                    )
             _raise_editor_exec_failure(
                 result,
                 command,
                 timeout,
                 dispatch_mode="python_log_output",
                 fallback_attempted=False,
+                observation_task=observation_task,
             )
+        log_begin_marker = None
+        log_end_marker = None
         result = api.exec_console(command, timeout=timeout)
         if not isinstance(result, dict):
             result = {"raw": result}

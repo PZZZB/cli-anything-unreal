@@ -557,6 +557,14 @@ def task_cancel_cmd(task_id):
         raise SystemExit(3)
     progress = task_progress(task)
     error = progress.get("error", {})
+    if error.get("code") == "TASK_CANCEL_UNSUPPORTED":
+        emit_json(error_payload(
+            "TASK_CANCEL_UNSUPPORTED",
+            error.get("message", "Task cancellation is unsupported."),
+            suggestion=f"Poll without redispatching: ue-cli task status {task_id}",
+            details=progress,
+        ))
+        raise SystemExit(4)
     if error.get("code") == "TASK_CANCEL_FAILED":
         emit_json(error_payload(
             "TASK_CANCEL_FAILED",
