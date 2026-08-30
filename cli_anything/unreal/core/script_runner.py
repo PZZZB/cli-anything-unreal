@@ -75,6 +75,11 @@ _cli_captured_stdout = ""
 _cli_old_stdout = _cli_sys.stdout
 _cli_string_io = _cli_io.StringIO()
 _cli_sys.stdout = _cli_string_io
+_cli_script_dir = {script_dir_literal}
+if _cli_script_dir is not None:
+    _cli_old_sys_path = _cli_sys.path
+    _cli_old_sys_path_contents = list(_cli_old_sys_path)
+    _cli_sys.path.insert(0, _cli_script_dir)
 
 try:
     {user_ns_name} = {{"__builtins__": __builtins__}}
@@ -89,6 +94,9 @@ except Exception as _cli_exc:
 finally:
     _cli_sys.stdout = _cli_old_stdout
     _cli_captured_stdout = _cli_string_io.getvalue()
+    if _cli_script_dir is not None:
+        _cli_old_sys_path[:] = _cli_old_sys_path_contents
+        _cli_sys.path = _cli_old_sys_path
 
 _cli_result = {{"stdout": _cli_captured_stdout}}
 if _cli_error is not None:
@@ -134,6 +142,9 @@ for _cli_name in (
     "_cli_captured_stdout",
     "_cli_string_io",
     "_cli_old_stdout",
+    "_cli_old_sys_path",
+    "_cli_old_sys_path_contents",
+    "_cli_script_dir",
     "_cli_operation_result",
     "_cli_saved_packages",
     "_cli_eal",
@@ -319,12 +330,14 @@ def _execute(
     """
     execution_context = {}
     source_name = "<cli_anything_user_code>"
+    script_dir = None
     if source_path is not None:
         execution_context = {
             "__name__": "__main__",
             "__file__": source_path,
         }
         source_name = source_path
+        script_dir = str(Path(source_path).parent)
 
     resolved_save_policy = _resolve_save_policy(save=save, save_policy=save_policy)
     normalized_targets = _normalize_target_packages(target_packages)
@@ -335,6 +348,7 @@ def _execute(
         user_ns_name=_USER_NS_NAME,
         execution_context_literal=json.dumps(execution_context),
         source_name_literal=json.dumps(source_name),
+        script_dir_literal=repr(script_dir),
         save_block=save_block,
         marker=_RESULT_MARKER,
     )

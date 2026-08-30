@@ -113,6 +113,66 @@ class TestScriptRunner:
 
         assert str(script.resolve()) in result["traceback"]
 
+    def test_run_python_script_supports_sibling_import_and_restores_sys_path(self, tmp_path):
+        """File scripts temporarily use their directory as ``sys.path[0]``."""
+        import sys
+
+        from cli_anything.unreal.core.script_runner import run_python_script
+
+        module_name = "ue_cli_issue172_sibling"
+        sibling = tmp_path / f"{module_name}.py"
+        sibling.write_text("VALUE = 172\n", encoding="utf-8")
+        script = tmp_path / "main.py"
+        script.write_text(
+            "import sys\n"
+            f"import {module_name}\n"
+            "result = {\n"
+            "    'script_dir': sys.path[0],\n"
+            f"    'sibling_value': {module_name}.VALUE,\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        mock_api = MagicMock()
+        self._make_exec_python_ex_mock(mock_api)
+        original_sys_path = sys.path
+        original_sys_path_contents = list(sys.path)
+
+        try:
+            result = run_python_script(mock_api, str(script), timeout=5, save=False)
+        finally:
+            sys.modules.pop(module_name, None)
+
+        assert result["script_dir"] == str(tmp_path.resolve())
+        assert result["sibling_value"] == 172
+        assert sys.path is original_sys_path
+        assert sys.path == original_sys_path_contents
+
+    def test_run_python_script_restores_sys_path_after_exception(self, tmp_path):
+        """Failed file scripts cannot leak their temporary import directory."""
+        import sys
+
+        from cli_anything.unreal.core.script_runner import run_python_script
+
+        script = tmp_path / "broken.py"
+        script.write_text(
+            "import sys\n"
+            "sys.path = ['replaced-by-user-script']\n"
+            "raise RuntimeError('broken')\n",
+            encoding="utf-8",
+        )
+
+        mock_api = MagicMock()
+        self._make_exec_python_ex_mock(mock_api)
+        original_sys_path = sys.path
+        original_sys_path_contents = list(sys.path)
+
+        result = run_python_script(mock_api, str(script), timeout=5, save=False)
+
+        assert result["error"] == "broken"
+        assert sys.path is original_sys_path
+        assert sys.path == original_sys_path_contents
+
     def test_run_python_code_captures_result(self):
         """``run_python_code`` with inline code and a result variable."""
         from cli_anything.unreal.core.script_runner import run_python_code
