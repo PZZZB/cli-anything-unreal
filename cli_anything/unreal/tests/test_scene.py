@@ -762,6 +762,101 @@ class TestScene:
         assert result["expected_package"] == "/Game/Maps/L_Test"
         assert result["active_world"]["package"] == "/Temp/Untitled_3"
 
+    def test_new_blank_level_creates_verified_transient_world(self):
+        from cli_anything.unreal.core.scene import new_blank_level
+
+        api = self._mock_api()
+        api.call_function.side_effect = [
+            {"OutDirtyPackages": []},
+            {"ReturnValue": "/Temp/Untitled_4.Untitled"},
+        ]
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value={
+                "status": "ok",
+                "package": "/Temp/Untitled_4",
+                "world": "/Temp/Untitled_4.Untitled",
+            },
+        ):
+            result = new_blank_level(api, timeout=45, verify_timeout=0)
+
+        assert result["status"] == "ok"
+        assert result["world"] == "/Temp/Untitled_4.Untitled"
+        assert result["package"] == "/Temp/Untitled_4"
+        assert result["transient"] is True
+        assert result["saved"] is False
+        assert "run-script --no-save" in result["next_command"]
+        api.call_function.assert_any_call(
+            "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils",
+            "NewBlankMap",
+            {"bSaveExistingMap": False},
+            timeout=45,
+        )
+
+    def test_new_blank_level_blocks_dirty_map_without_explicit_discard(self):
+        from cli_anything.unreal.core.scene import new_blank_level
+
+        api = self._mock_api()
+        api.call_function.return_value = {
+            "OutDirtyPackages": [
+                {"ObjectPath": "/Game/Maps/L_Work.L_Work"},
+                "/Temp/Untitled_2",
+            ],
+        }
+
+        result = new_blank_level(api)
+
+        assert result["code"] == "EDITOR_NEW_BLANK_LEVEL_DIRTY_MAPS"
+        assert result["dispatch_state"] == "blocked_dirty"
+        assert result["dirty_map_packages"] == [
+            "/Game/Maps/L_Work.L_Work",
+            "/Temp/Untitled_2",
+        ]
+        assert api.call_function.call_count == 1
+
+    def test_new_blank_level_explicitly_discards_reported_dirty_map(self):
+        from cli_anything.unreal.core.scene import new_blank_level
+
+        api = self._mock_api()
+        api.call_function.side_effect = [
+            {"OutDirtyPackages": ["/Temp/Untitled_2"]},
+            {"ReturnValue": "/Temp/Untitled_3.Untitled"},
+        ]
+        with patch(
+            "cli_anything.unreal.core.script_runner.run_python_code",
+            return_value={
+                "status": "ok",
+                "package": "/Temp/Untitled_3",
+                "world": "/Temp/Untitled_3.Untitled",
+            },
+        ):
+            result = new_blank_level(api, discard_dirty_map=True, verify_timeout=0)
+
+        assert result["status"] == "ok"
+        assert result["discarded_dirty_map_packages"] == ["/Temp/Untitled_2"]
+
+    def test_new_blank_level_timeout_preserves_unknown_completion(self):
+        from cli_anything.unreal.core.scene import new_blank_level
+
+        api = self._mock_api()
+        api.call_function.side_effect = [
+            {"OutDirtyPackages": []},
+            {
+                "error": (
+                    "HTTPConnectionPool(host='localhost', port=30021): "
+                    "Read timed out. (read timeout=15)"
+                ),
+            },
+        ]
+
+        result = new_blank_level(api, timeout=15)
+
+        assert result["code"] == "EDITOR_NEW_BLANK_LEVEL_TIMEOUT"
+        assert result["dispatch_state"] == "sent_completion_unknown"
+        assert result["completion_state"] == "unknown"
+        assert result["retry_safe"] is False
+        assert result["timeout_seconds"] == 15
+
     def test_new_level_recovers_when_transition_resets_connection_but_level_opens(self):
         from cli_anything.unreal.core.scene import new_level
 

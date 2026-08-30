@@ -131,6 +131,16 @@ COMMAND_SPECS = [
         ],
     },
     {
+        "name": "editor new-blank-level",
+        "description": "Create an unsaved transient blank level without Unreal Python world references.",
+        "async_supported": False,
+        "estimated_duration": "5-30s",
+        "parameters": [
+            {"name": "--discard-dirty-map", "required": False},
+            {"name": "--timeout", "required": False},
+        ],
+    },
+    {
         "name": "editor open-level",
         "description": "Open an existing level via LevelEditorSubsystem.",
         "async_supported": False,

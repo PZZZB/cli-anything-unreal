@@ -624,6 +624,7 @@ else:
     return run_python_code(api, script, save=False)
 
 _LEVEL_EDITOR_SUBSYSTEM = "/Script/LevelEditor.Default__LevelEditorSubsystem"
+_EDITOR_LOADING_AND_SAVING_UTILS = "/Script/UnrealEd.Default__EditorLoadingAndSavingUtils"
 
 
 def _level_package_path(path: str) -> str:
@@ -751,6 +752,169 @@ def _is_transport_timeout_result(result: dict) -> bool:
         "timeouterror",
     )
     return any(marker in text for marker in markers)
+
+
+def _remote_object_paths(value: object) -> list[str] | None:
+    """Normalize Remote Control UObject arrays without contacting PythonScriptPlugin."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    paths = []
+    for item in value:
+        if isinstance(item, dict):
+            item = next(
+                (
+                    item.get(key)
+                    for key in (
+                        "ObjectPath",
+                        "objectPath",
+                        "PathName",
+                        "path_name",
+                        "Name",
+                        "name",
+                    )
+                    if item.get(key)
+                ),
+                item,
+            )
+        paths.append(str(item))
+    return paths
+
+
+def _dirty_map_packages(api) -> dict:
+    """Read dirty map packages through native Remote Control reflection."""
+    response = api.call_function(
+        _EDITOR_LOADING_AND_SAVING_UTILS,
+        "GetDirtyMapPackages",
+        {},
+    )
+    if not isinstance(response, dict) or response.get("error") or response.get("errorMessage"):
+        return {
+            "status": "failed",
+            "error": "Could not inspect dirty map packages before creating a transient level.",
+            "response": response,
+        }
+    for key, value in response.items():
+        if str(key).replace("_", "").casefold() in {"outdirtypackages", "returnvalue"}:
+            paths = _remote_object_paths(value)
+            if paths is not None:
+                return {"status": "ok", "map_packages": paths, "response": response}
+    return {
+        "status": "failed",
+        "error": "GetDirtyMapPackages did not return a verifiable package list.",
+        "response": response,
+    }
+
+
+def new_blank_level(
+    api,
+    *,
+    discard_dirty_map: bool = False,
+    timeout: float | None = None,
+    verify_timeout: float = 5.0,
+) -> dict:
+    """Create an unsaved transient blank level without Unreal Python world references."""
+    dirty = _dirty_map_packages(api)
+    if dirty.get("status") != "ok":
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_NEW_BLANK_LEVEL_SAFETY_CHECK_FAILED",
+            "error": dirty.get("error"),
+            "dispatch_state": "not_started",
+            "dirty_map_check": dirty,
+            "suggestion": "Retry only after Remote Control can verify the editor's dirty map state.",
+        }
+
+    dirty_maps = dirty.get("map_packages") or []
+    if dirty_maps and not discard_dirty_map:
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_NEW_BLANK_LEVEL_DIRTY_MAPS",
+            "error": "Creating a transient blank level would discard unsaved map changes.",
+            "failure_kind": "unsaved_map_changes",
+            "dispatch_state": "blocked_dirty",
+            "dirty_map_packages": dirty_maps,
+            "suggestion": (
+                "Save the current level first, or pass --discard-dirty-map only when losing "
+                "the reported map changes is intentional."
+            ),
+        }
+
+    request_options = {"timeout": timeout} if timeout is not None else {}
+    result = api.call_function(
+        _EDITOR_LOADING_AND_SAVING_UTILS,
+        "NewBlankMap",
+        {"bSaveExistingMap": False},
+        **request_options,
+    )
+    if not isinstance(result, dict):
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_NEW_BLANK_LEVEL_FAILED",
+            "error": "NewBlankMap returned an unrecognized response.",
+            "response": result,
+        }
+    if result.get("error") or result.get("errorMessage"):
+        if _is_transport_timeout_result(result):
+            timeout_result = {
+                "status": "failed",
+                "success": False,
+                "code": "EDITOR_NEW_BLANK_LEVEL_TIMEOUT",
+                "error": "Transient blank-level transition timed out; completion remains unknown.",
+                "failure_kind": "transport_timeout",
+                "dispatch_state": "sent_completion_unknown",
+                "completion_state": "unknown",
+                "retry_safe": False,
+                "transition_error": result,
+                "suggestion": (
+                    "Do not retry while the existing editor may still be changing worlds. "
+                    "Wait, run editor status, then inspect the active world with editor run-script."
+                ),
+            }
+            if isinstance(timeout, (int, float)):
+                timeout_result["timeout_seconds"] = timeout
+            return timeout_result
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_NEW_BLANK_LEVEL_FAILED",
+            "error": result.get("error") or result.get("errorMessage"),
+            "transition_error": result,
+        }
+
+    world_path = result.get("ReturnValue")
+    if not isinstance(world_path, str) or not world_path.startswith("/Temp/"):
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_NEW_BLANK_LEVEL_FAILED",
+            "error": "NewBlankMap did not return a transient World path.",
+            "response": result,
+        }
+
+    verification = _verify_current_level(api, world_path, verify_timeout=verify_timeout)
+    if verification.get("status") != "ok":
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_NEW_BLANK_LEVEL_FAILED",
+            "error": "Active editor world did not match the new transient blank level.",
+            "world": world_path,
+            "active_world_verification": verification,
+        }
+    return {
+        "status": "ok",
+        "success": True,
+        "world": world_path,
+        "package": _level_package_path(world_path),
+        "transient": True,
+        "saved": False,
+        "discarded_dirty_map_packages": dirty_maps,
+        "active_world": verification.get("active_world"),
+        "next_command": "ue-cli --project <Project.uproject> editor run-script --no-save <script.py>",
+    }
 
 
 def new_level(api, path: str, template: str | None = None, *, verify_timeout: float = 5.0) -> dict:

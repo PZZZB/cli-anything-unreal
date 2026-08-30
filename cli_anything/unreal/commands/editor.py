@@ -3405,7 +3405,7 @@ def _raise_editor_script_timeout(
 def _raise_level_command_failed(result: dict, operation: str, code: str) -> None:
     resolved_code = str(result.get("code") or code)
     expected_rejection = (
-        result.get("dispatch_state") == "blocked_unsafe"
+        result.get("dispatch_state") in {"blocked_unsafe", "blocked_dirty"}
         or result.get("failure_kind") == "unsupported_engine_version"
     )
     exit_code = 2 if expected_rejection else 3
@@ -3438,6 +3438,11 @@ def _unsafe_run_script_operation(code: str) -> dict | None:
                 "ue-cli --project <Project.uproject> editor save-level",
             ],
         }
+        if operation == "EditorLoadingAndSavingUtils.new_blank_map":
+            details["safe_workflow"] = [
+                "ue-cli --project <Project.uproject> editor new-blank-level",
+                "ue-cli --project <Project.uproject> editor run-script --no-save <actor_setup.py>",
+            ]
         if operation == "EditorLevelLibrary.load_level":
             details["duplicate_world_workflow"] = [
                 "ue-cli --project <Project.uproject> editor run-script <duplicate_and_save_only.py>",
@@ -3558,6 +3563,11 @@ def _raise_unsafe_run_script_operation(unsafe: dict) -> None:
             "For an ordinary transition, use editor open-level outside run-script. If the script duplicated "
             "the active World, duplicate and save it without loading it, run editor close, then start a fresh "
             "editor with editor launch --map before continuing setup."
+        )
+    elif unsafe["operation"] == "EditorLoadingAndSavingUtils.new_blank_map":
+        suggestion = (
+            "Use editor new-blank-level outside run-script, then run the setup script separately. "
+            "The next run-script automatically uses the active transient editor world."
         )
     raise AppError(
         "UNSAFE_RUN_SCRIPT_OPERATION",
@@ -4171,6 +4181,42 @@ def editor_new_level(state: AppState, level_path, template):
         _raise_editor_connection_lost(result, "editor new-level")
     if isinstance(result, dict) and (result.get("error") or result.get("status") == "failed"):
         _raise_level_command_failed(result, "editor new-level", "EDITOR_NEW_LEVEL_FAILED")
+    output(result, state)
+
+
+@editor_group.command("new-blank-level")
+@click.option(
+    "--discard-dirty-map",
+    is_flag=True,
+    default=False,
+    help="Allow unsaved map changes to be discarded during the transition.",
+)
+@click.option(
+    "--timeout",
+    default=120,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Max seconds to wait for the synchronous NewBlankMap request.",
+)
+@handle_error
+@click.pass_obj
+def editor_new_blank_level(state: AppState, discard_dirty_map, timeout):
+    """Create and open an unsaved transient blank level."""
+    from cli_anything.unreal.core.scene import new_blank_level
+    api = require_editor(state)
+    result = new_blank_level(
+        api,
+        discard_dirty_map=discard_dirty_map,
+        timeout=timeout,
+    )
+    if _is_transport_disconnect_result(result):
+        _raise_editor_connection_lost(result, "editor new-blank-level")
+    if isinstance(result, dict) and (result.get("error") or result.get("status") == "failed"):
+        _raise_level_command_failed(
+            result,
+            "editor new-blank-level",
+            "EDITOR_NEW_BLANK_LEVEL_FAILED",
+        )
     output(result, state)
 
 

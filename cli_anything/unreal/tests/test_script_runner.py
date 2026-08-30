@@ -2209,6 +2209,67 @@ class TestScriptRunner:
         assert data["details"]["failure_kind"] == "transport_disconnect"
         assert data["details"]["operation"] == "editor new-level"
 
+    def test_editor_new_blank_level_forwards_explicit_discard_and_timeout(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.new_blank_level") as mock_new_blank:
+            mock_editor.return_value = MagicMock()
+            mock_new_blank.return_value = {
+                "status": "ok",
+                "success": True,
+                "world": "/Temp/Untitled_2.Untitled",
+                "package": "/Temp/Untitled_2",
+                "transient": True,
+                "saved": False,
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "new-blank-level",
+                "--discard-dirty-map", "--timeout", "45",
+            ])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["result"]["transient"] is True
+        assert data["result"]["saved"] is False
+        mock_new_blank.assert_called_once_with(
+            mock_editor.return_value,
+            discard_dirty_map=True,
+            timeout=45,
+        )
+
+    def test_editor_new_blank_level_dirty_map_is_structured_rejection(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor, \
+             patch("cli_anything.unreal.core.scene.new_blank_level") as mock_new_blank:
+            mock_editor.return_value = MagicMock()
+            mock_new_blank.return_value = {
+                "status": "failed",
+                "success": False,
+                "code": "EDITOR_NEW_BLANK_LEVEL_DIRTY_MAPS",
+                "error": "Creating a transient blank level would discard unsaved map changes.",
+                "failure_kind": "unsaved_map_changes",
+                "dispatch_state": "blocked_dirty",
+                "dirty_map_packages": ["/Game/Maps/L_Work"],
+                "suggestion": "Save the current level first.",
+            }
+
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "new-blank-level",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_NEW_BLANK_LEVEL_DIRTY_MAPS"
+        assert data["details"]["dispatch_state"] == "blocked_dirty"
+        assert data["details"]["dirty_map_packages"] == ["/Game/Maps/L_Work"]
+
     def test_editor_save_level_connection_reset_is_top_level_error(self):
         """Level save transport disconnects should not be wrapped as success."""
         from click.testing import CliRunner
@@ -2555,7 +2616,7 @@ result = {'status': 'live_editor_ok'}
         assert data["status"] == "error"
         assert data["code"] == "UNSAFE_RUN_SCRIPT_OPERATION"
         assert "new_blank_map" in data["message"]
-        assert "editor new-level" in data["suggestion"]
+        assert "editor new-blank-level" in data["suggestion"]
         mock_editor.assert_not_called()
         mock_run.assert_not_called()
 
@@ -2579,7 +2640,7 @@ result = {'status': 'live_editor_ok'}
         assert result.exit_code == 2
         data = json.loads(result.output)
         assert data["code"] == "UNSAFE_RUN_SCRIPT_OPERATION"
-        assert "editor new-level" in data["suggestion"]
+        assert "editor new-blank-level" in data["suggestion"]
         mock_editor.assert_not_called()
 
     def test_editor_run_script_blocks_new_blank_map_inline_exec_file(self, tmp_path):

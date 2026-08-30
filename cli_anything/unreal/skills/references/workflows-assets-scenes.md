@@ -215,6 +215,10 @@ result = {"status": "ok", "actor": actor.get_path_name()}
 # Create and open a new level
 ue-cli editor new-level /Game/Maps/NewLevel
 
+# Create an unsaved transient blank level, then bind setup to the active world
+ue-cli editor new-blank-level
+ue-cli editor run-script --no-save transient_setup.py
+
 # Open an existing level
 ue-cli editor open-level /Game/Maps/ExistingLevel
 
@@ -224,4 +228,4 @@ ue-cli editor save-level
 
 Existing level path -> command refuses to avoid modal. Use `asset delete` first or choose different path.
 
-**Known limitation:** creating/loading levels inside `editor run-script` can crash due retained Python or project subsystem UObject refs (`World Memory Leaks` assert / connection reset). `editor run-script` blocks known top-level transitions, including `EditorLevelLibrary.load_level`. Use `editor new-level` or `editor open-level` for ordinary transitions. `editor open-level` also blocks `LoadLevel` when its target World is already loaded but not active, a state commonly left by `asset duplicate`. Save the duplicate without loading it, close the editor, then use `editor launch --map /Game/Path/Level` for a fresh lifetime before continuing setup.
+**Known limitation:** creating/loading levels inside `editor run-script` can crash due retained Python or project subsystem UObject refs (`World Memory Leaks` assert / connection reset). `editor run-script` blocks known top-level transitions, including `EditorLevelLibrary.load_level`. Use `editor new-blank-level` for an unsaved transient world, `editor new-level` for a persistent level asset, or `editor open-level` for an existing asset. A separate run-script automatically uses the active transient world. `editor new-blank-level` rejects dirty maps unless `--discard-dirty-map` explicitly authorizes loss. `editor open-level` also blocks `LoadLevel` when its target World is already loaded but not active, a state commonly left by `asset duplicate`. Save the duplicate without loading it, close the editor, then use `editor launch --map /Game/Path/Level` for a fresh lifetime before continuing setup.
