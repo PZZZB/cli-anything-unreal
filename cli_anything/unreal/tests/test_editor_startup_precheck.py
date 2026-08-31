@@ -4,7 +4,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -2440,6 +2440,31 @@ def test_editor_launch_rejects_nullrhi_before_submitting_task(mini_project):
     mock_running.assert_not_called()
 
 
+def test_editor_launch_no_remote_allows_nullrhi_and_marks_payload(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["command"] = command
+        captured["payload"] = payload
+        return {"task_id": "task-direct", "status": "submitted"}
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--no-remote", "--extra-arg=-NullRHI",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["command"] == "editor.launch"
+    assert captured["payload"]["no_remote"] is True
+    assert captured["payload"]["port"] is None
+    assert captured["payload"]["extra_args"] == ["-NullRHI"]
+
+
 def test_editor_launch_extra_args_propagate_to_payload(mini_project):
     """--extra-arg values must be persisted into the task payload so the worker forwards them."""
     from click.testing import CliRunner
@@ -2470,6 +2495,7 @@ def test_editor_launch_extra_args_propagate_to_payload(mini_project):
     assert captured["command"] == "editor.launch"
     assert captured["payload"]["extra_args"] == ["-vulkan", "-ResX=1280", "-ResY=720"]
     assert captured["payload"]["unattended"] is False
+    assert captured["payload"]["no_remote"] is False
 
 
 def test_editor_launch_unattended_propagates_to_payload(mini_project):
@@ -4392,6 +4418,94 @@ def test_run_editor_launch_task_does_not_deploy_ue4_bridge_before_preflight_fail
     mock_deploy.assert_not_called()
     mock_prepare_remote.assert_not_called()
     assert result["status"] == "failed"
+
+
+def test_run_editor_launch_task_no_remote_starts_when_only_automation_is_unavailable(tmp_path):
+    import subprocess
+
+    from cli_anything.unreal.core.tasks import _run_editor_launch_task, create_task
+
+    project_dir = tmp_path / "UE5DirectLaunch"
+    project_dir.mkdir()
+    uproject = project_dir / "UE5DirectLaunch.uproject"
+    uproject.write_text('{"FileVersion": 3, "EngineAssociation": "5.7"}', encoding="utf-8")
+    task = create_task("editor.launch", {
+        "project_path": str(uproject),
+        "port": None,
+        "map_path": "/Game/Maps/Main",
+        "timeout": 300,
+        "extra_args": ["-NullRHI"],
+        "no_remote": True,
+    })
+    exited_task = create_task("editor.launch", dict(task["payload"]))
+    proc = MagicMock()
+    proc.pid = 4242
+    proc.wait.side_effect = subprocess.TimeoutExpired(["UnrealEditor.exe"], 2.0)
+    exited_proc = MagicMock()
+    exited_proc.pid = 4343
+    exited_proc.wait.return_value = 7
+    preflight = {
+        "ready": False,
+        "engine": {"ready": True, "errors": [], "warnings": []},
+        "project": {"ready": True, "errors": [], "warnings": []},
+        "remote_control": {
+            "configured": False,
+            "plugin_loadable": {"available": False},
+            "fix_result": {"error": "RemoteControl plugin is not available/loadable for this engine."},
+        },
+        "bridge_plugin": {
+            "ready": False,
+            "issues": [
+                "CliAnythingBridge plugin source is not deployed",
+                "CliAnythingBridge plugin not enabled in .uproject",
+            ],
+        },
+    }
+
+    with patch("cli_anything.unreal.utils.ue_backend.find_engine_root", return_value="F:/MockUE5"), \
+         patch("cli_anything.unreal.utils.ue_backend.get_editor_binary_prefix", return_value="UnrealEditor"), \
+         patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value=preflight), \
+         patch("cli_anything.unreal.utils.ue_backend.find_editor_exe", return_value="F:/MockUE5/Binaries/UnrealEditor.exe"), \
+         patch("cli_anything.unreal.core.editor_lifecycle._check_already_running", return_value=None), \
+         patch("cli_anything.unreal.utils.ue_backend.ensure_remote_control_config") as mock_prepare_remote, \
+         patch("cli_anything.unreal.utils.ue_backend._write_rc_port") as mock_write_port, \
+         patch("cli_anything.unreal.core.editor_lifecycle._deploy_bridge") as mock_deploy, \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api") as mock_wait_api, \
+         patch("cli_anything.unreal.core.tasks._capture_windows_process_identity", return_value=None), \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", side_effect=[proc, exited_proc]) as mock_popen:
+        result = _run_editor_launch_task(task, estimated_total_seconds=120)
+        exited_result = _run_editor_launch_task(exited_task, estimated_total_seconds=120)
+
+    assert result["status"] == "completed"
+    assert result["phase"] == "launched"
+    assert result["result"]["status"] == "launched"
+    assert result["result"]["automation_mode"] == "not_requested"
+    assert result["result"]["remote_control_verified"] is False
+    assert result["result"]["bridge_deployment_attempted"] is False
+    assert result["result"]["editor_readiness_verified"] is False
+    assert result["result"]["map_requested"] == "/Game/Maps/Main"
+    assert result["result"]["map_verified"] is False
+    assert result["result"]["startup_precheck"]["ready"] is True
+    assert "RemoteControl plugin is not available/loadable for this engine." in result["result"]["startup_precheck"]["ignored_automation_issues"]
+    assert exited_result["status"] == "failed"
+    assert exited_result["phase"] == "exited"
+    assert exited_result["error"]["code"] == "EDITOR_DIRECT_LAUNCH_EXITED"
+    assert exited_result["result"]["process_alive"] is False
+    assert exited_result["result"]["returncode"] == 7
+    assert mock_popen.call_args_list[0] == call([
+        "F:/MockUE5/Binaries/UnrealEditor.exe",
+        str(uproject),
+        "/Game/Maps/Main",
+        "-nosplash",
+        "-NullRHI",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    assert mock_popen.call_count == 2
+    proc.wait.assert_called_once_with(timeout=2.0)
+    exited_proc.wait.assert_called_once_with(timeout=2.0)
+    mock_prepare_remote.assert_not_called()
+    mock_write_port.assert_not_called()
+    mock_deploy.assert_not_called()
+    mock_wait_api.assert_not_called()
 
 
 def test_run_editor_launch_task_fails_on_compile_error(tmp_path):

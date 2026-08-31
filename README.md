@@ -7,7 +7,7 @@
 - Python 3.10+
 - Git, required by the GitHub install command below
 - Unreal Engine 4.26 or 5.x and a `.uproject`
-- Loadable Epic `RemoteControl`, `PythonScriptPlugin`, and `EditorScriptingUtilities` engine plugins; `editor launch` enables and configures them for the selected project
+- Loadable Epic `RemoteControl`, `PythonScriptPlugin`, and `EditorScriptingUtilities` engine plugins for controlled commands; `editor launch` enables and configures them for the selected project unless `--no-remote` is explicit
 - Windows for the supported end-to-end workflow; editor discovery, launch, and UAT/UBT integration currently use Windows-specific paths and tools
 
 A coding agent is optional. Every command can also be run manually.
@@ -73,6 +73,8 @@ First launch may:
 
 For a source engine whose required Epic automation plugin has source but no Editor DLLs, launch stays read-only at the unsafe step and returns `remote_control_recovery`. Run its exact PowerShell `build_command`, then `setup_command`, then retry the original launch. The generated UBT command uses `-Plugin=` so the disabled source plugin can be compiled before ue-cli enables it.
 
+When only a basic UnrealEditor process is needed, `editor launch --no-remote` explicitly skips Remote Control config, plugin enablement, bridge deployment, bridge compilation, port checks, and API readiness. It still requires engine/project preflight to pass, preserves existing same-project editors, and verifies that the spawned process remains alive for a short bounded observation. Success is `status=launched`, not `online`; `editor_readiness_verified=false` and `map_verified=false` stay explicit. Close this unautomated editor in its UI, or use `editor close --force` only when discarding editor state is authorized. `-NullRHI` is allowed only with this direct mode because no WebRemoteControl endpoint is expected.
+
 Commit or back up the project before first launch if these project-file changes need review.
 
 `editor launch` returns `online` when ready. Slow startup may return a `launching` payload with a `task_id`; poll that task:
@@ -111,7 +113,7 @@ ue-cli --output json --project "$Project" confirmation disable
 
 The Agent queries explicitly; no background listener is created. Editor-dependent commands return `EDITOR_BLOCKED_BY_CONFIRMATION` with a `next_command` when a standard brokered dialog is pending, including when the current request triggers it and otherwise would time out. `EDITOR_BLOCKED_BY_DIALOG` reports a detected startup/custom window that cannot be answered by CLI. Only `source=bridge`, `answerable=true` items accept `confirmation answer`. When discarding editor state is explicitly authorized, `editor close --force` can terminate verified processes matching the selected project even while such a non-brokered startup window is open; it never clicks the window. The bounded lease must exist before the dialog; expiry or `disable` returns unresolved standard dialogs to normal editor UI. Never auto-click **Restore Packages**.
 
-Controlled launch requires WebRemoteControl, which Unreal does not start under `-NullRHI`. `editor launch` rejects that extra argument before creating a task or starting UnrealEditor. When launch receives `--extra-arg=-abslog=PATH`, task status and startup diagnostics report and inspect that explicit log file.
+Controlled launch requires WebRemoteControl, which Unreal does not start under `-NullRHI`. `editor launch` rejects that extra argument before creating a task or starting UnrealEditor; explicit `--no-remote` direct launch allows it. When launch receives `--extra-arg=-abslog=PATH`, task status and startup diagnostics report and inspect that explicit log file.
 
 If startup reports a missing registered virtual shader source or Windows `STATUS_ENTRYPOINT_NOT_FOUND`, `editor launch` returns `EDITOR_ENGINE_BINARY_SOURCE_MISMATCH` or `EDITOR_ENGINE_BINARY_ENTRYPOINT_MISMATCH`. These signatures can follow a custom Engine branch switch that leaves stale or mixed DLLs. Use the returned `recovery_command` to compile the full Editor target without `--module`, then retry launch.
 

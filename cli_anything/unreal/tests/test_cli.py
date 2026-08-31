@@ -102,8 +102,9 @@ class TestCLI:
         result = CliRunner().invoke(cli, ["editor", "start", "--help"])
 
         assert result.exit_code == 0, result.output
-        assert "Launch the controlled editor." in result.output
+        assert "Launch the editor, controlled by default." in result.output
         assert "--no-wait" in result.output
+        assert "--no-remote" in result.output
 
         command_list = CliRunner().invoke(cli, ["--list-commands"])
         assert command_list.exit_code == 0, command_list.output

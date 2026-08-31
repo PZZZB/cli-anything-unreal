@@ -1839,6 +1839,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         _plugin_load_failure_diagnostics,
         _remote_control_launch_error,
         _resolve_launch_log_file,
+        _summarize_direct_launch_precheck,
         _summarize_startup_precheck,
         _wait_for_api,
     )
@@ -1853,6 +1854,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     payload = task["payload"]
     task_id = task["task_id"]
+    no_remote = bool(payload.get("no_remote", False))
     session = Session()
     session.load_project(payload["project_path"])
     state = SimpleNamespace(json_output=True, session=session)
@@ -1864,8 +1866,8 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         expected_statuses={"submitted", "running"},
         status="running",
         phase="preflight",
-        requested_port=state.session.port,
-        resolved_port=state.session.port,
+        requested_port=None if no_remote else state.session.port,
+        resolved_port=None if no_remote else state.session.port,
     ) or task
     if task.get("status") != "running":
         return task
@@ -1891,7 +1893,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             },
         ) or task
 
-    launch_error = _remote_control_launch_error(payload.get("extra_args"))
+    launch_error = None if no_remote else _remote_control_launch_error(payload.get("extra_args"))
     if launch_error:
         return transition_task(
             task_id,
@@ -1908,7 +1910,13 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
 
     preflight = preflight_check(state.session.project_path, state.session.engine_root)
     remote_control = preflight.get("remote_control", {})
-    if remote_control.get("configured", False):
+    if no_remote:
+        remote_control_prepare = {
+            "status": "not_attempted",
+            "changes": [],
+            "reason": "no_remote_requested",
+        }
+    elif remote_control.get("configured", False):
         remote_control_prepare = {
             "status": "not_needed",
             "changes": [],
@@ -1945,8 +1953,12 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         )
         preflight = preflight_check(state.session.project_path, state.session.engine_root)
 
-    startup_precheck = _summarize_startup_precheck(preflight)
-    if not preflight.get("ready"):
+    startup_precheck = (
+        _summarize_direct_launch_precheck(preflight)
+        if no_remote
+        else _summarize_startup_precheck(preflight)
+    )
+    if not startup_precheck.get("ready"):
         return transition_task(
             task_id,
             status="failed",
@@ -1997,6 +2009,139 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
                 },
             },
             result_patch=dup_result,
+        ) or task
+
+    if no_remote:
+        task = transition_task(
+            task_id,
+            status="running",
+            phase="spawning",
+            estimated_total_seconds=2,
+        ) or task
+        if task.get("status") != "running":
+            return task
+
+        cmd = _build_launch_cmd(
+            editor_exe,
+            state.session.project_path,
+            payload.get("map_path"),
+            payload.get("extra_args"),
+            unattended=bool(payload.get("unattended", False)),
+        )
+        log_file = _resolve_launch_log_file(
+            state.session.project_dir,
+            state.session.project_name,
+            payload.get("extra_args"),
+        )
+        if _task_cancel_requested(task_id):
+            return transition_task(
+                task_id,
+                status="cancelled",
+                phase="exited",
+                error=None,
+                cancelled=True,
+            ) or task
+
+        proc = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+        process_identity = _capture_windows_process_identity(proc.pid)
+        direct_result = {
+            "status": "starting",
+            "pid": proc.pid,
+            "project": state.session.project_name,
+            "editor_exe": editor_exe,
+            "log_file": str(log_file),
+            "startup_precheck": startup_precheck,
+            "remote_control_prepare": remote_control_prepare,
+            "automation_mode": "not_requested",
+            "remote_control_requested": False,
+            "remote_control_verified": False,
+            "bridge_deployment_attempted": False,
+            "editor_readiness_verified": False,
+            "map_requested": payload.get("map_path"),
+            "map_verified": False,
+            "delivery_state": "accepted",
+        }
+        identity_fields = {}
+        if process_identity:
+            identity_fields["editor_process_identity"] = process_identity
+        task = transition_task(
+            task_id,
+            status="running",
+            phase="verifying_process_start",
+            result_patch=direct_result,
+            pid=proc.pid,
+            log_file=str(log_file),
+            estimated_total_seconds=2,
+            **identity_fields,
+        ) or task
+        cancelled_task = _cancel_spawned_editor_if_requested(
+            task_id,
+            task,
+            proc,
+            process_identity,
+        )
+        if cancelled_task is not None:
+            return cancelled_task
+
+        timeout_value = payload.get("timeout")
+        try:
+            observation_seconds = min(2.0, max(0.1, float(timeout_value)))
+        except (TypeError, ValueError):
+            observation_seconds = 2.0
+        try:
+            returncode = proc.wait(timeout=observation_seconds)
+        except sp.TimeoutExpired:
+            cancelled_task = _cancel_spawned_editor_if_requested(
+                task_id,
+                task,
+                proc,
+                process_identity,
+            )
+            if cancelled_task is not None:
+                return cancelled_task
+            direct_result.update({
+                "status": "launched",
+                "process_alive": True,
+                "process_observation_seconds": observation_seconds,
+                "message": (
+                    "UnrealEditor process started without Remote Control preparation. "
+                    "Editor readiness and requested map were not remotely verified."
+                ),
+            })
+            return transition_task(
+                task_id,
+                status="completed",
+                phase="launched",
+                result_patch=direct_result,
+                error=None,
+                log_file=str(log_file),
+            ) or task
+
+        cancelled_task = _cancel_spawned_editor_if_requested(
+            task_id,
+            task,
+            proc,
+            process_identity,
+        )
+        if cancelled_task is not None:
+            return cancelled_task
+        direct_result.update({
+            "status": "exited",
+            "process_alive": False,
+            "returncode": returncode,
+            "process_observation_seconds": observation_seconds,
+        })
+        return transition_task(
+            task_id,
+            status="failed",
+            phase="exited",
+            result_patch=direct_result,
+            error={
+                "code": "EDITOR_DIRECT_LAUNCH_EXITED",
+                "message": "UnrealEditor exited before direct process-start verification completed.",
+                "details": direct_result,
+            },
+            log_file=str(log_file),
         ) or task
 
     port_result = _check_port_in_use(state.session.port, state)

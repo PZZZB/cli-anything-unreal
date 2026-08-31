@@ -166,6 +166,27 @@ def _summarize_startup_precheck(check: dict) -> dict:
         result["remote_control_recovery"] = recovery
     return result
 
+def _summarize_direct_launch_precheck(check: dict) -> dict:
+    """Keep engine/project blockers while recording skipped automation checks."""
+    engine = check.get("engine", {})
+    project = check.get("project", {})
+    controlled = _summarize_startup_precheck(check)
+    errors = list(engine.get("errors", [])) + list(project.get("errors", []))
+    warnings = list(engine.get("warnings", [])) + list(project.get("warnings", []))
+    ignored_automation_issues = [
+        item
+        for item in controlled.get("errors", []) + controlled.get("warnings", [])
+        if item not in errors and item not in warnings
+    ]
+    return {
+        "ready": bool(engine.get("ready", False) and project.get("ready", False)),
+        "errors": errors,
+        "warnings": warnings,
+        "automation_mode": "not_requested",
+        "ignored_automation_issues": ignored_automation_issues,
+    }
+
+
 def _same_project_path(left: str | None, right: str | None) -> bool:
     if not left or not right:
         return False

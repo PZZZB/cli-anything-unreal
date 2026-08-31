@@ -2029,6 +2029,12 @@ from cli_anything.unreal.core.editor_lifecycle import (  # noqa: E402
     default=False,
     help="Launch without interactive dialogs. Default: interactive editor.",
 )
+@click.option(
+    "--no-remote",
+    is_flag=True,
+    default=False,
+    help="Start UnrealEditor without Remote Control or CliAnythingBridge preparation/verification.",
+)
 @handle_error
 @click.pass_obj
 def editor_launch(
@@ -2039,18 +2045,20 @@ def editor_launch(
     timeout,
     extra_args,
     unattended,
+    no_remote,
 ):
-    """Launch the controlled editor.
+    """Launch the editor, controlled by default.
 
     May update .uproject, DefaultRemoteControl.ini (UE5),
     DefaultWebRemoteControl.ini (UE4), and project CliAnythingBridge files
-    when editor integration needs preparation.
+    when editor integration needs preparation. --no-remote explicitly skips
+    those automation changes and verifies only that the editor process starts.
     """
     _load_command_project(state, project_path)
     require_project(state)
     map_path = _normalize_launch_map_path(map_path, state.session.project_dir)
     extra_args = list(extra_args) if extra_args else []
-    launch_error = _remote_control_launch_error(extra_args)
+    launch_error = None if no_remote else _remote_control_launch_error(extra_args)
     if launch_error:
         raise AppError(
             launch_error["code"],
@@ -2083,11 +2091,12 @@ def editor_launch(
 
     payload = {
         "project_path": state.session.project_path,
-        "port": state.session.port,
+        "port": None if no_remote else state.session.port,
         "map_path": map_path,
         "timeout": worker_timeout,
         "extra_args": extra_args,
         "unattended": unattended,
+        "no_remote": no_remote,
     }
     try:
         task = submit_task("editor.launch", payload)
