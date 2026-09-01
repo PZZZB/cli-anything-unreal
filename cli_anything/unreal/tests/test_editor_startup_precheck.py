@@ -274,6 +274,49 @@ def test_editor_status_offline_ignores_other_project_processes(mini_project):
     assert data["result"] == []
 
 
+def test_editor_status_project_filter_skips_unrelated_cook_workers(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.core.tasks import TaskDiscoveryTimeout
+    from cli_anything.unreal.unreal_cli import cli
+
+    other_project = str(Path(mini_project).with_name("Other.uproject"))
+    cook_workers = [
+        {
+            "pid": 6000 + index,
+            "project": other_project,
+            "cmdline": (
+                f'UnrealEditor-Cmd.exe "{other_project}" '
+                f"-run=cook -cookworker -CookWorkerId={index}"
+            ),
+        }
+        for index in range(4)
+    ]
+
+    def exhaust_deadline_on_unrelated_tasks(timeout=None):
+        time.sleep(min(0.05, float(timeout or 0.05)))
+        raise TaskDiscoveryTimeout("t-unrelated-cook", timeout)
+
+    with patch("cli_anything.unreal.utils.ue_http_api.scan_editor_ports", return_value=[]), \
+         patch(
+             "cli_anything.unreal.utils.ue_backend.find_running_editors",
+             return_value=cook_workers,
+         ), \
+         patch(
+             "cli_anything.unreal.core.editor_lifecycle.iter_task_snapshots",
+             side_effect=exhaust_deadline_on_unrelated_tasks,
+         ) as snapshot_scan:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "editor", "status",
+            "--project", mini_project,
+            "--timeout", "0.2",
+        ])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["result"] == []
+    snapshot_scan.assert_not_called()
+
+
 def test_editor_status_accepts_project_option_after_subcommand(mini_project):
     from click.testing import CliRunner
     from cli_anything.unreal.unreal_cli import cli

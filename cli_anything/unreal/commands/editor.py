@@ -633,6 +633,7 @@ def _scan_editor_status_instances(
     scan_range: str,
     *,
     include_bridge_status: bool = True,
+    project_filter: str | None = None,
     timeout: float | None = None,
 ) -> list[dict]:
     from cli_anything.unreal.utils.ue_backend import find_running_editors
@@ -662,6 +663,11 @@ def _scan_editor_status_instances(
         remaining_timeout("process_discovery")
     else:
         running = []
+    if project_filter:
+        running = [
+            proc for proc in running
+            if _same_project_path(proc.get("project"), project_filter)
+        ]
     proc_config_port_by_pid: dict[int, int] = {}
     for proc in running:
         proc_port = _project_config_port(proc.get("project") or None)
@@ -860,6 +866,7 @@ def _scan_editor_status_instances(
         instances.append(entry)
 
     instances = _deduplicate_editor_status_instances(instances)
+    instances = _filter_editor_status_instances(instances, project_filter)
     if include_bridge_status and any(
         entry.get("status") == "online" and entry.get("port")
         for entry in instances
@@ -931,6 +938,7 @@ def _recover_online_launch_result(
         instances = _scan_editor_status_instances(
             state,
             scan_range,
+            project_filter=target_project,
             timeout=scan_timeout,
         )
         instances = _filter_editor_status_instances(instances, target_project)
@@ -1101,11 +1109,10 @@ def editor_status(state: AppState, scan_range, show_all, timeout, project_path, 
             from cli_anything.unreal.core.confirmations import raise_if_editor_blocked
 
             raise_if_editor_blocked(state.session.project_path)
-    instances = _scan_editor_status_instances(
-        state,
-        scan_range,
-        timeout=timeout,
-    )
+    scan_options = {"timeout": timeout}
+    if not show_all and state.session.project_path:
+        scan_options["project_filter"] = state.session.project_path
+    instances = _scan_editor_status_instances(state, scan_range, **scan_options)
     if not show_all:
         instances = _filter_editor_status_instances(instances, state.session.project_path)
         if state.session.project_path and any(
