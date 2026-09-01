@@ -140,6 +140,16 @@ On Windows, `build compile --platform Win64` refuses to start while an UnrealEdi
 | `build status [--project PATH] [TASK_ID]` | Check artifacts/logs or async progress |
 | `build cancel TASK_ID` | Cancel async build |
 
+`build package --uat-arg` appends one argument to UAT `BuildCookRun`; it does
+not append arbitrary arguments directly to Cook Commandlet. Put cooker-only
+switches in one `-AdditionalCookerOptions=` value. In PowerShell, quote the
+whole value without adding inner literal quotes:
+
+```powershell
+ue-cli --project F:\Game\Game.uproject build package `
+  --uat-arg='-AdditionalCookerOptions=-NoDefaultMaps -CookProcessCount=1'
+```
+
 Targeted cook example:
 
 ```powershell

@@ -505,7 +505,10 @@ def build_cook(
     "uat_args",
     multiple=True,
     callback=_validate_package_value,
-    help="Additional UAT argv; repeat as --uat-arg=-pak",
+    help=(
+        "Additional BuildCookRun/UAT argv; Cook Commandlet flags require "
+        "-AdditionalCookerOptions=..."
+    ),
 )
 @click.option("--no-wait", is_flag=True, default=False)
 @click.option("--timeout", type=int, default=None)

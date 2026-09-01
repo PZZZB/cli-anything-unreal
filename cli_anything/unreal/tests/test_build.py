@@ -4793,6 +4793,7 @@ class TestBuildCLI:
                 "--uat-arg=-pak",
                 "--uat-arg=-iostore",
                 "--uat-arg=-ini:Engine:[Section]:Key=Value",
+                "--uat-arg=-AdditionalCookerOptions=-CookProcessCount=1",
                 "--no-wait",
             ])
 
@@ -4807,6 +4808,7 @@ class TestBuildCLI:
             "-pak",
             "-iostore",
             "-ini:Engine:[Section]:Key=Value",
+            "-AdditionalCookerOptions=-CookProcessCount=1",
         )
 
     @pytest.mark.parametrize(
@@ -4869,6 +4871,7 @@ class TestBuildCLI:
         assert "--map" in result.output
         assert "--cook-flavor" in result.output
         assert "--uat-arg" in result.output
+        assert "AdditionalCookerOptions" in result.output
         assert "--log-tail-lines" not in result.output
 
     def test_build_stop_cli(self, temp_project):

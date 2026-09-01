@@ -93,6 +93,16 @@ ue-cli --output json task wait <task_id> --timeout 300
 
 For running `build cook` and `build package` tasks, `task status` inspects a bounded log suffix for Unreal's explicit `Cooker has been blocked from saving ...` warning. It keeps `status=running`, reports `stalled` plus a structured `diagnostic` with duration, package/object names, log path, and a user-controlled cancellation command. Default stall threshold is 600 seconds; set `UE_CLI_COOK_STALL_THRESHOLD_SECONDS` to override it. ue-cli never auto-cancels the task.
 
+`build package --uat-arg` appends one argument to UAT `BuildCookRun`; it does
+not append arbitrary arguments directly to Cook Commandlet. Put cooker-only
+switches in one `-AdditionalCookerOptions=` value. In PowerShell, quote the
+whole value without adding inner literal quotes:
+
+```powershell
+ue-cli --project F:\Game\Game.uproject build package `
+  --uat-arg='-AdditionalCookerOptions=-NoDefaultMaps -CookProcessCount=1'
+```
+
 Task records keep lifecycle `status` separate from the current `phase` (for example, `running` plus `waiting_remote_control`). Terminal states are monotonic: a late worker result cannot replace cancellation or another final outcome. A timed-out launch, or a launch still marked `running/waiting_remote_control`, can become completed only after `editor status` verifies the same project, recorded process identity, and port owner are online. Requested maps must also match.
 
 Launch-timeout diagnostics distinguish the OS TCP listener from an active connection and HTTP route health. `port_listening` and `listener_pid` report TCP-table ownership when available, while `tcp_connect_succeeded` reports the active connection probe. A Windows listener owned by the launched editor that does not accept a connection returns `failure_kind=api_listener_unresponsive` instead of `api_not_listening`.
