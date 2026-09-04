@@ -1074,6 +1074,63 @@ class TestBuildSuccessPaths:
         assert "error C2065" in result["diagnostics"][0]
         assert "fatal error LNK1104" in result["diagnostics"][1]
 
+    def test_compile_failure_classifies_bk_dist_virtual_memory_exhaustion(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.build import _normalize_result
+
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_text(
+            "\n".join([
+                (
+                    "Requested 1.5 GB memory per action, 14.8 GB available: "
+                    "limiting max parallel actions to 10"
+                ),
+                "c1xx: error C3859: \u672a\u80fd\u521b\u5efa PCH \u7684\u865a\u62df\u5185\u5b58",
+                "c1xx: note: \u7cfb\u7edf\u8fd4\u56de\u4ee3\u7801 1455: \u9875\u9762\u6587\u4ef6\u592a\u5c0f\uff0c\u65e0\u6cd5\u5b8c\u6210\u64cd\u4f5c\u3002",
+                "c1xx: fatal error C1076: \u7f16\u8bd1\u5668\u9650\u5236: \u8fbe\u5230\u5185\u90e8\u5806\u9650\u5236",
+                "UBTTool: Building 4317 actions with 288 jobs...exit code:2,error:<nil>",
+                "[bk_dist] status: failed to compile with bk tools",
+            ]),
+            encoding="utf-8",
+        )
+
+        result = _normalize_result(
+            {"returncode": 6, "log_file": str(log_file)},
+            "Compile",
+        )
+
+        assert result["code"] == "BUILD_RESOURCE_EXHAUSTED"
+        assert result["failure_kind"] == "compiler_virtual_memory_exhaustion"
+        assert result["resource"] == "virtual_memory"
+        assert result["system_error_code"] == 1455
+        assert result["executor"] == "bk_dist"
+        assert result["ubt_parallel_action_limit"] == 10
+        assert result["executor_job_count"] == 288
+        assert result["parallel_limit_exceeded"] is True
+        assert "C3859" in result["diagnostics"][0]
+        assert "C1076" in result["diagnostics"][1]
+        assert "bk_dist" in result["suggestion"]
+
+    def test_c1076_without_virtual_memory_evidence_remains_generic(self, tmp_path):
+        from cli_anything.unreal.core.build import _normalize_result
+
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_text(
+            "Source.cpp(7): fatal error C1076: compiler limit: "
+            "internal heap limit reached\n",
+            encoding="utf-8",
+        )
+
+        result = _normalize_result(
+            {"returncode": 6, "log_file": str(log_file)},
+            "Compile",
+        )
+
+        assert result["failure_kind"] == "compiler_diagnostics"
+        assert "code" not in result
+
     def test_package_cook_plugin_failure_takes_priority_over_old_errors(
         self,
         tmp_path,

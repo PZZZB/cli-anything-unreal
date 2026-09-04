@@ -130,6 +130,8 @@ Use repeated `--module NAME` only when the user explicitly requests a focused di
 
 On Windows, `build compile --platform Win64` refuses to start while an UnrealEditor process for the same project is running, because editor/plugin DLLs are commonly locked and link fails with `LNK1104`. Run `editor close` first, then compile.
 
+If MSVC reports `C3859` or Windows pagefile error 1455, inspect `BUILD_RESOURCE_EXHAUSTED`. Reduce the active executor's own parallel-job limit and ensure the paging file has enough free space. For `bk_dist`, UBT's local memory-based parallel-action limit may not control the external executor; use its own job setting or disable it before retrying.
+
 | Command | Description |
 |---------|-------------|
 | `build compile [--project PATH] [--config/--configuration C] [--platform P] [--module NAME]... [--no-wait] [--timeout N]` | Compile C++; Win64 defaults to the inferred full Editor target. Repeated modules are explicit focused diagnostics only |

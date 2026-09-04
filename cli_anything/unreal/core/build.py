@@ -77,6 +77,25 @@ _UBT_CONFLICTING_LEGACY_PATTERN = re.compile(
     r"\bA conflicting instance of UnrealBuildTool is already running\.\s*$",
     re.IGNORECASE,
 )
+_MSVC_VIRTUAL_MEMORY_EXHAUSTION_PATTERN = re.compile(
+    r"\berror C3859\b|"
+    r"(?:system returned (?:error )?code|\u7cfb\u7edf\u8fd4\u56de\u4ee3\u7801)\s*:?\s*1455\b|"
+    r"(?:paging file.{0,80}too small|\u9875\u9762\u6587\u4ef6.{0,80}\u592a\u5c0f)",
+    re.IGNORECASE,
+)
+_WINDOWS_PAGEFILE_ERROR_PATTERN = re.compile(
+    r"(?:system returned (?:error )?code|\u7cfb\u7edf\u8fd4\u56de\u4ee3\u7801)\s*:?\s*1455\b|"
+    r"\bc1xx\b[^\r\n]{0,120}\b1455\b",
+    re.IGNORECASE,
+)
+_UBT_PARALLEL_ACTION_LIMIT_PATTERN = re.compile(
+    r"limiting max parallel actions to\s+(?P<limit>\d+)",
+    re.IGNORECASE,
+)
+_BK_DIST_JOB_COUNT_PATTERN = re.compile(
+    r"Building\s+(?P<actions>\d+)\s+actions with\s+(?P<jobs>\d+)\s+jobs",
+    re.IGNORECASE,
+)
 
 _TARGET_LEXICAL_NOISE_PATTERN = re.compile(
     r"//[^\r\n]*|/\*.*?\*/|"
@@ -536,6 +555,57 @@ def _build_failure_diagnostics(
                     "and rebuild."
                 ),
             }
+        if _MSVC_VIRTUAL_MEMORY_EXHAUSTION_PATTERN.search(text):
+            result = {
+                "code": "BUILD_RESOURCE_EXHAUSTED",
+                "failure_kind": "compiler_virtual_memory_exhaustion",
+                "resource": "virtual_memory",
+                "error": (
+                    "The compiler exhausted Windows virtual memory while "
+                    "creating a precompiled header."
+                ),
+                "diagnostics": compiler_diagnostics,
+                "suggestion": (
+                    "Reduce the selected build executor's parallel job limit, "
+                    "ensure the Windows paging file has enough free space, then "
+                    "retry the full compile."
+                ),
+            }
+            if _WINDOWS_PAGEFILE_ERROR_PATTERN.search(text):
+                result["system_error_code"] = 1455
+
+            parallel_limit_matches = list(
+                _UBT_PARALLEL_ACTION_LIMIT_PATTERN.finditer(text)
+            )
+            if parallel_limit_matches:
+                result["ubt_parallel_action_limit"] = int(
+                    parallel_limit_matches[-1].group("limit")
+                )
+
+            bk_job_matches = list(_BK_DIST_JOB_COUNT_PATTERN.finditer(text))
+            if bk_job_matches and re.search(
+                r"bk[_-](?:dist|ubt)|failed to compile with bk tools",
+                text,
+                re.IGNORECASE,
+            ):
+                match = bk_job_matches[-1]
+                result.update({
+                    "executor": "bk_dist",
+                    "action_count": int(match.group("actions")),
+                    "executor_job_count": int(match.group("jobs")),
+                    "suggestion": (
+                        "Reduce bk_dist's own job limit or disable bk_dist so "
+                        "UBT's parallel-action limit controls execution; ensure "
+                        "the Windows paging file has enough free space, then "
+                        "retry the full compile."
+                    ),
+                })
+                if "ubt_parallel_action_limit" in result:
+                    result["parallel_limit_exceeded"] = (
+                        result["executor_job_count"]
+                        > result["ubt_parallel_action_limit"]
+                    )
+            return result
         return {
             "failure_kind": "compiler_diagnostics",
             "diagnostics": compiler_diagnostics,

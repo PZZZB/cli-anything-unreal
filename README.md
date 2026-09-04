@@ -280,6 +280,8 @@ Failed cook/package results prioritize terminal plugin-load failures over compil
 
 When UBT cannot start because another process owns the same engine's global build mutex, `build compile` returns `code=BUILD_CONFLICTING_INSTANCE`, `failure_kind=ubt_mutex_conflict`, the original UBT diagnostic, and a wait-or-stop recovery hint. UE5 results also include `mutex_name` when UBT reports it. This classification uses explicit UBT conflict evidence rather than AutomationTool's overloaded exit code, which may be labeled `Error_SDKNotFound` even when no SDK problem occurred.
 
+MSVC PCH failures caused by exhausted Windows virtual memory return `code=BUILD_RESOURCE_EXHAUSTED`, `failure_kind=compiler_virtual_memory_exhaustion`, compiler diagnostics, and pagefile error code 1455 when present. When a `bk_dist` log reports its job count and UBT's lower memory-based action limit, the result preserves both values and directs the operator to reduce the executor's own job limit or disable it; ue-cli does not claim that UBT's local limit controls a custom distributed executor.
+
 `build compile` infers the Editor target from `--project`; do not pass `--target`. If an explicit target is supplied, ue-cli returns `BUILD_TARGET_INFERRED` with the accepted replacement command. `--config` and `--configuration` are equivalent.
 
 `build compile --module NAME` is a focused project or engine-core module build. If the current Editor target receipt identifies `NAME` as an Engine plugin module, ue-cli rejects the command before UBT with `ENGINE_PLUGIN_MODULE_UNSUPPORTED` and provides a full `build compile` recovery command. Project-targeted UBT can omit Engine plugin output actions and otherwise fail with `Unable to find output items for module`.
