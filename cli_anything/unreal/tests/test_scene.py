@@ -531,6 +531,62 @@ class TestScene:
         assert "_u.load_object(None, _actor_path)" in script
         mock_run.assert_called_once_with(api, script, save=False)
 
+    def test_prepare_level_reload_accepts_only_the_active_level(self):
+        from cli_anything.unreal.core.scene import prepare_level_reload
+
+        api = self._mock_api()
+        with patch(
+            "cli_anything.unreal.core.scene._open_level_preflight",
+            return_value={
+                "status": "ok",
+                "target_package": "/Game/Maps/L_Test",
+                "active_world": {
+                    "package": "/Game/Maps/L_Test",
+                    "world": "/Game/Maps/L_Test.L_Test",
+                },
+            },
+        ):
+            result = prepare_level_reload(api, "/Game/Maps/L_Test")
+
+        assert result["status"] == "ok"
+        assert result["restart_required"] is True
+        assert result["target_package"] == "/Game/Maps/L_Test"
+
+    def test_prepare_level_reload_rejects_a_non_active_target(self):
+        from cli_anything.unreal.core.scene import prepare_level_reload
+
+        api = self._mock_api()
+        with patch(
+            "cli_anything.unreal.core.scene._open_level_preflight",
+            return_value={
+                "status": "ok",
+                "target_package": "/Game/Maps/L_Target",
+                "active_world": {
+                    "package": "/Game/Maps/L_Source",
+                    "world": "/Game/Maps/L_Source.L_Source",
+                },
+            },
+        ):
+            result = prepare_level_reload(api, "/Game/Maps/L_Target")
+
+        assert result["code"] == "EDITOR_RELOAD_TARGET_NOT_ACTIVE"
+        assert result["dispatch_state"] == "blocked_precondition"
+        assert result["expected_package"] == "/Game/Maps/L_Target"
+
+    def test_prepare_level_reload_stops_when_preflight_is_unavailable(self):
+        from cli_anything.unreal.core.scene import prepare_level_reload
+
+        api = self._mock_api()
+        with patch(
+            "cli_anything.unreal.core.scene._open_level_preflight",
+            return_value={"error": "Remote Control request timed out"},
+        ):
+            result = prepare_level_reload(api, "/Game/Maps/L_Test")
+
+        assert result["code"] == "EDITOR_RELOAD_LEVEL_SAFETY_CHECK_FAILED"
+        assert result["dispatch_state"] == "not_started"
+        assert result["safety_check"]["error"] == "Remote Control request timed out"
+
     def test_open_level_verifies_active_world_matches_requested_package(self):
         from cli_anything.unreal.core.scene import open_level
 

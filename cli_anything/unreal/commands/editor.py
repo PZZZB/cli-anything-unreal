@@ -2008,6 +2008,100 @@ from cli_anything.unreal.core.editor_lifecycle import (  # noqa: E402
 )
 
 
+def _launch_editor_result(
+    state: AppState,
+    *,
+    map_path: str | None,
+    no_wait: bool,
+    timeout: int | None,
+    extra_args: list[str],
+    unattended: bool,
+    no_remote: bool,
+) -> dict:
+    """Submit an editor launch and return the same result used by the CLI."""
+    launch_error = None if no_remote else _remote_control_launch_error(extra_args)
+    if launch_error:
+        raise AppError(
+            launch_error["code"],
+            launch_error["message"],
+            exit_code=2,
+            suggestion=launch_error["suggestion"],
+            details=launch_error["details"],
+        )
+    foreground_timeout, worker_timeout = _launch_wait_timeouts(timeout)
+    duplicate = _check_already_running(state.session, state)
+    if duplicate is not None:
+        duplicate_status = duplicate.get("status")
+        code = {
+            "already_running": "ALREADY_RUNNING",
+            "starting": "EDITOR_STARTING",
+            "zombie": "EDITOR_ALREADY_RUNNING_OFFLINE",
+        }.get(duplicate_status, "EDITOR_ALREADY_RUNNING")
+        details = dict(duplicate)
+        details.update({
+            "decision": "preserve_existing_editor",
+            "requires_user_input": False,
+        })
+        raise AppError(
+            code,
+            duplicate.get("message", "An editor process already exists for this project."),
+            exit_code=3,
+            suggestion="The existing editor was preserved. Restore its Remote Control endpoint or close it through the verified close workflow before retrying launch.",
+            details=details,
+        )
+
+    payload = {
+        "project_path": state.session.project_path,
+        "port": None if no_remote else state.session.port,
+        "map_path": map_path,
+        "timeout": worker_timeout,
+        "extra_args": extra_args,
+        "unattended": unattended,
+        "no_remote": no_remote,
+    }
+    try:
+        task = submit_task("editor.launch", payload)
+    except TaskWorkerSpawnError as error:
+        raise AppError(
+            error.code,
+            str(error),
+            exit_code=3,
+            suggestion="Inspect details for the Windows process-creation failure.",
+            details=error.details,
+        ) from error
+    if no_wait:
+        return {
+            "task_id": task["task_id"],
+            "status": "submitted",
+            "suggested_poll_interval_seconds": 5,
+        }
+
+    final_task = wait_for_task(task["task_id"], foreground_timeout)
+    if final_task is None:
+        try:
+            current = load_task(task["task_id"]) or task
+        except PermissionError:
+            current = task
+        if current.get("status") in FINAL_TASK_STATUSES:
+            return _editor_launch_terminal_result(
+                state,
+                task["task_id"],
+                current,
+            )
+        progress = task_progress(current)
+        progress["status"] = "launching"
+        progress["foreground_wait_timeout_seconds"] = foreground_timeout
+        progress["message"] = "Editor launch is still in progress; poll this task or editor status."
+        progress["next_command"] = f'ue-cli --project "{state.session.project_path}" editor status {task["task_id"]}'
+        return progress
+
+    return _editor_launch_terminal_result(
+        state,
+        task["task_id"],
+        final_task,
+    )
+
+
 @editor_group.command("launch")
 @_project_option
 @click.option(
@@ -2065,89 +2159,15 @@ def editor_launch(
     require_project(state)
     map_path = _normalize_launch_map_path(map_path, state.session.project_dir)
     extra_args = list(extra_args) if extra_args else []
-    launch_error = None if no_remote else _remote_control_launch_error(extra_args)
-    if launch_error:
-        raise AppError(
-            launch_error["code"],
-            launch_error["message"],
-            exit_code=2,
-            suggestion=launch_error["suggestion"],
-            details=launch_error["details"],
-        )
-    foreground_timeout, worker_timeout = _launch_wait_timeouts(timeout)
-    duplicate = _check_already_running(state.session, state)
-    if duplicate is not None:
-        duplicate_status = duplicate.get("status")
-        code = {
-            "already_running": "ALREADY_RUNNING",
-            "starting": "EDITOR_STARTING",
-            "zombie": "EDITOR_ALREADY_RUNNING_OFFLINE",
-        }.get(duplicate_status, "EDITOR_ALREADY_RUNNING")
-        details = dict(duplicate)
-        details.update({
-            "decision": "preserve_existing_editor",
-            "requires_user_input": False,
-        })
-        raise AppError(
-            code,
-            duplicate.get("message", "An editor process already exists for this project."),
-            exit_code=3,
-            suggestion="The existing editor was preserved. Restore its Remote Control endpoint or close it through the verified close workflow before retrying launch.",
-            details=details,
-        )
-
-    payload = {
-        "project_path": state.session.project_path,
-        "port": None if no_remote else state.session.port,
-        "map_path": map_path,
-        "timeout": worker_timeout,
-        "extra_args": extra_args,
-        "unattended": unattended,
-        "no_remote": no_remote,
-    }
-    try:
-        task = submit_task("editor.launch", payload)
-    except TaskWorkerSpawnError as error:
-        raise AppError(
-            error.code,
-            str(error),
-            exit_code=3,
-            suggestion="Inspect details for the Windows process-creation failure.",
-            details=error.details,
-        ) from error
-    if no_wait:
-        output({"task_id": task["task_id"], "status": "submitted", "suggested_poll_interval_seconds": 5}, state)
-        return
-
-    final_task = wait_for_task(task["task_id"], foreground_timeout)
-    if final_task is None:
-        try:
-            current = load_task(task["task_id"]) or task
-        except PermissionError:
-            current = task
-        if current.get("status") in FINAL_TASK_STATUSES:
-            output(
-                _editor_launch_terminal_result(
-                    state,
-                    task["task_id"],
-                    current,
-                ),
-                state,
-            )
-            return
-        progress = task_progress(current)
-        progress["status"] = "launching"
-        progress["foreground_wait_timeout_seconds"] = foreground_timeout
-        progress["message"] = "Editor launch is still in progress; poll this task or editor status."
-        progress["next_command"] = f'ue-cli --project "{state.session.project_path}" editor status {task["task_id"]}'
-        output(progress, state)
-        return
-
     output(
-        _editor_launch_terminal_result(
+        _launch_editor_result(
             state,
-            task["task_id"],
-            final_task,
+            map_path=map_path,
+            no_wait=no_wait,
+            timeout=timeout,
+            extra_args=extra_args,
+            unattended=unattended,
+            no_remote=no_remote,
         ),
         state,
     )
@@ -3425,7 +3445,11 @@ def _raise_editor_script_timeout(
 def _raise_level_command_failed(result: dict, operation: str, code: str) -> None:
     resolved_code = str(result.get("code") or code)
     expected_rejection = (
-        result.get("dispatch_state") in {"blocked_unsafe", "blocked_dirty"}
+        result.get("dispatch_state") in {
+            "blocked_unsafe",
+            "blocked_dirty",
+            "blocked_precondition",
+        }
         or result.get("failure_kind") == "unsupported_engine_version"
     )
     exit_code = 2 if expected_rejection else 3
@@ -4243,19 +4267,106 @@ def editor_new_blank_level(state: AppState, discard_dirty_map, timeout):
 @editor_group.command("open-level")
 @click.argument("level_path")
 @click.option(
+    "--reload",
+    "reload_level",
+    is_flag=True,
+    default=False,
+    help="Restart the editor on the currently active level.",
+)
+@click.option(
+    "--discard-unsaved",
+    is_flag=True,
+    default=False,
+    help="Authorize discarding all unsaved editor packages during --reload.",
+)
+@click.option(
     "--timeout",
     default=300,
     show_default=True,
     type=click.IntRange(min=1),
-    help="Max seconds to wait for the synchronous LoadLevel request.",
+    help="Max seconds for LoadLevel or replacement editor startup.",
 )
 @handle_error
 @click.pass_obj
-def editor_open_level(state: AppState, level_path, timeout):
+def editor_open_level(state: AppState, level_path, reload_level, discard_unsaved, timeout):
     """Open an existing level using a rooted package path such as /Game/Maps/MyMap."""
-    from cli_anything.unreal.core.scene import open_level
+    from cli_anything.unreal.core.scene import open_level, prepare_level_reload
+
     level_path = _require_rooted_level_path(level_path)
+    if discard_unsaved and not reload_level:
+        raise AppError(
+            "EDITOR_OPEN_LEVEL_OPTION_CONFLICT",
+            "--discard-unsaved is valid only with --reload.",
+            exit_code=2,
+        )
+    if reload_level and not discard_unsaved:
+        raise AppError(
+            "EDITOR_RELOAD_DISCARD_REQUIRED",
+            "Reloading the active level can discard unsaved editor state.",
+            exit_code=2,
+            suggestion="Rerun with both --reload and --discard-unsaved only after authorizing loss of all unsaved editor packages.",
+        )
+
+    if reload_level:
+        ensure_inferred_project(state)
+        require_project(state)
     api = require_editor(state)
+    if reload_level:
+        reload_preflight = prepare_level_reload(api, level_path)
+        if reload_preflight.get("error") or reload_preflight.get("status") == "failed":
+            _raise_level_command_failed(
+                reload_preflight,
+                "editor open-level --reload",
+                "EDITOR_RELOAD_LEVEL_FAILED",
+            )
+        close_result = _close_editor_for_project(
+            api,
+            state,
+            api_alive=True,
+            force=True,
+        )
+        try:
+            launch_result = _launch_editor_result(
+                state,
+                map_path=level_path,
+                no_wait=False,
+                timeout=timeout,
+                extra_args=[],
+                unattended=False,
+                no_remote=False,
+            )
+        except AppError as exc:
+            details = dict(exc.details or {})
+            details.update({
+                "reload_path": level_path,
+                "discard_unsaved": True,
+                "previous_editor": close_result,
+            })
+            raise AppError(
+                exc.code,
+                exc.message,
+                exit_code=exc.exit_code,
+                suggestion=exc.suggestion,
+                details=details,
+            ) from exc
+
+        launch_status = launch_result.get("status")
+        reload_complete = launch_status in {"completed", "online"}
+        result = {
+            "status": "reloaded" if reload_complete else launch_status,
+            "completion_state": "completed" if reload_complete else "pending",
+            "path": level_path,
+            "discard_unsaved": True,
+            "reloaded_by": "editor_restart",
+            "previous_editor": close_result,
+            "launch": launch_result,
+        }
+        for key in ("task_id", "next_command", "suggested_poll_interval_seconds"):
+            if launch_result.get(key) is not None:
+                result[key] = launch_result[key]
+        output(result, state)
+        return
+
     result = open_level(api, level_path, timeout=timeout)
     if _is_transport_disconnect_result(result):
         _raise_editor_connection_lost(result, "editor open-level")

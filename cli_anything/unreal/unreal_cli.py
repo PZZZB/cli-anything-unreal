@@ -142,11 +142,14 @@ COMMAND_SPECS = [
     },
     {
         "name": "editor open-level",
-        "description": "Open an existing level via LevelEditorSubsystem.",
-        "async_supported": False,
-        "estimated_duration": "5-30s",
+        "description": "Open a level, or explicitly reload the active map through a fresh editor process.",
+        "async_supported": True,
+        "estimated_duration": "5-300s",
         "parameters": [
             {"name": "LEVEL_PATH", "required": True},
+            {"name": "--timeout", "required": False},
+            {"name": "--reload", "required": False},
+            {"name": "--discard-unsaved", "required": False},
         ],
     },
     {

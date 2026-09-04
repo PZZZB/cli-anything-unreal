@@ -697,6 +697,49 @@ else:
     return run_python_code(api, script, save=False)
 
 
+def prepare_level_reload(api, path: str) -> dict:
+    """Verify that *path* is the active level before a process restart."""
+    target_package = _level_package_path(path)
+    preflight = _open_level_preflight(api, path)
+    if preflight.get("error"):
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_RELOAD_LEVEL_SAFETY_CHECK_FAILED",
+            "path": path,
+            "error": "Could not verify the active level before restarting the editor.",
+            "dispatch_state": "not_started",
+            "safety_check": preflight,
+            "suggestion": "Run editor status and retry only after the editor is responsive.",
+        }
+
+    active_world = preflight.get("active_world") or {}
+    if active_world.get("package") != target_package:
+        return {
+            "status": "failed",
+            "success": False,
+            "code": "EDITOR_RELOAD_TARGET_NOT_ACTIVE",
+            "path": path,
+            "error": "Reload requires the requested level to be the currently active level.",
+            "failure_kind": "reload_target_not_active",
+            "dispatch_state": "blocked_precondition",
+            "expected_package": target_package,
+            "active_world": active_world,
+            "suggestion": (
+                f"Use editor open-level {target_package} without --reload to open a different level."
+            ),
+        }
+
+    return {
+        "status": "ok",
+        "success": True,
+        "path": path,
+        "target_package": target_package,
+        "active_world": active_world,
+        "restart_required": True,
+    }
+
+
 def _verify_current_level(api, expected_path: str, *, verify_timeout: float = 5.0) -> dict:
     expected_package = _level_package_path(expected_path)
     deadline = time.monotonic() + max(0.0, float(verify_timeout))

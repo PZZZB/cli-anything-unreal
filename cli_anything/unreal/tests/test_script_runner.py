@@ -2292,6 +2292,137 @@ class TestScriptRunner:
         assert data["code"] == "EDITOR_CONNECTION_LOST"
         assert data["details"]["operation"] == "editor save-level"
 
+    def test_editor_open_level_reload_requires_explicit_discard(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "open-level",
+                "/Game/Test/L_Test", "--reload",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_RELOAD_DISCARD_REQUIRED"
+        assert "--discard-unsaved" in data["suggestion"]
+        mock_editor.assert_not_called()
+
+    def test_editor_open_level_discard_requires_reload(self):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor") as mock_editor:
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "open-level",
+                "/Game/Test/L_Test", "--discard-unsaved",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_OPEN_LEVEL_OPTION_CONFLICT"
+        mock_editor.assert_not_called()
+
+    def test_editor_open_level_reload_restarts_on_active_map(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        api = MagicMock()
+        close_result = {
+            "status": "closed",
+            "target_pids": [1234],
+            "save_evidence": {"policy": "force"},
+        }
+        launch_result = {
+            "status": "launching",
+            "task_id": "t-reload",
+            "next_command": "ue-cli --project project.uproject editor status t-reload",
+            "suggested_poll_interval_seconds": 5,
+        }
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor", return_value=api), \
+             patch(
+                 "cli_anything.unreal.core.scene.prepare_level_reload",
+                 return_value={
+                     "status": "ok",
+                     "path": "/Game/Test/L_Test",
+                     "target_package": "/Game/Test/L_Test",
+                     "restart_required": True,
+                 },
+             ) as prepare_reload, \
+             patch(
+                 "cli_anything.unreal.commands.editor._close_editor_for_project",
+                 return_value=close_result,
+             ) as close_editor, \
+             patch(
+                 "cli_anything.unreal.commands.editor._launch_editor_result",
+                 return_value=launch_result,
+             ) as launch_editor:
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "editor", "open-level", "/Game/Test/L_Test",
+                "--reload", "--discard-unsaved", "--timeout", "240",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["result"]
+        assert data["status"] == "launching"
+        assert data["completion_state"] == "pending"
+        assert data["discard_unsaved"] is True
+        assert data["reloaded_by"] == "editor_restart"
+        assert data["previous_editor"] == close_result
+        assert data["task_id"] == "t-reload"
+        prepare_reload.assert_called_once_with(api, "/Game/Test/L_Test")
+        close_editor.assert_called_once_with(
+            api,
+            close_editor.call_args.args[1],
+            api_alive=True,
+            force=True,
+        )
+        launch_editor.assert_called_once_with(
+            launch_editor.call_args.args[0],
+            map_path="/Game/Test/L_Test",
+            no_wait=False,
+            timeout=240,
+            extra_args=[],
+            unattended=False,
+            no_remote=False,
+        )
+
+    def test_editor_open_level_reload_rejects_non_active_target(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        runner = CliRunner()
+        with patch("cli_anything.unreal.commands.editor.require_editor", return_value=MagicMock()), \
+             patch(
+                 "cli_anything.unreal.core.scene.prepare_level_reload",
+                 return_value={
+                     "status": "failed",
+                     "success": False,
+                     "code": "EDITOR_RELOAD_TARGET_NOT_ACTIVE",
+                     "error": "Reload requires the requested level to be the currently active level.",
+                     "failure_kind": "reload_target_not_active",
+                     "dispatch_state": "blocked_precondition",
+                     "active_world": {"package": "/Game/Test/L_Source"},
+                 },
+             ), \
+             patch("cli_anything.unreal.commands.editor._close_editor_for_project") as close_editor, \
+             patch("cli_anything.unreal.commands.editor._launch_editor_result") as launch_editor:
+            result = runner.invoke(cli, [
+                "--output", "json", "--project", temp_project["uproject"],
+                "editor", "open-level", "/Game/Test/L_Target",
+                "--reload", "--discard-unsaved",
+            ])
+
+        assert result.exit_code == 2
+        data = json.loads(result.output)
+        assert data["code"] == "EDITOR_RELOAD_TARGET_NOT_ACTIVE"
+        close_editor.assert_not_called()
+        launch_editor.assert_not_called()
+
     def test_editor_open_level_connection_reset_is_top_level_error(self):
         """Level open transport disconnects should not be wrapped as success."""
         from click.testing import CliRunner
