@@ -2743,9 +2743,12 @@ def _read_log_delta(
     stable_since: float | None = None
     scan_pos = start_pos
     marker_overlap = b""
+    completion_tokens = list(completion_markers)
+    if begin_marker and end_marker:
+        completion_tokens.append(end_marker)
     completion_bytes = tuple(
         marker.encode("utf-8").lower()
-        for marker in completion_markers
+        for marker in completion_tokens
     )
     max_completion_bytes = max((len(marker) for marker in completion_bytes), default=0)
     marker_overlap_size = max(max_completion_bytes - 1, 0)

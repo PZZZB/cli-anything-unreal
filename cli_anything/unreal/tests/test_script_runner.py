@@ -3199,6 +3199,69 @@ result = {'status': 'live_editor_ok'}
         assert data["result"]["log_text"] == "LogRHI: Render target pool dump line"
         assert data["result"]["log_file"] == str(log_file)
 
+    def test_editor_exec_waits_for_delayed_end_marker_when_python_log_is_empty(
+        self, tmp_path
+    ):
+        """A partial file flush must not end marker-delimited capture early."""
+        import re
+
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        log_file = tmp_path / "RXGame.log"
+        log_file.write_text("before\n", encoding="utf-8")
+        clock = [100.0]
+        delayed_lines = []
+
+        def fake_exec_python_ex(script, *, timeout=None):
+            begin = re.search(r'_begin = "([^"]+)"', script).group(1)
+            end = re.search(r'_end = "([^"]+)"', script).group(1)
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"{begin}\n")
+            delayed_lines.extend([
+                "LogIssue195: status=running",
+                end,
+            ])
+            return {"ReturnValue": True, "LogOutput": []}
+
+        def fake_sleep(seconds):
+            clock[0] += seconds
+            if clock[0] >= 100.4 and delayed_lines:
+                with log_file.open("a", encoding="utf-8") as handle:
+                    handle.write("\n".join(delayed_lines) + "\n")
+                delayed_lines.clear()
+
+        runner = CliRunner()
+        with patch(
+            "cli_anything.unreal.commands.editor.require_editor"
+        ) as mock_editor, patch(
+            "cli_anything.unreal.commands.editor._resolve_editor_log_file",
+            return_value=log_file,
+        ), patch(
+            "cli_anything.unreal.commands.editor.time.time",
+            side_effect=lambda: clock[0],
+        ), patch(
+            "cli_anything.unreal.commands.editor.time.sleep",
+            side_effect=fake_sleep,
+        ):
+            mock_api = MagicMock()
+            mock_api.exec_python_ex.side_effect = fake_exec_python_ex
+            mock_editor.return_value = mock_api
+            result = runner.invoke(cli, [
+                "--output", "json", "editor", "exec", "Issue195.Status",
+            ])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["result"]
+        assert data["capture_mode"] == "editor_log_file"
+        assert data["log_text"] == "LogIssue195: status=running"
+        assert data["log_output"] == [{
+            "Type": "Info",
+            "Output": "LogIssue195: status=running",
+            "Source": "editor_log_file",
+        }]
+        assert delayed_lines == []
+
     def test_editor_exec_log_resolver_uses_uproject_name_not_directory_name(
         self, tmp_path
     ):
