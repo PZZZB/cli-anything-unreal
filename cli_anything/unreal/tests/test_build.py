@@ -1174,6 +1174,87 @@ class TestBuildSuccessPaths:
         assert result["diagnostic"] == plugin_error
         assert result["diagnostics"] == [plugin_error]
 
+    def test_package_failure_classifies_gradle_loopback_and_iterative_retry(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.build import _normalize_result
+
+        diagnostic = "java.io.IOException: Unable to establish loopback connection"
+        log_file = tmp_path / "cli_package.log"
+        log_file.write_text(
+            "\n".join([
+                "********** BUILD COMMAND COMPLETED **********",
+                "********** COOK COMMAND COMPLETED **********",
+                "********** STAGE COMMAND COMPLETED **********",
+                "********** PACKAGE COMMAND STARTED **********",
+                "Making .apk with Gradle...",
+                diagnostic,
+                (
+                    'cmd.exe failed with args /c "F:\\Game\\Intermediate\\Android\\'
+                    'arm64\\gradle\\rungradle.bat" :app:assembleDebug'
+                ),
+                "AutomationTool exiting with ExitCode=1 (Error_Unknown)",
+                "BUILD FAILED",
+            ]),
+            encoding="utf-8",
+        )
+
+        result = _normalize_result(
+            {
+                "returncode": 1,
+                "log_file": str(log_file),
+                "command": [
+                    r"F:\Engine\Build\BatchFiles\RunUAT.bat",
+                    "BuildCookRun",
+                    "-build",
+                    "-cook",
+                    "-stage",
+                    "-package",
+                    "-iterate",
+                ],
+            },
+            "Package",
+        )
+
+        assert result["status"] == "error"
+        assert result["returncode"] == 1
+        assert result["code"] == "BUILD_GRADLE_LOOPBACK_FAILED"
+        assert result["failure_kind"] == "gradle_loopback_connection"
+        assert result["failure_scope"] == "local_environment"
+        assert result["phase"] == "package"
+        assert result["external_tool"] == "Gradle"
+        assert result["transient"] is True
+        assert result["retry_safe"] is True
+        assert result["retry_uses_iterative_cook"] is True
+        assert result["reuse_successful_outputs"] is True
+        assert result["completed_phases"] == ["build", "cook", "stage"]
+        assert result["diagnostic"] == diagnostic
+        assert result["gradle_task"] == ":app:assembleDebug"
+        assert "existing --uat-arg=-iterate" in result["suggestion"]
+        assert "firewall" in result["suggestion"]
+
+    def test_loopback_text_without_gradle_package_context_remains_generic(
+        self,
+        tmp_path,
+    ):
+        from cli_anything.unreal.core.build import _normalize_result
+
+        log_file = tmp_path / "cli_compile.log"
+        log_file.write_text(
+            "java.io.IOException: Unable to establish loopback connection\n",
+            encoding="utf-8",
+        )
+
+        result = _normalize_result(
+            {"returncode": 1, "log_file": str(log_file)},
+            "Compile",
+        )
+
+        assert result["status"] == "error"
+        assert "code" not in result
+        assert result["error"].startswith("Compile failed (exit 1)")
+
     def test_compile_failure_classifies_missing_include_with_engine_context(
         self,
         temp_project,

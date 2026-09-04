@@ -132,6 +132,8 @@ On Windows, `build compile --platform Win64` refuses to start while an UnrealEdi
 
 If MSVC reports `C3859` or Windows pagefile error 1455, inspect `BUILD_RESOURCE_EXHAUSTED`. Reduce the active executor's own parallel-job limit and ensure the paging file has enough free space. For `bk_dist`, UBT's local memory-based parallel-action limit may not control the external executor; use its own job setting or disable it before retrying.
 
+If Android package assembly fails with Gradle's `java.io.IOException: Unable to establish loopback connection`, inspect `BUILD_GRADLE_LOOPBACK_FAILED`. The failure remains nonzero and is classified as a transient local-environment problem. Retry the same package command with `--uat-arg=-iterate`; if it was already present and Cook completed, ue-cli reports that unchanged cooked outputs can be reused. For repeated failures, stop stale Gradle daemons and inspect local firewall, antivirus, proxy, and loopback policy.
+
 | Command | Description |
 |---------|-------------|
 | `build compile [--project PATH] [--config/--configuration C] [--platform P] [--module NAME]... [--no-wait] [--timeout N]` | Compile C++; Win64 defaults to the inferred full Editor target. Repeated modules are explicit focused diagnostics only |

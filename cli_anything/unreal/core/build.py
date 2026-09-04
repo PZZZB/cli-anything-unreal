@@ -96,6 +96,18 @@ _BK_DIST_JOB_COUNT_PATTERN = re.compile(
     r"Building\s+(?P<actions>\d+)\s+actions with\s+(?P<jobs>\d+)\s+jobs",
     re.IGNORECASE,
 )
+_GRADLE_LOOPBACK_FAILURE_PATTERN = re.compile(
+    r"java\.io\.IOException:\s*Unable to establish loopback connection",
+    re.IGNORECASE,
+)
+_GRADLE_PACKAGE_CONTEXT_PATTERN = re.compile(
+    r"\bMaking \.apk with Gradle\b|\brungradle\.bat\b",
+    re.IGNORECASE,
+)
+_GRADLE_TASK_PATTERN = re.compile(
+    r"rungradle\.bat[\"']?\s+(?P<task>:[^\s]+)",
+    re.IGNORECASE,
+)
 
 _TARGET_LEXICAL_NOISE_PATTERN = re.compile(
     r"//[^\r\n]*|/\*.*?\*/|"
@@ -442,6 +454,7 @@ def _build_failure_diagnostics(
     *,
     uproject_path: str | None = None,
     engine_root: str | None = None,
+    uat_command: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """Extract bounded, factual diagnostics from a failed UAT/UBT log."""
     if not log_file:
@@ -455,6 +468,70 @@ def _build_failure_diagnostics(
         return {}
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    gradle_loopback_lines = [
+        line for line in lines if _GRADLE_LOOPBACK_FAILURE_PATTERN.search(line)
+    ]
+    if (
+        gradle_loopback_lines
+        and _GRADLE_PACKAGE_CONTEXT_PATTERN.search(text)
+    ):
+        command_args = [str(arg) for arg in (uat_command or ())]
+        iterative_cook = any(
+            arg.casefold() in {"-iterate", "-iterativecooking"}
+            for arg in command_args
+        ) or re.search(r"(?:^|\s)-(?:iterate|iterativecooking)(?:\s|$)", text, re.IGNORECASE) is not None
+        completed_phases = [
+            phase
+            for phase, marker in (
+                ("build", "BUILD COMMAND COMPLETED"),
+                ("cook", "COOK COMMAND COMPLETED"),
+                ("stage", "STAGE COMMAND COMPLETED"),
+            )
+            if marker in text
+        ]
+        reuse_successful_outputs = iterative_cook and "cook" in completed_phases
+        if reuse_successful_outputs:
+            retry_guidance = (
+                "Retry the same ue-cli build package command; its existing "
+                "--uat-arg=-iterate can reuse unchanged cooked outputs."
+            )
+        else:
+            retry_guidance = (
+                "Retry the same ue-cli build package command with "
+                "--uat-arg=-iterate to reuse unchanged cooked outputs when "
+                "the previous Cook completed."
+            )
+        result = {
+            "code": "BUILD_GRADLE_LOOPBACK_FAILED",
+            "failure_kind": "gradle_loopback_connection",
+            "failure_scope": "local_environment",
+            "phase": "package",
+            "external_tool": "Gradle",
+            "transient": True,
+            "retry_safe": True,
+            "retry_uses_iterative_cook": iterative_cook,
+            "reuse_successful_outputs": reuse_successful_outputs,
+            "completed_phases": completed_phases,
+            "error": (
+                "Gradle could not establish its local loopback connection "
+                "while assembling the Android package."
+            ),
+            "diagnostic": gradle_loopback_lines[-1],
+            "suggestion": (
+                retry_guidance
+                + " If the loopback error repeats, stop stale Gradle daemons "
+                "and inspect local firewall, antivirus, proxy, and loopback "
+                "policy before retrying."
+            ),
+        }
+        gradle_tasks = [
+            match.group("task")
+            for match in _GRADLE_TASK_PATTERN.finditer(text)
+        ]
+        if gradle_tasks:
+            result["gradle_task"] = gradle_tasks[-1]
+        return result
+
     conflict_result_lines = [
         line for line in lines if _UBT_CONFLICTING_INSTANCE_PATTERN.search(line)
     ]
@@ -666,6 +743,7 @@ def _normalize_result(
             result.get("log_file"),
             uproject_path=uproject_path,
             engine_root=engine_root,
+            uat_command=result.get("command"),
         ))
     return out
 
