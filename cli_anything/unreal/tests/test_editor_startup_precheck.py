@@ -3729,15 +3729,15 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
              "deployed": True, "action": "already_up_to_date", "version": "1.13"
          }), \
          patch("cli_anything.unreal.utils.ue_backend._ensure_plugin_enabled", return_value=True), \
-             patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
-                 "ready": True,
-                 "reason": "ok",
-                 "message": "Bridge plugin binary is ready.",
-             }), \
-             patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin", return_value={"status": "ok"}) as mock_compile, \
-             patch("cli_anything.unreal.core.tasks._capture_windows_process_identity", return_value=None), \
-             patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc) as mock_popen, \
-             patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", side_effect=[
+         patch("cli_anything.unreal.core.plugin_bridge.get_plugin_binary_status", return_value={
+             "ready": True,
+             "reason": "ok",
+             "message": "Bridge plugin binary is ready.",
+         }), \
+         patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin", return_value={"status": "ok"}) as mock_compile, \
+         patch("cli_anything.unreal.core.tasks._capture_windows_process_identity", return_value=None), \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", side_effect=[
              {"status": "error_dialog", "error": "Plugin 'CliAnythingBridge' failed to load because module 'CliAnythingBridge' could not be found."},
              {"status": "online"},
          ]):
@@ -4587,12 +4587,12 @@ def test_run_editor_launch_task_fails_on_compile_error(tmp_path):
              "reason": "ok",
              "message": "Bridge plugin binary is ready.",
          }), \
-             patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin", return_value={
-                 "status": "error", "error": "Build failed", "returncode": 1
-             }) as mock_compile, \
-             patch("cli_anything.unreal.core.tasks._capture_windows_process_identity", return_value=None), \
-             patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc) as mock_popen, \
-             patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={
+         patch("cli_anything.unreal.core.plugin_bridge.compile_bridge_plugin", return_value={
+             "status": "error", "error": "Build failed", "returncode": 1
+         }) as mock_compile, \
+         patch("cli_anything.unreal.core.tasks._capture_windows_process_identity", return_value=None), \
+         patch("cli_anything.unreal.core.tasks.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+         patch("cli_anything.unreal.core.editor_lifecycle._wait_for_api", return_value={
              "status": "error_dialog", "error": "Plugin 'CliAnythingBridge' failed to load because module 'CliAnythingBridge' could not be found."
          }) as mock_wait:
         result = _run_editor_launch_task(task, estimated_total_seconds=120)
