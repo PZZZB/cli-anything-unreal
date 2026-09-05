@@ -595,6 +595,36 @@ def _cli_python_name_key(_name):
     return "".join(_ch for _ch in str(_name).lower() if _ch.isalnum())
 
 
+def _cli_python_native_class_name(_target):
+    if _target is None:
+        return None
+    try:
+        _static_class = getattr(_target, "static_class", None)
+        if not callable(_static_class):
+            return None
+        _native_class = _static_class()
+        _get_name = getattr(_native_class, "get_name", None)
+        if not callable(_get_name):
+            return None
+        return str(_get_name() or "") or None
+    except Exception:
+        return None
+
+
+def _cli_python_alias_for_native(_native_name):
+    _candidates = []
+    if _native_name.startswith("Kismet") and len(_native_name) > len("Kismet"):
+        _candidates.append(_native_name[len("Kismet"):])
+    for _alias in _candidates:
+        try:
+            _target = getattr(_cli_unreal, _alias, None)
+        except Exception:
+            continue
+        if _cli_python_native_class_name(_target) == _native_name:
+            return _target, _alias
+    return None, None
+
+
 def _cli_python_callable_bindings(_target):
     try:
         _names = dir(_target)
@@ -871,19 +901,28 @@ for _part in _parts[1:]:
     if _python_target is None:
         break
 
-result = _cli_discover_class(_class_name, _query={query!r}, _detail={detail!r}, _full_path=".".join(_parts))
+_python_alias = _parts[-1] if _python_target is not None else None
+_reflection_class = _cli_python_native_class_name(_python_target) or _class_name
+if _python_target is None and len(_parts) == 2:
+    _python_target, _python_alias = _cli_python_alias_for_native(_class_name)
+
+_python_path = "unreal." + _python_alias if _python_alias else ".".join(_parts)
+result = _cli_discover_class(_reflection_class, _query={query!r}, _detail={detail!r}, _full_path=_python_path)
 if "error" not in result:
     result = _cli_add_python_symbols(
-        result, _python_target, _class_name,
+        result, _python_target, _reflection_class,
         _query={query!r}, _detail={detail!r},
     )
     result = _cli_annotate_python_callability(
-        result, _python_target, _class_name, _full_path=".".join(_parts)
+        result, _python_target, _reflection_class, _full_path=_python_path
     )
     result["target_name"] = _class_name
     result["python_exposed"] = _python_target is not None
     if _python_target is not None:
-        result["full_path"] = ".".join(_parts)
+        result["full_path"] = _python_path
+        if _python_alias != _reflection_class:
+            result["python_alias"] = _python_alias
+            result["reflection_class"] = _reflection_class
     else:
         result.pop("full_path", None)
 '''

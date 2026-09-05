@@ -40,6 +40,10 @@ Workflow examples live in sibling workflow docs.
 ue-cli editor api-discover DirectionalLight
 ue-cli editor api-discover unreal.MaterialEditingLibrary -q connect
 
+# Native reflection name and UE Python alias both resolve:
+ue-cli editor api-discover KismetSystemLibrary -d GetConsoleVariableIntValue
+ue-cli editor api-discover SystemLibrary -d GetConsoleVariableIntValue
+
 # Asset path (/Game/...) - auto-detects class from the live asset:
 ue-cli editor api-discover /Game/Materials/M_Water
 
@@ -76,6 +80,8 @@ ue-cli api-discover DirectionalLight   # not top-level, needs 'editor' prefix
    ```
 
 **Data sources**: C++ reflection via `CliAnythingBridgeLibrary.get_class_info()` is primary. Targeted `-q`/`-d` queries also merge matching live Python wrapper symbols omitted by reflection; these results are marked `python_only` with `source: python_binding`.
+
+Standard `Kismet*` reflection classes and their shorter UE Python aliases resolve in either direction. Discovery returns the native class plus the callable alias path, such as `unreal.SystemLibrary.get_console_variable_int_value`.
 
 ## confirmation - Active Dialog Polling
 

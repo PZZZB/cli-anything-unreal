@@ -584,6 +584,77 @@ class TestScriptRunner:
             else:
                 sys.modules.pop("unreal", None)
 
+    def test_api_discover_resolves_kismet_python_alias_both_directions(self):
+        """Python aliases and their native Kismet names resolve to one class."""
+        from cli_anything.unreal.core.script_runner import api_discover
+
+        import sys
+        import types
+
+        class FakeNativeClass:
+            @staticmethod
+            def get_name():
+                return "KismetSystemLibrary"
+
+        class FakeSystemLibrary:
+            @staticmethod
+            def static_class():
+                return FakeNativeClass()
+
+            @staticmethod
+            def get_console_variable_int_value(name):
+                return 1
+
+        mock_api = MagicMock()
+        bridge_data = {
+            "KismetSystemLibrary": {
+                "class": "KismetSystemLibrary",
+                "properties": [],
+                "functions": [
+                    {
+                        "name": "GetConsoleVariableIntValue",
+                        "owner": "KismetSystemLibrary",
+                        "return_type": "int32",
+                        "params": [{"name": "VariableName", "type": "FString"}],
+                    }
+                ],
+            }
+        }
+        fake_unreal = types.ModuleType("unreal")
+        fake_unreal.log = lambda msg: None
+        fake_unreal.SystemLibrary = FakeSystemLibrary
+        fake_unreal.CliAnythingBridgeLibrary = self._make_fake_bridge(bridge_data)
+
+        old_unreal = sys.modules.get("unreal")
+        sys.modules["unreal"] = fake_unreal
+        try:
+            self._make_discover_mock(mock_api, fake_unreal)
+            for requested_name in ("SystemLibrary", "KismetSystemLibrary"):
+                result = api_discover(
+                    mock_api,
+                    requested_name,
+                    detail="GetConsoleVariableIntValue",
+                    timeout=5,
+                )
+
+                assert result["class"] == "KismetSystemLibrary"
+                assert result["target_name"] == requested_name
+                assert result["reflection_class"] == "KismetSystemLibrary"
+                assert result["python_alias"] == "SystemLibrary"
+                assert result["python_exposed"] is True
+                assert result["full_path"] == "unreal.SystemLibrary"
+                detail = result["items"][0]["detail"]
+                assert detail["python_callable"] is True
+                assert detail["python_name"] == "get_console_variable_int_value"
+                assert detail["python_path"] == (
+                    "unreal.SystemLibrary.get_console_variable_int_value"
+                )
+        finally:
+            if old_unreal is not None:
+                sys.modules["unreal"] = old_unreal
+            else:
+                sys.modules.pop("unreal", None)
+
     def test_api_discover_does_not_claim_unexposed_python_full_path(self):
         """Reflected UE classes are not always exported by the Python module."""
         from cli_anything.unreal.core.script_runner import api_discover
