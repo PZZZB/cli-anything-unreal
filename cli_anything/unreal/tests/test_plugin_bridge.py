@@ -687,7 +687,7 @@ class TestPluginBridge:
 
         version = get_bundled_version()
         assert version is not None
-        assert version == "1.37"
+        assert version == "1.38"
 
     def test_static_mesh_lod_property_reader_uses_native_vertex_paint_data(self):
         """Bridge exposes LOD fields omitted from Unreal reflection."""
@@ -821,6 +821,23 @@ class TestPluginBridge:
         assert 'TEXT("response-")' in module_cpp
         assert "FPlatformProcess::Sleep(0.05f)" in module_cpp
         assert '"Json"' in build_cs
+
+    def test_skip_restore_uses_native_package_recovery_policy_before_editor_init(self):
+        """Explicit skip uses UE recovery API, not window automation or unattended mode."""
+        from cli_anything.unreal.core.plugin_bridge import _BUNDLED_PLUGIN_DIR
+
+        module_cpp = (
+            _BUNDLED_PLUGIN_DIR
+            / "Source"
+            / "CliAnythingBridge"
+            / "Private"
+            / "CliAnythingBridgeModule.cpp"
+        ).read_text(encoding="utf-8")
+
+        assert 'TEXT("CliAnythingSkipRestorePackages")' in module_cpp
+        assert "DisableRestorePromptAndDeclinePackageRecovery" in module_cpp
+        assert "HandlePostEngineInit" in module_cpp
+        assert "OnPostEngineInit.AddStatic(&HandlePostEngineInit)" in module_cpp
 
     def test_disconnect_helpers_defer_post_edit_to_single_recompile(self):
         """Bridge mutation must not duplicate RecompileMaterial notifications."""

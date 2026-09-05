@@ -1855,6 +1855,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     payload = task["payload"]
     task_id = task["task_id"]
     no_remote = bool(payload.get("no_remote", False))
+    skip_restore = bool(payload.get("skip_restore", False))
     session = Session()
     session.load_project(payload["project_path"])
     state = SimpleNamespace(json_output=True, session=session)
@@ -1871,6 +1872,22 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
     ) or task
     if task.get("status") != "running":
         return task
+
+    if no_remote and skip_restore:
+        return transition_task(
+            task_id,
+            status="failed",
+            phase="blocked",
+            error={
+                "code": "EDITOR_SKIP_RESTORE_REQUIRES_BRIDGE",
+                "message": "--skip-restore requires controlled launch with CliAnythingBridge.",
+                "details": {
+                    "skip_restore": True,
+                    "no_remote": True,
+                    "editor_started": False,
+                },
+            },
+        ) or task
 
     blocker = _claim_editor_launch_task(task_id, state.session.project_path)
     if blocker is not None:
@@ -2027,6 +2044,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             payload.get("map_path"),
             payload.get("extra_args"),
             unattended=bool(payload.get("unattended", False)),
+            skip_restore=skip_restore,
         )
         log_file = _resolve_launch_log_file(
             state.session.project_dir,
@@ -2333,6 +2351,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         payload.get("map_path"),
         payload.get("extra_args"),
         unattended=bool(payload.get("unattended", False)),
+        skip_restore=skip_restore,
     )
     log_file = _resolve_launch_log_file(
         state.session.project_dir,
@@ -2362,6 +2381,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
         "port": state.session.port,
         "remote_control_port_config": remote_control_port_config,
         "delivery_state": "accepted",
+        "restore_packages_policy": "skip" if skip_restore else "prompt",
     }
     if compile_reason:
         task_result["compile_reason"] = compile_reason
@@ -2527,6 +2547,7 @@ def _run_editor_launch_task(task: dict, *, estimated_total_seconds: int) -> dict
             payload.get("map_path"),
             payload.get("extra_args"),
             unattended=bool(payload.get("unattended", False)),
+            skip_restore=skip_restore,
         )
         if _task_cancel_requested(task_id):
             return transition_task(

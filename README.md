@@ -83,6 +83,8 @@ Commit or back up the project before first launch if these project-file changes 
 ue-cli --output json --project "$Project" editor status <task_id>
 ```
 
+If crash recovery opens **Restore Packages**, normal launch stays `running` in `waiting_user_action` until you choose in Unreal. To explicitly discard that recovery opportunity for this launch, pass `editor launch --skip-restore`. CliAnythingBridge applies Unreal's native decline policy before the recovery prompt; it does not click UI, restore autosaves, or enable global unattended mode. The option requires controlled launch and cannot be combined with `--no-remote`.
+
 Or block until any asynchronous task finishes, with an optional caller-side timeout:
 
 ```powershell
@@ -121,7 +123,7 @@ ue-cli --output json --project "$Project" confirmation answer <id> --choice no
 ue-cli --output json --project "$Project" confirmation disable
 ```
 
-The Agent queries explicitly; no background listener is created. Editor-dependent commands return `EDITOR_BLOCKED_BY_CONFIRMATION` with a `next_command` when a standard brokered dialog is pending, including when the current request triggers it and otherwise would time out. `EDITOR_BLOCKED_BY_DIALOG` reports a detected startup/custom window that cannot be answered by CLI. Only `source=bridge`, `answerable=true` items accept `confirmation answer`. When discarding editor state is explicitly authorized, `editor close --force` can terminate verified processes matching the selected project even while such a non-brokered startup window is open; it never clicks the window. The bounded lease must exist before the dialog; expiry or `disable` returns unresolved standard dialogs to normal editor UI. Never auto-click **Restore Packages**.
+The Agent queries explicitly; no background listener is created. Editor-dependent commands return `EDITOR_BLOCKED_BY_CONFIRMATION` with a `next_command` when a standard brokered dialog is pending, including when the current request triggers it and otherwise would time out. `EDITOR_BLOCKED_BY_DIALOG` reports a detected startup/custom window that cannot be answered by CLI. Only `source=bridge`, `answerable=true` items accept `confirmation answer`. When discarding editor state is explicitly authorized, `editor close --force` can terminate verified processes matching the selected project even while such a non-brokered startup window is open; it never clicks the window. The bounded lease must exist before the dialog; expiry or `disable` returns unresolved standard dialogs to normal editor UI. Never auto-click **Restore Packages**; use explicit launch-time `--skip-restore` when discarding recovery is authorized.
 
 Controlled launch requires WebRemoteControl, which Unreal does not start under `-NullRHI`. `editor launch` rejects that extra argument before creating a task or starting UnrealEditor; explicit `--no-remote` direct launch allows it. When launch receives `--extra-arg=-abslog=PATH`, task status and startup diagnostics report and inspect that explicit log file.
 

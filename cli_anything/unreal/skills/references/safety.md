@@ -31,7 +31,7 @@ Any modal dialog can block Remote Control. For agent-owned interactive work, arm
 | `create_asset()` / `duplicate_asset()` target exists | Use overwrite workflow below |
 | Any `unreal.EditorDialog` call | Never use in headless scripts |
 
-When an editor command returns `EDITOR_BLOCKED_BY_CONFIRMATION`, run its `next_command`, inspect title/message/choices, and answer only an authorized `source=bridge`, `answerable=true` item. Do not blindly choose `yes` or repeat the triggering operation: side effects may have happened before the dialog. `EDITOR_BLOCKED_BY_DIALOG` means CLI answering is unavailable; inspect the existing editor window. If closing is the requested outcome and discarding state is explicitly authorized, `editor close --force` may terminate verified processes matching the selected project without answering the window. Never auto-click **Restore Packages**.
+When an editor command returns `EDITOR_BLOCKED_BY_CONFIRMATION`, run its `next_command`, inspect title/message/choices, and answer only an authorized `source=bridge`, `answerable=true` item. Do not blindly choose `yes` or repeat the triggering operation: side effects may have happened before the dialog. `EDITOR_BLOCKED_BY_DIALOG` means CLI answering is unavailable; inspect the existing editor window. If closing is the requested outcome and discarding state is explicitly authorized, `editor close --force` may terminate verified processes matching the selected project without answering the window. Never auto-click **Restore Packages**. When package recovery loss is explicitly authorized before launch, `editor launch --skip-restore` uses Unreal's native decline path without UI automation or global unattended mode.
 
 ## Asset Overwrite Avoidance
 

@@ -2017,8 +2017,21 @@ def _launch_editor_result(
     extra_args: list[str],
     unattended: bool,
     no_remote: bool,
+    skip_restore: bool = False,
 ) -> dict:
     """Submit an editor launch and return the same result used by the CLI."""
+    if skip_restore and no_remote:
+        raise AppError(
+            "EDITOR_SKIP_RESTORE_REQUIRES_BRIDGE",
+            "--skip-restore requires controlled launch with CliAnythingBridge.",
+            exit_code=2,
+            suggestion="Remove --no-remote, or handle Restore Packages in the editor UI.",
+            details={
+                "skip_restore": True,
+                "no_remote": True,
+                "editor_started": False,
+            },
+        )
     launch_error = None if no_remote else _remote_control_launch_error(extra_args)
     if launch_error:
         raise AppError(
@@ -2058,6 +2071,7 @@ def _launch_editor_result(
         "extra_args": extra_args,
         "unattended": unattended,
         "no_remote": no_remote,
+        "skip_restore": skip_restore,
     }
     try:
         task = submit_task("editor.launch", payload)
@@ -2136,6 +2150,12 @@ def _launch_editor_result(
     default=False,
     help="Start UnrealEditor without Remote Control or CliAnythingBridge preparation/verification.",
 )
+@click.option(
+    "--skip-restore",
+    is_flag=True,
+    default=False,
+    help="Explicitly decline Restore Packages during startup; recovered autosaves are not loaded.",
+)
 @handle_error
 @click.pass_obj
 def editor_launch(
@@ -2147,6 +2167,7 @@ def editor_launch(
     extra_args,
     unattended,
     no_remote,
+    skip_restore,
 ):
     """Launch the editor, controlled by default.
 
@@ -2168,6 +2189,7 @@ def editor_launch(
             extra_args=extra_args,
             unattended=unattended,
             no_remote=no_remote,
+            skip_restore=skip_restore,
         ),
         state,
     )

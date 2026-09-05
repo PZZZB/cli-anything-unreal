@@ -3,6 +3,7 @@
 #include "Containers/Array.h"
 #include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
+#include "Editor/UnrealEdEngine.h"
 #include "HAL/CriticalSection.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
@@ -10,14 +11,18 @@
 #include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
+#include "Misc/CommandLine.h"
 #include "Misc/OutputDevice.h"
 #include "Misc/OutputDeviceRedirector.h"
 #include "Misc/Paths.h"
+#include "Misc/Parse.h"
 #include "Modules/ModuleManager.h"
 #include "Runtime/Launch/Resources/Version.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "IPackageAutoSaver.h"
+#include "UnrealEdGlobals.h"
 
 // Global buffer for captured errors
 TArray<FString> GCapturedEngineErrors;
@@ -60,6 +65,7 @@ static FCliAnythingLogHook* GLogHook = nullptr;
 
 static bool GDialogHookInstalled = false;
 static FDelegateHandle GDialogHookHandle;
+static bool GSkipRestorePolicyApplied = false;
 
 #if CLI_ANYTHING_HAS_CATEGORIZED_MODAL_DIALOG
 static decltype(FCoreDelegates::ModalMessageDialog) GOriginalModalMessageDialog;
@@ -411,6 +417,26 @@ static void UninstallDialogHook()
 	GDialogHookHandle.Reset();
 }
 
+static void ApplyPackageRecoveryPolicy()
+{
+	if (GSkipRestorePolicyApplied
+		|| !FParse::Param(FCommandLine::Get(), TEXT("CliAnythingSkipRestorePackages"))
+		|| GUnrealEd == nullptr)
+	{
+		return;
+	}
+
+	GUnrealEd->GetPackageAutoSaver().DisableRestorePromptAndDeclinePackageRecovery();
+	GSkipRestorePolicyApplied = true;
+	UE_LOG(LogTemp, Display, TEXT("CliAnythingBridge: Restore Packages policy set to skip."));
+}
+
+static void HandlePostEngineInit()
+{
+	ApplyPackageRecoveryPolicy();
+	InstallDialogHook();
+}
+
 class FCliAnythingBridgeModule : public IModuleInterface
 {
 public:
@@ -427,7 +453,8 @@ public:
 #else
 		const bool bEditorDialogBound = FCoreDelegates::ModalErrorMessage.IsBound();
 #endif
-		PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddStatic(&InstallDialogHook);
+		PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddStatic(&HandlePostEngineInit);
+		ApplyPackageRecoveryPolicy();
 		if (bEditorDialogBound)
 		{
 			InstallDialogHook();

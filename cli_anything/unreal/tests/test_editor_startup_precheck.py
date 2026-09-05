@@ -2395,6 +2395,23 @@ def test_build_launch_cmd_with_unattended():
     assert cmd == ["UnrealEditor.exe", "MyProject.uproject", "-nosplash", "-unattended"]
 
 
+def test_build_launch_cmd_with_skip_restore():
+    from cli_anything.unreal.commands.editor import _build_launch_cmd
+
+    cmd = _build_launch_cmd(
+        "UnrealEditor.exe",
+        "MyProject.uproject",
+        None,
+        skip_restore=True,
+    )
+    assert cmd == [
+        "UnrealEditor.exe",
+        "MyProject.uproject",
+        "-nosplash",
+        "-CliAnythingSkipRestorePackages",
+    ]
+
+
 def test_build_launch_cmd_with_extra_args():
     from cli_anything.unreal.commands.editor import _build_launch_cmd
 
@@ -2562,6 +2579,49 @@ def test_editor_launch_unattended_propagates_to_payload(mini_project):
     assert result.exit_code == 0, result.output
     assert captured["command"] == "editor.launch"
     assert captured["payload"]["unattended"] is True
+
+
+def test_editor_launch_skip_restore_propagates_to_payload(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    captured = {}
+
+    def fake_submit_task(command, payload):
+        captured["command"] = command
+        captured["payload"] = payload
+        return {"task_id": "task-skip-restore", "status": "submitted"}
+
+    with patch("cli_anything.unreal.commands.editor.submit_task", side_effect=fake_submit_task), \
+         patch("cli_anything.unreal.commands.editor._check_already_running", return_value=None):
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--skip-restore",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["command"] == "editor.launch"
+    assert captured["payload"]["skip_restore"] is True
+    assert captured["payload"]["unattended"] is False
+
+
+def test_editor_launch_skip_restore_rejects_no_remote(mini_project):
+    from click.testing import CliRunner
+    from cli_anything.unreal.unreal_cli import cli
+
+    with patch("cli_anything.unreal.commands.editor.submit_task") as mock_submit, \
+         patch("cli_anything.unreal.commands.editor._check_already_running") as mock_running:
+        result = CliRunner().invoke(cli, [
+            "--output", "json", "--project", mini_project,
+            "editor", "launch", "--no-wait", "--skip-restore", "--no-remote",
+        ])
+
+    assert result.exit_code == 2
+    data = json.loads(result.output)
+    assert data["code"] == "EDITOR_SKIP_RESTORE_REQUIRES_BRIDGE"
+    assert data["details"]["editor_started"] is False
+    mock_submit.assert_not_called()
+    mock_running.assert_not_called()
 
 
 def test_editor_launch_reports_structured_worker_spawn_failure(mini_project):
@@ -2777,6 +2837,7 @@ def test_editor_launch_help_lists_command_level_project():
     assert "DefaultRemoteControl.ini" in result.output
     assert "--unattended / --no-unattended" in result.output
     assert "interactive editor" in result.output
+    assert "--skip-restore" in result.output
 
 
 def test_editor_enable_remote_help_discloses_project_file_changes():
@@ -3714,6 +3775,7 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
         "project_path": str(uproject),
         "port": 30010,
         "unattended": True,
+        "skip_restore": True,
     })
 
     with patch("cli_anything.unreal.utils.ue_backend.preflight_check", return_value={
@@ -3748,6 +3810,7 @@ def test_run_editor_launch_task_auto_compiles_on_plugin_load_failure(tmp_path):
     mock_proc.wait.assert_called_once_with(timeout=5)
     assert mock_popen.call_count == 2
     assert all("-unattended" in call.args[0] for call in mock_popen.call_args_list)
+    assert all("-CliAnythingSkipRestorePackages" in call.args[0] for call in mock_popen.call_args_list)
     assert result["status"] == "completed"
     assert result["result"].get("recompiled") is True
     assert result["result"]["startup_failure"]["plugin"] == "CliAnythingBridge"

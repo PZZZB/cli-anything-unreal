@@ -54,6 +54,7 @@ _PLUGIN_LOAD_MODULE_PATTERN = re.compile(
     r"\bmodule\s+['\"](?P<module>[^'\"]+)['\"]\s+could not be (?:found|loaded)\b",
     re.IGNORECASE,
 )
+_SKIP_RESTORE_PACKAGES_ARG = "-CliAnythingSkipRestorePackages"
 
 
 def _is_active_launch_task_for_project(
@@ -335,6 +336,7 @@ def _build_launch_cmd(
     extra_args=None,
     *,
     unattended: bool = False,
+    skip_restore: bool = False,
 ) -> list:
     cmd = [editor_exe, project_path]
     if map_path:
@@ -343,6 +345,8 @@ def _build_launch_cmd(
     cmd.append("-nosplash")
     if unattended:
         cmd.append("-unattended")
+    if skip_restore:
+        cmd.append(_SKIP_RESTORE_PACKAGES_ARG)
     if extra_args:
         cmd.extend(str(arg) for arg in extra_args if arg is not None and str(arg) != "")
     return cmd
