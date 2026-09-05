@@ -61,6 +61,13 @@ class TestProject:
         section = config["/Script/Engine.RendererSettings"]
         assert section["r.DefaultFeature.AutoExposure.Method"] == "2"
 
+    def test_get_config_accepts_standard_filename(self, temp_project):
+        from cli_anything.unreal.core.project import get_config
+
+        config = get_config(temp_project["dir"], "DefaultEngine.ini")
+
+        assert "/Script/Engine.RendererSettings" in config
+
     def test_get_config_not_found(self, temp_project):
         from cli_anything.unreal.core.project import get_config
 
@@ -108,6 +115,67 @@ class TestProject:
         config = get_config(temp_project["dir"], "DefaultEngine")
         assert "/Script/NewPlugin.Settings" in config
         assert config["/Script/NewPlugin.Settings"]["bEnabled"] == "True"
+
+    @pytest.mark.parametrize(
+        "config_name",
+        ["Engine", "DefaultEngine", "Engine.ini", "DefaultEngine.ini"],
+    )
+    def test_set_config_normalizes_supported_name_forms(self, temp_project, config_name):
+        from cli_anything.unreal.core.project import set_config
+
+        result = set_config(
+            temp_project["dir"],
+            config_name,
+            "/Script/AndroidRuntimeSettings.AndroidRuntimeSettings",
+            "bSupportsVulkanSM5",
+            "True",
+        )
+
+        assert Path(result["file"]).name == "DefaultEngine.ini"
+        assert not (Path(temp_project["dir"]) / "Config" / "DefaultDefaultEngine.ini.ini").exists()
+
+    def test_config_set_cli_normalizes_standard_filename(self, temp_project):
+        from click.testing import CliRunner
+        from cli_anything.unreal.unreal_cli import cli
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "--output",
+                "json",
+                "--project",
+                temp_project["uproject"],
+                "project",
+                "config",
+                "set",
+                "DefaultEngine.ini",
+                "/Script/AndroidRuntimeSettings.AndroidRuntimeSettings",
+                "bSupportsVulkanSM5",
+                "True",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert Path(payload["result"]["file"]).name == "DefaultEngine.ini"
+        assert not (Path(temp_project["dir"]) / "Config" / "DefaultDefaultEngine.ini.ini").exists()
+
+    @pytest.mark.parametrize("config_name", ["../Engine", "Engine.txt", "DefaultEngine.ini.ini"])
+    def test_set_config_rejects_invalid_name(self, temp_project, config_name):
+        from cli_anything.unreal.core.project import set_config
+        from cli_anything.unreal.errors import UeCliError
+
+        with pytest.raises(UeCliError) as exc_info:
+            set_config(
+                temp_project["dir"],
+                config_name,
+                "/Script/Test.Settings",
+                "Enabled",
+                "True",
+            )
+
+        assert exc_info.value.code == "INVALID_CONFIG_NAME"
+        assert exc_info.value.exit_code == 2
 
     def test_list_content(self, temp_project):
         from cli_anything.unreal.core.project import list_content

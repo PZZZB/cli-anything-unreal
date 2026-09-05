@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from cli_anything.unreal.errors import UeCliError
+
 
 def parse_uproject(uproject_path: str) -> dict:
     """Parse a .uproject file and return its contents.
@@ -130,21 +132,55 @@ def list_configs(project_dir: str) -> list[dict]:
     return configs
 
 
+def _config_path_candidates(project_dir: str, config_name: str) -> tuple[Path, ...]:
+    """Return safe project Config paths for a supported config-name form."""
+    name = str(config_name).strip()
+    invalid = (
+        not name
+        or any(char in name for char in '<>:"/\\|?*')
+        or name in {".", ".."}
+    )
+    if name.lower().endswith(".ini"):
+        name = name[:-4]
+        invalid = invalid or not name or name.lower().endswith(".ini")
+    elif Path(name).suffix:
+        invalid = True
+
+    if invalid:
+        raise UeCliError(
+            "INVALID_CONFIG_NAME",
+            f"Unsupported config name: {config_name}",
+            exit_code=2,
+            suggestion=(
+                "Pass a bare category such as Engine, a config stem such as "
+                "DefaultEngine, or a standard filename such as DefaultEngine.ini."
+            ),
+            details={"config_name": str(config_name)},
+        )
+
+    config_dir = Path(project_dir) / "Config"
+    direct = config_dir / f"{name}.ini"
+    if name.startswith("Default"):
+        return (direct,)
+    return (direct, config_dir / f"Default{name}.ini")
+
+
 def get_config(project_dir: str, config_name: str) -> dict:
     """Read a specific ini configuration file.
 
     Args:
         project_dir: Path to the project root.
-        config_name: Config name without extension (e.g., "DefaultEngine").
+        config_name: Config category, stem, or filename (e.g., "Engine",
+            "DefaultEngine", or "DefaultEngine.ini").
 
     Returns:
         Dict of {section: {key: value, ...}, ...}.
     """
-    config_path = Path(project_dir) / "Config" / f"{config_name}.ini"
-    if not config_path.exists():
-        # Try with "Default" prefix
-        config_path = Path(project_dir) / "Config" / f"Default{config_name}.ini"
-    if not config_path.exists():
+    config_path = next(
+        (path for path in _config_path_candidates(project_dir, config_name) if path.exists()),
+        None,
+    )
+    if config_path is None:
         raise FileNotFoundError(f"Config not found: {config_name}")
 
     # UE ini files can have duplicate keys and special syntax
@@ -199,7 +235,8 @@ def set_config(
 
     Args:
         project_dir: Path to project root.
-        config_name: Config name (e.g., "DefaultEngine").
+        config_name: Config category, stem, or filename (e.g., "Engine",
+            "DefaultEngine", or "DefaultEngine.ini").
         section: INI section name.
         key: Configuration key.
         value: New value.
@@ -207,9 +244,8 @@ def set_config(
     Returns:
         {"status": "ok", "file": str, "section": str, "key": str, "value": str}
     """
-    config_path = Path(project_dir) / "Config" / f"{config_name}.ini"
-    if not config_path.exists():
-        config_path = Path(project_dir) / "Config" / f"Default{config_name}.ini"
+    candidates = _config_path_candidates(project_dir, config_name)
+    config_path = next((path for path in candidates if path.exists()), candidates[-1])
 
     lines = []
     if config_path.exists():

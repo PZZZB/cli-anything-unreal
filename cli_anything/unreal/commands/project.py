@@ -46,6 +46,7 @@ def config_list(state: AppState):
 @handle_error
 @click.pass_obj
 def config_get(state: AppState, config_name, section):
+    """Read CONFIG_NAME (for example Engine or DefaultEngine.ini)."""
     from cli_anything.unreal.core.project import get_config
 
     require_project(state)
@@ -63,6 +64,7 @@ def config_get(state: AppState, config_name, section):
 @handle_error
 @click.pass_obj
 def config_set(state: AppState, config_name, section, key, value):
+    """Set a value in CONFIG_NAME (for example Engine or DefaultEngine.ini)."""
     from cli_anything.unreal.core.project import set_config
 
     require_project(state)

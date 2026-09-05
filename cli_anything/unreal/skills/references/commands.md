@@ -106,6 +106,8 @@ Editor-dependent commands detect an active brokered dialog before dispatch and r
 | `project config set CONFIG_NAME SECTION KEY VALUE` | Set config value |
 | `project generate` | Generate Visual Studio project files |
 
+`CONFIG_NAME` accepts a bare category (`Engine`), a config stem (`DefaultEngine`), or a standard filename (`DefaultEngine.ini`). These forms resolve to the same project config when it exists. Paths and non-`.ini` extensions are rejected.
+
 ## asset - Asset Operations
 
 All asset commands require editor.

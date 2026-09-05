@@ -205,6 +205,7 @@ ue-cli --help
 ue-cli --list-commands
 ue-cli --output json --project "$Project" editor status
 ue-cli --output json --project "$Project" editor api-discover MaterialEditingLibrary -q connect
+ue-cli --output json --project "$Project" project config set DefaultEngine.ini /Script/Engine.RendererSettings r.DefaultFeature.MotionBlur False
 ue-cli --output json --project "$Project" material analyze /Game/MyMaterial
 ue-cli --output json --project "$Project" material get-param /Game/MyMaterialInstance --name Roughness
 ue-cli --output json --project "$Project" material shader-source /Game/MyMaterial
@@ -218,6 +219,7 @@ ue-cli --output json --project "$Project" editor live-coding-compile --timeout 6
 ```
 
 Use Unreal virtual paths such as `/Game/MyMaterial` for assets, not filesystem paths to `.uasset` files.
+For `project config get` and `project config set`, `CONFIG_NAME` accepts a bare category such as `Engine`, a config stem such as `DefaultEngine`, or a standard filename such as `DefaultEngine.ini`. These forms resolve to the same project config when it exists; paths and non-`.ini` extensions are rejected.
 `asset duplicate` saves the duplicated package before reporting success, including World assets stored as `.umap`. A duplicate that cannot be saved returns nonzero `ASSET_DUPLICATE_FAILED` with `saved=false` instead of reporting a transient in-memory success.
 `asset rename` waits up to 120 seconds by default for reference-heavy moves; override this with `--timeout <seconds>`. If the HTTP response times out, ue-cli safely checks source and destination existence. A conclusive moved state returns confirmed success. An inconclusive check returns nonzero `ASSET_RENAME_TIMEOUT`, `completion_state=unknown`, `retry_safe=false`, plus source/destination verification commands; do not retry until those checks prove the source still exists and destination does not.
 `editor api-discover` cross-checks reflected functions against the live UE Python wrapper. It resolves standard `Kismet*` reflection names through their shorter Python aliases in both directions (for example, `KismetSystemLibrary` and `SystemLibrary` use `unreal.SystemLibrary`). Detailed function items report `python_callable`, plus `python_name` and `python_path` when a matching binding exists. Filtered summaries list reflection-only entries in `python_unavailable_functions`; class-level `python_exposed` does not imply every reflected function is callable.
