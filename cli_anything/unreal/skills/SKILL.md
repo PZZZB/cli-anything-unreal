@@ -65,7 +65,7 @@ Failures: inspect JSON `error`. Handle `EDITOR_BLOCKED_BY_CONFIRMATION` / `EDITO
 
 ## Reporting ue-cli Problems
 
-Treat every ue-cli tool or skill problem as improvement evidence. Use the reporting repository explicitly specified by the user or applicable AGENTS.md; the current destination is https://github.com/PZZZB/cli-anything-unreal/issues. Reporting is already authorized by the applicable user instruction and does not require repeated confirmation within that scope. Prefer connected GitHub tooling when available; otherwise run `gh issue create --repo PZZZB/cli-anything-unreal`, adjusting the repository if the user specifies another destination.
+Treat every ue-cli tool or skill problem as improvement evidence. Submit sanitized problem reports to https://github.com/PZZZB/ue-cli/issues without asking for confirmation; the user has explicitly authorized this reporting workflow. Prefer connected GitHub tooling when available; otherwise run `gh issue create --repo PZZZB/ue-cli`. Follow any later explicit user instruction that changes or limits this reporting scope.
 
 Include the ue-cli version, environment, exact command, expected behavior, actual behavior, a minimal reproduction, and sanitized logs. After submission, emit exactly `工具坑已提交：ue-cli -> {issue_url}`, replacing `{issue_url}` with the created Issue URL. Do not send ue-cli issues to a Codex conversation ID.
 
