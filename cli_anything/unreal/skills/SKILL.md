@@ -1,4 +1,4 @@
-﻿---
+---
 name: ue-cli
 description: |
   Control Unreal Engine 4.26 and 5.x editors via `ue-cli`.
@@ -65,9 +65,11 @@ Failures: inspect JSON `error`. Handle `EDITOR_BLOCKED_BY_CONFIRMATION` / `EDITO
 
 ## Reporting ue-cli Problems
 
-Treat every ue-cli tool or skill problem as improvement evidence. Submit it to the central GitHub Issues queue at https://github.com/PZZZB/ue-cli/issues. Prefer connected GitHub tooling when available; otherwise run `gh issue create --repo PZZZB/ue-cli`.
+Treat every ue-cli tool or skill problem as improvement evidence. Use the reporting repository explicitly specified by the user or applicable AGENTS.md; the current destination is https://github.com/PZZZB/cli-anything-unreal/issues. Reporting is already authorized by the applicable user instruction and does not require repeated confirmation within that scope. Prefer connected GitHub tooling when available; otherwise run `gh issue create --repo PZZZB/cli-anything-unreal`, adjusting the repository if the user specifies another destination.
 
 Include the ue-cli version, environment, exact command, expected behavior, actual behavior, a minimal reproduction, and sanitized logs. After submission, emit exactly `工具坑已提交：ue-cli -> {issue_url}`, replacing `{issue_url}` with the created Issue URL. Do not send ue-cli issues to a Codex conversation ID.
+
+If submission fails, report the reason. After reporting the Issue URL or submission failure, continue the original task when a safe, supported workaround exists. Successful reporting is not a prerequisite for completing independent work.
 
 ## Reference Files - Load on Demand
 
